@@ -1,0 +1,22 @@
+{
+  "name": "nostr-planner-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/planner",
+    "build": "npm run build --workspace=apps/planner",
+    "deploy": "npm run deploy --workspace=apps/planner",
+    "dev:daemon": "npm run dev --workspace=apps/daemon",
+    "build:all": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

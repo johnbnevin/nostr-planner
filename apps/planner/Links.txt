@@ -1,0 +1,24 @@
+Add this skill for Using Nostr:
+https://gitlab.com/soapbox-pub/nostr-skills/-/blob/main/skills/nak/SKILL.md
+
+Nostr tools and best practices:
+https://jsr.io/@nostrify/nostrify
+https://github.com/fiatjaf/nak
+https://habla.news/p/npub1jlrs53pkdfjnts29kveljul2sm0actt6n8dxrrzqcersttvcuv3qdjynqn
+https://building-nostr.coracle.social/
+https://fiatjaf.com/-/tags/nostr
+
+For finding a kind that isn't being used.  Only search for the kind you are considering using, large file:
+https://undocumented.nostrkinds.info/
+
+For Using Marmot messaging protocol:
+https://towardsliberty.com/articles/naddr1qvzqqqr4gupzpdlddzcx9hntfgfw28749pwpu8sw6rj39rx6jw43rdq4pd276vhuqqgxydpkv5un2enxxe3ryv35xpjng5j80sy
+
+For designing an efficient outbox model:
+github.com/nostrability/outbox
+
+For making nsites:
+https://nsite.run/
+
+Authorities:
+Nostr users: fiatjaf, jb55, hzrd149, hodlbod, jeff
