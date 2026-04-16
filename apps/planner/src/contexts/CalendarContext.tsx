@@ -73,6 +73,7 @@ import type { NostrSigner } from "../lib/signer";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
 import { cacheCalendarData, loadCachedCalendarData } from "../lib/eventCache";
+import { loadMaterializedFromBlossom } from "../lib/backup";
 
 const log = logger("calendar");
 
@@ -617,17 +618,21 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       persistDeletion(event.dTag);
       setEvents((prev) => prev.filter((e) => e.dTag !== event.dTag));
 
-      // Encrypted events are published as kind 30078 (KIND_APP_DATA) regardless
-      // of their original NIP-52 kind. The deletion a-tag must reference the
-      // *published* kind so relays can match and delete the correct event.
-      const isEncrypted = shouldEncrypt(event.calendarRefs) || !!getSharedKeyForCalendars(event.calendarRefs);
-      const publishedKind = isEncrypted ? KIND_APP_DATA : event.kind;
+      const sharedKey = getSharedKeyForCalendars(event.calendarRefs);
+      const isPrivate = !sharedKey && shouldEncrypt(event.calendarRefs);
+      // Private events only ever lived in the Blossom blob; removing them from
+      // in-memory state + letting auto-backup snapshot the new state is all
+      // that's needed. No kind-5 deletion event to publish to relays.
+      if (isPrivate) return;
+
+      // Encrypted (shared) events are published as kind 30078 (KIND_APP_DATA)
+      // regardless of their original NIP-52 kind. The deletion a-tag must
+      // reference the *published* kind so relays can match and delete it.
+      const publishedKind = sharedKey ? KIND_APP_DATA : event.kind;
       const tags: string[][] = [
         ["a", `${publishedKind}:${event.pubkey}:${event.dTag}`],
         ["reason", "user-deleted"],
       ];
-      // If the published kind differs from the original, also delete the original
-      // coordinate to cover any pre-migration plaintext copies on relays.
       if (publishedKind !== event.kind) {
         tags.push(["a", `${event.kind}:${event.pubkey}:${event.dTag}`]);
       }
@@ -657,17 +662,23 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
         )
       );
 
+      const sharedKeyInfo = getSharedKeyForCalendars(event.calendarRefs);
+      const isPrivate = !sharedKeyInfo && shouldEncrypt(event.calendarRefs);
+      // Private events live only in the Blossom blob. The setEvents call
+      // above flips the in-memory state; auto-backup snapshots the new
+      // coordinates on its debounce. No relay publish needed.
+      if (isPrivate) return;
+
       const content = event.content;
       const movedEvent = { ...event, start: newStart, end: newEnd };
       const tags = buildEventTags(movedEvent);
 
-      const sharedKeyInfo = getSharedKeyForCalendars(event.calendarRefs);
       await signAndPublish(
         pubkey!,
         event.kind,
         tags,
         content,
-        !sharedKeyInfo && shouldEncrypt(event.calendarRefs),
+        false,
         signEvent,
         publishEvent,
         signer,
@@ -1158,23 +1169,40 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     await doRefresh();
   }, [doRefresh]);
 
-  // On login: load IndexedDB cache for instant UI, then do a full relay refresh.
+  // On login: try IndexedDB cache first (warm return), fall through to the
+  // Blossom materialized snapshot (fast cold start — one HTTP GET + one
+  // NIP-44 signer call regardless of event count), then the relay refresh.
   useEffect(() => {
     if (!pubkey) return;
     lastFetchRef.current = 0;
 
-    // Load cached data first for instant display
-    loadCachedCalendarData(pubkey).then((cached) => {
-      if (cached && cached.events.length > 0) {
-        setEvents(cached.events);
-        setCalendars(cached.calendars);
-        setActiveCalendarIds(new Set(cached.calendars.map((c) => c.dTag)));
-        setEventsLoading(false);
-        log.debug("showing cached data while relay sync runs");
+    const applySnapshot = (events: CalendarEvent[], calendars: CalendarCollection[], source: string) => {
+      setEvents(events);
+      setCalendars(calendars);
+      setActiveCalendarIds(new Set(calendars.map((c) => c.dTag)));
+      setEventsLoading(false);
+      log.debug(`showing ${source} snapshot while relay sync runs`);
+    };
+
+    (async () => {
+      try {
+        const cached = await loadCachedCalendarData(pubkey);
+        if (cached && cached.events.length > 0) {
+          applySnapshot(cached.events, cached.calendars, "IndexedDB cache");
+          return;
+        }
+      } catch { /* cache miss is fine */ }
+
+      if (!signer?.nip44) return;
+      try {
+        const materialized = await loadMaterializedFromBlossom(pubkey, relays, signer.nip44);
+        if (materialized && materialized.events.length > 0) {
+          applySnapshot(materialized.events, materialized.calendars, "Blossom");
+        }
+      } catch (err) {
+        log.debug("Blossom cold-start load failed (non-fatal):", err);
       }
-    }).catch(() => {
-      // Cache miss is fine
-    });
+    })();
 
     // Safety net: clear the loading indicator after 60s even if relay sync
     // hasn't finished. Prevents "Loading events…" from staying forever when

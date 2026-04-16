@@ -37,6 +37,7 @@ interface HeaderProps {
   pubkey: string;
   profile: NostrProfile | null;
   backingUp: boolean;
+  onBackupNow: () => Promise<void>;
   onLogout: () => void;
   onNewEvent: () => void;
   onBackup: () => void;
@@ -73,6 +74,7 @@ export function Header({
   pubkey,
   profile,
   backingUp,
+  onBackupNow,
   onLogout,
   onNewEvent,
   onBackup,
@@ -164,7 +166,7 @@ export function Header({
             <CalendarDays className="w-6 h-6 text-primary-600 shrink-0" />
             <h1 className="text-xl font-bold text-primary-700 shrink-0">
               Planner
-              <span className="text-xs font-normal text-gray-400 ml-1">v0.1.0-beta</span>
+              <span className="text-xs font-normal text-gray-400 ml-1">v1.8.0b</span>
             </h1>
           </div>
 
@@ -268,7 +270,11 @@ export function Header({
             </button>
 
             <button
-              onClick={() => setAutoBackup(!autoBackup)}
+              onClick={() => {
+                const next = !autoBackup;
+                setAutoBackup(next);
+                if (next) onBackupNow();
+              }}
               className={`p-1.5 rounded-lg transition-colors ${
                 autoBackup
                   ? "bg-emerald-50 hover:bg-emerald-100"
@@ -337,7 +343,7 @@ export function Header({
             <CalendarDays className="w-5 h-5 text-primary-600 shrink-0" />
             <h1 className="text-base font-bold text-primary-700">
               Planner
-              <span className="text-[10px] font-normal text-gray-400 ml-1">v0.1.0-beta</span>
+              <span className="text-[10px] font-normal text-gray-400 ml-1">v1.8.0b</span>
             </h1>
           </div>
           <div className="flex items-center gap-0.5">
@@ -363,7 +369,11 @@ export function Header({
               <Archive className="w-4 h-4 text-gray-500" />
             </button>
             <button
-              onClick={() => setAutoBackup(!autoBackup)}
+              onClick={() => {
+                const next = !autoBackup;
+                setAutoBackup(next);
+                if (next) onBackupNow();
+              }}
               className={`p-1.5 rounded-lg transition-colors ${
                 autoBackup
                   ? "bg-emerald-50 hover:bg-emerald-100"

@@ -59,7 +59,7 @@ export function CalendarApp() {
   const { refreshTasks } = useTasks();
   const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, restoreSettings } = useSettings();
   const { alerts, dismiss } = useNotifications();
-  const { backingUp } = useAutoBackup();
+  const { backingUp, backupNow } = useAutoBackup();
   useDigest();
   // Guards to prevent re-running one-shot effects across re-renders
   const autoRestoreAttempted = useRef(false);
@@ -344,6 +344,7 @@ export function CalendarApp() {
         pubkey={pubkey!}
         profile={profile}
         backingUp={backingUp}
+        onBackupNow={backupNow}
         onLogout={logout}
         onNewEvent={() => handleNewEvent()}
         onBackup={() => setShowBackup(true)}

@@ -25,7 +25,7 @@ const log = logger("auto-backup");
 
 const DEBOUNCE_MS = 5_000; // 5s after last change
 const LAST_BACKUP_KEY = "nostr-planner-last-autobackup";
-export function useAutoBackup(): { backingUp: boolean } {
+export function useAutoBackup(): { backingUp: boolean; backupNow: () => Promise<void> } {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
   const { events, calendars, eventsLoading } = useCalendar();
   const { habits, completions, lists, loading: tasksLoading } = useTasks();
@@ -76,13 +76,19 @@ export function useAutoBackup(): { backingUp: boolean } {
     return `${hash}|${calHash}|${habitHash}|${completionKeys}:${completionCount}|${listHash}|${settingsPart}`;
   }, [events, calendars, habits, completions, lists, settings]);
 
+  // Keep a ref to the latest decrypted calendar state so doBackup always
+  // snapshots what the user is looking at right now — the materialized
+  // payload is what makes cold-start Blossom loads instant.
+  const materializedRef = useRef<{ events: typeof events; calendars: typeof calendars }>({ events, calendars });
+  materializedRef.current = { events, calendars };
+
   const doBackup = useCallback(async () => {
     const { pubkey: pk, relays: r, signEvent: se, publishEvent: pe, getSettings: gs, signer: s } = argsRef.current;
     if (backingUpRef.current || !pk) return;
     backingUpRef.current = true;
     setBackingUp(true);
     try {
-      await performFullBackup(pk, r, gs(), se, pe, s?.nip44);
+      await performFullBackup(pk, r, gs(), se, pe, s?.nip44, materializedRef.current);
       // Only clear the dirty flag and record the timestamp on success.
       // On failure, dirtyRef stays true so a retry fires if data changes again.
       dirtyRef.current = false;
@@ -135,7 +141,7 @@ export function useAutoBackup(): { backingUp: boolean } {
     return () => window.removeEventListener("beforeunload", handleUnload);
   }, [doBackup]);
 
-  return { backingUp };
+  return { backingUp, backupNow: doBackup };
 }
 
 export function getLastAutoBackupTime(): string | null {

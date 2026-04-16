@@ -1,5 +1,5 @@
 import { useState, useRef } from "react";
-import { X, Download, Check, AlertCircle, HardDrive, Upload, Lock, Cloud, Calendar, List, Layers, ChevronLeft } from "lucide-react";
+import { X, Download, Check, AlertCircle, HardDrive, Upload, Lock, Cloud, Calendar, List, Layers, ChevronLeft, Trash2 } from "lucide-react";
 import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useTasks } from "../contexts/TasksContext";
@@ -11,16 +11,36 @@ import {
   summarizeCounts,
   findBackupRefs,
   downloadBackup,
+  clearBackupRef,
+  encryptBackupEnvelope,
+  decryptBackupEnvelope,
 } from "../lib/backup";
-import type { RawEvent, BackupEntry } from "../lib/backup";
+import type { RawEvent, BackupEntry, BackupEnvelopeV3 } from "../lib/backup";
 import { npubEncode } from "nostr-tools/nip19";
 
-interface EncryptedBackupFile {
+/**
+ * Current encrypted-backup-file format (version 3). Wraps a
+ * {@link BackupEnvelopeV3} (AES-256-GCM + NIP-44 hybrid) plus an npub binding
+ * so a user can tell a downloaded file is theirs before attempting decrypt.
+ */
+interface EncryptedBackupFileV3 {
+  planner: true;
+  version: 3;
+  npub: string;
+  envelope: BackupEnvelopeV3;
+}
+
+/**
+ * Legacy encrypted-backup-file format (version 2). Direct NIP-44 encrypt of
+ * the whole backup JSON — broke silently for backups over ~60KB. Read-only
+ * support retained so old files can still be restored.
+ */
+interface EncryptedBackupFileV2 {
   planner: true;
   version: 2;
   npub: string;
   encrypted: true;
-  data: string; // NIP-44 encrypted JSON
+  data: string;
 }
 
 interface PlaintextBackupFile {
@@ -29,7 +49,7 @@ interface PlaintextBackupFile {
   preferences?: Record<string, unknown>;
 }
 
-type BackupFile = EncryptedBackupFile | PlaintextBackupFile;
+type BackupFile = EncryptedBackupFileV3 | EncryptedBackupFileV2 | PlaintextBackupFile;
 
 interface BackupPanelProps {
   onClose: () => void;
@@ -79,15 +99,14 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
 
       setStatus(`Found ${result.counts.total} items. Encrypting...`);
 
-      const encrypted = await signer!.nip44.encrypt(pubkey, result.json);
+      const envelope = await encryptBackupEnvelope(result.json, signer!.nip44, pubkey);
       const npub = npubEncode(pubkey);
 
-      const fileData: EncryptedBackupFile = {
+      const fileData: EncryptedBackupFileV3 = {
         planner: true,
-        version: 2,
+        version: 3,
         npub,
-        encrypted: true,
-        data: encrypted,
+        envelope,
       };
 
       const blob = new Blob([JSON.stringify(fileData, null, 2)], { type: "application/json" });
@@ -142,8 +161,12 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
       let rawEvents: RawEvent[];
       let preferences: Record<string, unknown> | undefined;
 
-      // Encrypted v2 format
-      if ("encrypted" in parsed && parsed.encrypted && parsed.version === 2) {
+      const isV3 = (p: BackupFile): p is EncryptedBackupFileV3 =>
+        "envelope" in p && p.version === 3;
+      const isV2 = (p: BackupFile): p is EncryptedBackupFileV2 =>
+        "encrypted" in p && p.encrypted === true && p.version === 2;
+
+      if (isV3(parsed) || isV2(parsed)) {
         if (!nip44) {
           setError("NIP-44 encryption is required to decrypt this backup. Please use a Nostr extension that supports NIP-44.");
           setWorking(false);
@@ -162,7 +185,9 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
         }
 
         setStatus("Decrypting backup...");
-        const decrypted = await signer!.nip44.decrypt(pubkey, parsed.data);
+        const decrypted = isV3(parsed)
+          ? await decryptBackupEnvelope(parsed.envelope as unknown as Record<string, unknown>, signer!.nip44, pubkey)
+          : await signer!.nip44.decrypt(pubkey, parsed.data);
         const inner = JSON.parse(decrypted);
 
         if (!inner.events || !Array.isArray(inner.events)) {
@@ -272,6 +297,32 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
     }
   };
 
+  const handleResetBackups = async () => {
+    if (!pubkey) return;
+    const confirmed = window.confirm(
+      "Forget your cloud backups and start over?\n\n" +
+      "Your calendars, events, tasks, and notes stay exactly where they are — " +
+      "nothing in your planner will change.\n\n" +
+      "This only throws away the list of old cloud backups (the ones shown on " +
+      "this screen). If auto-backup is on, a clean new cloud backup will be " +
+      "made the next time you change something."
+    );
+    if (!confirmed) return;
+    setWorking(true);
+    setError("");
+    setStatus("Forgetting old cloud backups...");
+    try {
+      await clearBackupRef(signEvent, publishEvent);
+      setBlossomEntries([]);
+      setStatus("Old cloud backups forgotten. A fresh one will be made the next time your data changes.");
+      setDone(true);
+    } catch (err) {
+      setError(`Reset failed: ${err}`);
+    } finally {
+      setWorking(false);
+    }
+  };
+
   const formatDate = (ts: string) => {
     try {
       const d = new Date(ts);
@@ -312,6 +363,17 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
                   <HardDrive className="w-4 h-4 text-primary-600 animate-pulse" />
                   <span className="text-sm text-primary-800">Searching relays for backups...</span>
                 </div>
+              )}
+
+              {!blossomLoading && (
+                <button
+                  onClick={handleResetBackups}
+                  disabled={working}
+                  className="w-full flex items-center justify-center gap-2 p-2 text-xs text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-50"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Forget cloud backups & start over
+                </button>
               )}
 
               {blossomEntries.map((entry, i) => (

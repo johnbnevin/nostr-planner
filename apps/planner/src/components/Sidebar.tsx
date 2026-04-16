@@ -11,6 +11,7 @@ import {
   Palette,
   Users,
   X,
+  Loader2,
 } from "lucide-react";
 import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
@@ -62,6 +63,7 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
     deleteCalendar,
     reorderCalendars,
     recolorCalendar,
+    eventsLoading,
   } = useCalendar();
   const { isSharedCalendar } = useSharing();
 
@@ -96,6 +98,7 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
               reorderCalendars={reorderCalendars}
               recolorCalendar={recolorCalendar}
               isSharedCalendar={isSharedCalendar}
+              eventsLoading={eventsLoading}
             />
           </div>
         </div>
@@ -122,6 +125,7 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
         reorderCalendars={reorderCalendars}
         recolorCalendar={recolorCalendar}
         isSharedCalendar={isSharedCalendar}
+        eventsLoading={eventsLoading}
       />
     </aside>
   );
@@ -145,6 +149,7 @@ interface SidebarContentProps {
   reorderCalendars: ReturnType<typeof useCalendar>["reorderCalendars"];
   recolorCalendar: ReturnType<typeof useCalendar>["recolorCalendar"];
   isSharedCalendar: ReturnType<typeof useSharing>["isSharedCalendar"];
+  eventsLoading: ReturnType<typeof useCalendar>["eventsLoading"];
 }
 
 function SidebarContent({
@@ -163,6 +168,7 @@ function SidebarContent({
   reorderCalendars,
   recolorCalendar,
   isSharedCalendar,
+  eventsLoading,
 }: SidebarContentProps) {
   const [showNewCalendar, setShowNewCalendar] = useState(false);
   const [newCalShared, setNewCalShared] = useState(false);
@@ -298,6 +304,12 @@ function SidebarContent({
 
         {calendarsExpanded && (
           <div className="space-y-1">
+            {eventsLoading && calendars.length === 0 && (
+              <div className="flex items-center gap-2 px-2 py-1 text-xs text-gray-400">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Loading calendars…
+              </div>
+            )}
             {calendars.map((cal) => (
               <div
                 key={cal.dTag}
@@ -492,7 +504,7 @@ function SidebarContent({
                   </button>
                 </div>
               </div>
-            ) : (
+            ) : !eventsLoading ? (
               <button
                 onClick={() => setShowNewCalendar(true)}
                 className="flex items-center gap-1.5 px-2 py-1 text-xs text-primary-600 hover:text-primary-700 hover:bg-primary-50 rounded-lg transition-colors mt-1"
@@ -500,7 +512,7 @@ function SidebarContent({
                 <Plus className="w-3.5 h-3.5" />
                 Add calendar
               </button>
-            )}
+            ) : null}
           </div>
         )}
       </div>

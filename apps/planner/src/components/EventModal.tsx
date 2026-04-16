@@ -14,7 +14,7 @@ import {
   type CalendarEvent,
   type RecurrenceFreq,
 } from "../lib/nostr";
-import { encryptEvent, encryptEventWithSharedKey } from "../lib/crypto";
+import { encryptEventWithSharedKey } from "../lib/crypto";
 import { format } from "date-fns";
 
 /**
@@ -62,7 +62,7 @@ interface EventModalProps {
  * before relay confirmation, with a background sync afterward.
  */
 export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSettings }: EventModalProps) {
-  const { pubkey, signEvent, publishEvent, signer } = useNostr();
+  const { pubkey, signEvent, publishEvent } = useNostr();
   const { refreshEvents, allTags, tagsByUsage, calendars, addEventOptimistic } = useCalendar();
   const { getSharedKeyForCalendars } = useSharing();
   const { shouldEncrypt, canPublish, notification } = useSettings();
@@ -171,8 +171,18 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
   const encrypt = shouldEncrypt(selectedCalendars);
 
   /**
-   * Sign and publish a single unsigned event, applying the appropriate
-   * encryption layer. Priority: shared AES-GCM key > NIP-44 self-encrypt > plaintext.
+   * Persist a single unsigned event. Routing depends on calendar type:
+   *
+   * 1. **Shared calendar** (AES-GCM shared key present) — encrypt with the
+   *    shared key, sign, publish to relays so other members can decrypt.
+   * 2. **Public calendar** (no shared key, no encrypt flag) — sign, publish
+   *    as a plaintext NIP-52 event for interop with other Nostr clients.
+   * 3. **Private calendar** (default: encrypt flag set, no shared key) —
+   *    DO NOTHING HERE. The optimistic-UI add already put it in in-memory
+   *    state; auto-backup will persist it into the Blossom blob (encrypted
+   *    with AES-256-GCM at the envelope level). Private events never touch
+   *    Nostr relays — no signer round-trip, no metadata leak, no per-event
+   *    bunker approval.
    */
   const publishOne = async (unsigned: {
     kind: number;
@@ -181,7 +191,6 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
     content: string;
   }) => {
     const dTag = unsigned.tags.find((t) => t[0] === "d")?.[1] || "";
-    // Check for shared calendar key first (AES-GCM takes precedence over NIP-44)
     const sharedKeyInfo = getSharedKeyForCalendars(selectedCalendars);
     if (sharedKeyInfo) {
       const encrypted = await encryptEventWithSharedKey(
@@ -190,10 +199,9 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
       );
       const signed = await signEvent({ ...unsigned, tags: encrypted.tags, content: encrypted.content });
       await publishEvent(signed);
-    } else if (encrypt && pubkey) {
-      const encrypted = await encryptEvent(pubkey, unsigned.kind, dTag, unsigned.tags, unsigned.content, signer!);
-      const signed = await signEvent({ ...unsigned, tags: encrypted.tags, content: encrypted.content });
-      await publishEvent(signed);
+    } else if (encrypt) {
+      // Private calendar: Blossom blob is the only persistence layer.
+      return;
     } else {
       const signed = await signEvent(unsigned);
       await publishEvent(signed);
