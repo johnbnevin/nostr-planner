@@ -19,15 +19,22 @@ import { logger } from "./logger";
 const log = logger("nip46");
 
 // NIP-46 relay choice matters: the bunker must be able to both read our
-// requests from these and publish its responses back. relay.nsec.app is the
-// de-facto NIP-46 relay supported by virtually every bunker (Amber, nsec.app,
-// nsecbunker, etc.). The other two are widely reachable general-purpose
-// relays that don't require NIP-42 AUTH for kind-24133 traffic.
+// requests from these and publish responses. Four relays give redundancy
+// against one being slow/down — SimplePool's default 3-second connection
+// timeout is aggressive, and if every listed relay fails to connect within
+// that budget the whole handshake subscription collapses with "subscription
+// closed before connection was established".
 const NIP46_RELAYS = [
   "wss://relay.nsec.app",
   "wss://relay.damus.io",
   "wss://nos.lol",
+  "wss://relay.primal.net",
 ];
+
+/** Longer relay-connect budget than SimplePool's 3-second default.
+ *  Amber et al. commonly need several seconds on the first WebSocket
+ *  connection (DNS + TLS + handshake), especially on mobile networks. */
+const NIP46_CONNECT_TIMEOUT_MS = 15_000;
 
 // ── Public API ─────────────────────────────────────────────────────
 
@@ -56,10 +63,17 @@ export async function connectNostrSigner(
     secret,
     name: 'Nostr Planner',
   });
+
+  // Pool with generous relay-connect timeout (default 3s is too tight —
+  // a single slow relay can otherwise tank the whole handshake).
+  const pool = new SimplePool();
+  pool.maxWaitForConnection = NIP46_CONNECT_TIMEOUT_MS;
+
+  // Hand the URI to the UI only after the pool exists — the sub itself
+  // isn't open until fromURI below, but pool creation is synchronous and
+  // puts us one step closer to subscription-live before the user scans.
   onUri(uri);
   log.info("waiting for signer to scan QR...");
-
-  const pool = new SimplePool();
 
   // `onauth` is invoked by BunkerSigner when the remote signer replies with
   // `result: "auth_url"` — some bunkers (nsec.app, Amber with per-action
@@ -109,6 +123,7 @@ export async function connectBunkerUri(
 
   const sk = generateSecretKey();
   const pool = new SimplePool();
+  pool.maxWaitForConnection = NIP46_CONNECT_TIMEOUT_MS;
   log.info("connecting via bunker URI...");
 
   const bunker = BunkerSigner.fromBunker(sk, bp, { pool });
