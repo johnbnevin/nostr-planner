@@ -13,7 +13,10 @@
     <script type="module" src="/src/main.tsx"></script>
     <script>
       if ("serviceWorker" in navigator && !("__TAURI_INTERNALS__" in window)) {
-        navigator.serviceWorker.register("/sw.js").catch(() => {});
+        // Derive SW path from document location so the app works at any
+        // deployment subpath (e.g. "/", "/planner/", or an nsite URL).
+        var swBase = location.pathname.replace(/[^/]*$/, "");
+        navigator.serviceWorker.register(swBase + "sw.js").catch(() => {});
       }
     </script>
   </body>
