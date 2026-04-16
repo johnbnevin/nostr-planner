@@ -1,9 +1,13 @@
 /**
  * Relay connection using @nostrify/nostrify.
+ *
+ * All events returned by queryEvents() have their Schnorr signatures
+ * verified — events with invalid signatures are silently dropped.
  */
 
 import { NPool, NRelay1 } from "@nostrify/nostrify";
 import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
+import { verifyEvent } from "nostr-tools/pure";
 
 const MAX_POOL_RELAYS = 5;
 
@@ -33,7 +37,16 @@ export async function queryEvents(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await pool.query([filter], { signal: controller.signal });
+    const events = await pool.query([filter], { signal: controller.signal });
+    // Verify Schnorr signatures — don't trust relays.
+    return events.filter((e) => {
+      try {
+        return verifyEvent(e as Parameters<typeof verifyEvent>[0]);
+      } catch {
+        console.warn("[relay] invalid signature, dropping event", e.id?.slice(0, 8));
+        return false;
+      }
+    });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
       console.warn("[relay] query timed out");

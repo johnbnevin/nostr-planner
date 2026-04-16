@@ -29,7 +29,7 @@ import {
   type ReactNode,
 } from "react";
 import { DEFAULT_RELAYS, KIND_RELAY_LIST } from "../lib/nostr";
-import { queryEvents, publishToRelays, closePool, notifyPublishFailure, parseRelayList, setRelayLists } from "../lib/relay";
+import { queryEvents, publishToRelays, closePool, parseRelayList, setRelayLists } from "../lib/relay";
 import type { NostrEvent } from "../lib/relay";
 import type { NostrSigner, UnsignedEvent } from "../lib/signer";
 import { Nip07Signer } from "../lib/signer";
@@ -290,7 +290,7 @@ export function NostrProvider({ children }: { children: ReactNode }) {
         log.debug("event published, kind", event.kind);
       } catch (err) {
         log.error("publish failed for kind", event.kind, err);
-        notifyPublishFailure(err instanceof Error ? err : new Error(String(err)), event);
+        // notifyPublishFailure is called internally by publishToRelays on final failure
         throw err;
       }
     },

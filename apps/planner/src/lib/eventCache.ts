@@ -25,7 +25,19 @@ interface CachedData {
   cachedAt: number;
 }
 
+/** Cached DB handle — avoids opening a new connection on every read/write. */
+let cachedDb: IDBDatabase | null = null;
+
 function openDb(): Promise<IDBDatabase> {
+  if (cachedDb) {
+    try {
+      // Verify the cached handle is still usable (not closed by the browser)
+      cachedDb.transaction(STORE_NAME, "readonly");
+      return Promise.resolve(cachedDb);
+    } catch {
+      cachedDb = null;
+    }
+  }
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
@@ -34,7 +46,12 @@ function openDb(): Promise<IDBDatabase> {
         db.createObjectStore(STORE_NAME, { keyPath: "pubkey" });
       }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      cachedDb = req.result;
+      // Clear the cached handle if the browser closes the connection
+      cachedDb.onclose = () => { cachedDb = null; };
+      resolve(cachedDb);
+    };
     req.onerror = () => reject(req.error);
   });
 }
@@ -65,7 +82,6 @@ export async function cacheCalendarData(
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
-    db.close();
     log.debug("cached", events.length, "events,", calendars.length, "calendars");
   } catch (err) {
     log.warn("cache write failed (non-fatal):", err);
@@ -88,7 +104,6 @@ export async function loadCachedCalendarData(
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
-    db.close();
     if (!result) return null;
     // IndexedDB structured clone preserves Date objects, so no conversion needed
     log.debug("loaded cache:", result.events.length, "events,", result.calendars.length, "calendars (from", new Date(result.cachedAt).toLocaleTimeString(), ")");
@@ -111,7 +126,6 @@ export async function clearCalendarCache(pubkey: string): Promise<void> {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
-    db.close();
   } catch {
     // Best-effort
   }

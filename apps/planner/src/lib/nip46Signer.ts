@@ -1,260 +1,284 @@
 /**
  * @module nip46Signer
  *
- * NIP-46 remote signer — delegates all signing and encryption to an
- * external "bunker" signer application (e.g. Amber on Android, Nsec.app,
- * or any other NIP-46-compatible remote signer).
+ * NIP-46 remote signing — implements the nostrconnect:// QR code flow
+ * and bunker:// URI flow per the NIP-46 spec, using nostr-tools SimplePool
+ * for relay communication and NIP-44 for encryption.
  *
- * ## Why remote signing?
- *
- * Remote signing keeps the user's private key on a device they trust
- * (typically their phone) while allowing this web/desktop app to request
- * signatures over an encrypted relay channel. The private key **never**
- * enters the planner's JavaScript context.
- *
- * ## NIP-46 protocol overview
- *
- * NIP-46 defines a JSON-RPC-like protocol tunneled through Nostr relay
- * messages (kind 24133). The flow works as follows:
- *
- * 1. **Client (this app) generates an ephemeral key pair** — used solely
- *    for the encrypted communication channel with the bunker. This key is
- *    not the user's identity key.
- *
- * 2. **Client builds a `nostrconnect://` URI** containing:
- *    - The client's ephemeral public key.
- *    - One or more relay URLs where the client is listening.
- *    - A random `secret` (shared out-of-band via QR code) to authenticate
- *      the bunker's first response and prevent impersonation.
- *    - The application name ("Nostr Planner").
- *
- * 3. **User scans the QR code** with their bunker app. The bunker:
- *    - Connects to the specified relays.
- *    - Sends a NIP-44-encrypted `connect` response containing the secret
- *      and the user's public key.
- *
- * 4. **Handshake completes** — `BunkerSigner.fromURI()` resolves once it
- *    receives the bunker's `connect` response with a matching secret.
- *
- * 5. **Ongoing RPC** — Each `signEvent`, `nip44Encrypt`, or `nip44Decrypt`
- *    call sends a NIP-44-encrypted JSON-RPC request (kind 24133) to the
- *    bunker via the relay, and awaits the encrypted response.
- *
- * ## Security considerations
- *
- * - The user's private key never leaves the bunker device.
- * - All RPC messages are NIP-44 encrypted end-to-end between the
- *   client's ephemeral key and the bunker's key.
- * - The shared `secret` in the URI prevents a relay operator from
- *   injecting a rogue bunker response during the initial handshake.
- * - The ephemeral key is generated fresh on every `connect()` call,
- *   so there is no long-lived client key to compromise.
- * - The relay sees only opaque encrypted blobs — it cannot read the
- *   event content or the signing requests.
- *
- * ## Usage
- *
- * ```ts
- * const signer = await Nip46Signer.connect((uri) => showQrCode(uri));
- * // User scans QR with Amber / Nsec.app — connect() resolves when
- * // the bunker completes the handshake.
- * const pubkey = await signer.getPublicKey();
- * const signed = await signer.signEvent(unsignedEvent);
- * ```
+ * Uses a persistent subscription model (like nostr-tools BunkerSigner)
+ * so that the relay connection stays alive across handshake and RPC calls.
  */
 
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
-import { BunkerSigner, createNostrConnectURI } from "nostr-tools/nip46";
-import { bytesToHex } from "@noble/hashes/utils";
+import { SimplePool } from "nostr-tools/pool";
+import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
+import * as nip44 from "nostr-tools/nip44";
 import type { NostrEvent } from "@nostrify/nostrify";
 import type { NostrSigner, UnsignedEvent } from "./signer";
-import { DEFAULT_RELAYS } from "./nostr";
+import { logger } from "./logger";
+
+const log = logger("nip46");
+
+const NIP46_RELAYS = [
+  "wss://nos.lol",
+  "wss://relay.damus.io",
+  "wss://relay.ditto.pub",
+];
+
+/** NIP-46 uses kind 24133 for all RPC messages. */
+const KIND_NIP46 = 24133;
+
+// ── Internal RPC engine ────────────────────────────────────────────
+
+interface RpcEngine {
+  sendRequest(method: string, params: string[]): Promise<string>;
+  close(): void;
+}
 
 /**
- * Relays used for the NIP-46 handshake and ongoing RPC channel.
+ * Create an RPC engine that communicates with a remote signer via NIP-46.
  *
- * Uses all default relays so the handshake succeeds even if some relays
- * are temporarily unavailable. Both the client and the bunker must be
- * able to reach at least one of these relays.
+ * Opens a persistent subscription on the given relays for responses from
+ * the bunker. Requests are published as kind-24133 events encrypted with
+ * NIP-44. The subscription stays alive for the lifetime of the engine.
  */
-const NIP46_RELAYS = DEFAULT_RELAYS;
+function createRpcEngine(
+  pool: SimplePool,
+  relays: string[],
+  clientSecretKey: Uint8Array,
+  bunkerPubkey: string,
+): RpcEngine {
+  const clientPubkey = getPublicKey(clientSecretKey);
+  const conversationKey = nip44.v2.utils.getConversationKey(clientSecretKey, bunkerPubkey);
 
-/**
- * A {@link NostrSigner} implementation that delegates all cryptographic
- * operations to an external NIP-46 bunker signer.
- *
- * Instances are created exclusively via the async {@link connect} factory,
- * which performs the full bunker handshake before returning.
- *
- * **No private key is held by this class.** All signing and encryption
- * happens on the remote bunker device.
- */
-export class Nip46Signer implements NostrSigner {
-  /** The underlying nostr-tools BunkerSigner that manages the relay RPC channel. */
-  private readonly bunker: BunkerSigner;
+  // Pending RPC responses keyed by request ID
+  const pending = new Map<string, {
+    resolve: (result: string) => void;
+    reject: (err: Error) => void;
+  }>();
 
-  /**
-   * The `nostrconnect://` URI generated during {@link connect}.
-   *
-   * Retained so the UI can re-display the QR code if needed (e.g. if the
-   * user navigates away and comes back before the bunker connects).
-   */
-  readonly connectionUri: string;
+  let serial = 0;
+  const idPrefix = Math.random().toString(36).slice(2, 8);
 
-  /**
-   * Private constructor — use {@link connect} to create instances.
-   *
-   * @param bunker - A fully connected BunkerSigner instance.
-   * @param connectionUri - The nostrconnect:// URI used for this session.
-   */
-  private constructor(bunker: BunkerSigner, connectionUri: string) {
-    this.bunker = bunker;
-    this.connectionUri = connectionUri;
-  }
-
-  /**
-   * Initiate a NIP-46 remote signer connection.
-   *
-   * This method orchestrates the full bunker handshake:
-   *
-   * 1. **Generate an ephemeral key pair** — this is the client-side key
-   *    used only for the NIP-44 encrypted communication channel. It is
-   *    not the user's Nostr identity.
-   *
-   * 2. **Generate a random shared secret** — 16 random bytes (hex-encoded,
-   *    32 characters). This secret is embedded in the QR code URI and
-   *    must be echoed back by the bunker in its `connect` response,
-   *    proving the bunker scanned the correct QR code.
-   *
-   * 3. **Build the `nostrconnect://` URI** containing the ephemeral
-   *    public key, relay URLs, secret, and app name.
-   *
-   * 4. **Call `onUri` immediately** so the UI can display the QR code
-   *    while we wait for the bunker to connect.
-   *
-   * 5. **Wait for the bunker's `connect` response** via
-   *    `BunkerSigner.fromURI()`. This blocks until the remote signer
-   *    app (Amber, Nsec.app, etc.) scans the QR code and responds,
-   *    or until `timeoutMs` elapses.
-   *
-   * @param onUri - Callback invoked with the `nostrconnect://` URI string
-   *   as soon as it is generated. Typically used to render a QR code.
-   * @param timeoutMs - Maximum milliseconds to wait for the bunker to
-   *   respond (default: 5 minutes / 300,000 ms). If the timeout expires,
-   *   the returned promise rejects.
-   * @returns A fully connected Nip46Signer ready for signing operations.
-   * @throws {Error} If the bunker does not respond within the timeout.
-   */
-  static async connect(
-    onUri: (uri: string) => void,
-    timeoutMs = 300_000,
-    bunkerUri?: string
-  ): Promise<Nip46Signer> {
-    // If a bunker:// or nostrconnect:// URI was provided, connect directly
-    if (bunkerUri) {
-      const secretKey = generateSecretKey();
-      const bunker = await BunkerSigner.fromURI(secretKey, bunkerUri, {}, timeoutMs);
-      return new Nip46Signer(bunker, bunkerUri);
-    }
-
-    // Step 1: Ephemeral key pair for the encrypted NIP-46 channel
-    const secretKey = generateSecretKey();
-    const clientPubkey = getPublicKey(secretKey);
-
-    // Step 2: Random shared secret to authenticate the bunker's response
-    const secret = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
-
-    // Step 3: Build the nostrconnect:// URI
-    const uri = createNostrConnectURI({
-      clientPubkey,
-      relays: NIP46_RELAYS,
-      secret,
-      name: "Nostr Planner",
-    });
-
-    // Step 4: Hand the URI to the caller for QR code display
-    onUri(uri);
-
-    // Step 5: Wait for the bunker to connect and complete the handshake
-    const bunker = await BunkerSigner.fromURI(secretKey, uri, {}, timeoutMs);
-    return new Nip46Signer(bunker, uri);
-  }
-
-  /**
-   * Retrieve the user's public key from the remote bunker.
-   *
-   * On the first call this sends a `get_public_key` RPC to the bunker.
-   * The BunkerSigner implementation in nostr-tools caches the result
-   * for subsequent calls.
-   */
-  async getPublicKey(): Promise<string> {
-    return this.bunker.getPublicKey();
-  }
-
-  /**
-   * Send an unsigned event to the remote bunker for signing.
-   *
-   * The event template is NIP-44 encrypted, sent as a kind 24133 message
-   * to the bunker via the relay, and the bunker responds with the fully
-   * signed event (also encrypted). The bunker app may prompt the user
-   * for approval depending on its configuration.
-   *
-   * @param event - Unsigned event template.
-   * @returns The fully signed Nostr event from the bunker.
-   */
-  async signEvent(event: UnsignedEvent): Promise<NostrEvent> {
-    return this.bunker.signEvent(event) as Promise<NostrEvent>;
-  }
-
-  /**
-   * NIP-44 encrypt/decrypt delegated to the remote bunker.
-   *
-   * These operations are performed on the bunker device using the user's
-   * actual private key. The plaintext/ciphertext is transmitted over the
-   * NIP-44-encrypted NIP-46 channel, so the relay never sees it in the clear.
-   */
-  nip44 = {
-    /**
-     * Request the bunker to NIP-44-encrypt plaintext for a recipient.
-     *
-     * @param recipientPubkey - Hex public key of the intended reader.
-     * @param plaintext - Cleartext to encrypt.
-     * @returns NIP-44 ciphertext produced by the bunker.
-     */
-    encrypt: async (recipientPubkey: string, plaintext: string): Promise<string> => {
-      return this.bunker.nip44Encrypt(recipientPubkey, plaintext);
+  // Persistent subscription for all RPC responses from the bunker.
+  // Uses pool.subscribe (same pattern as nostr-tools BunkerSigner).
+  const sub = pool.subscribe(
+    relays,
+    { kinds: [KIND_NIP46], authors: [bunkerPubkey], "#p": [clientPubkey], limit: 0 },
+    {
+      onevent: (event: { pubkey: string; content: string }) => {
+        try {
+          const decrypted = nip44.v2.decrypt(event.content, conversationKey);
+          const response = JSON.parse(decrypted);
+          const handler = pending.get(response.id);
+          if (handler) {
+            pending.delete(response.id);
+            if (response.error) {
+              handler.reject(new Error(response.error));
+            } else {
+              handler.resolve(response.result);
+            }
+          }
+        } catch {
+          // Not our response or decryption failed — ignore
+        }
+      },
     },
-    /**
-     * Request the bunker to NIP-44-decrypt ciphertext from a sender.
-     *
-     * @param senderPubkey - Hex public key of the message author.
-     * @param ciphertext - NIP-44 ciphertext to decrypt.
-     * @returns The original plaintext string.
-     */
-    decrypt: async (senderPubkey: string, ciphertext: string): Promise<string> => {
-      return this.bunker.nip44Decrypt(senderPubkey, ciphertext);
+  );
+
+  return {
+    async sendRequest(method: string, params: string[]): Promise<string> {
+      serial++;
+      const id = `${idPrefix}-${serial}`;
+
+      const request = JSON.stringify({ id, method, params });
+      const encrypted = nip44.v2.encrypt(request, conversationKey);
+
+      const event = finalizeEvent(
+        {
+          kind: KIND_NIP46,
+          tags: [["p", bunkerPubkey]],
+          content: encrypted,
+          created_at: Math.floor(Date.now() / 1000),
+        },
+        clientSecretKey,
+      );
+
+      const result = new Promise<string>((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        // Timeout after 3 minutes — remote signers like Amber may require
+        // user approval for each operation, which takes time.
+        setTimeout(() => {
+          if (pending.has(id)) {
+            pending.delete(id);
+            reject(new Error(`NIP-46 request "${method}" timed out after 180s`));
+          }
+        }, 180_000);
+      });
+
+      // Publish to all relays — pool.publish returns an array of promises,
+      // one per relay. We succeed if at least one relay accepts.
+      const publishPromises = pool.publish(relays, event);
+      try {
+        await Promise.race(publishPromises);
+      } catch {
+        pending.delete(id);
+        throw new Error(`Failed to publish NIP-46 request "${method}" to any relay`);
+      }
+
+      return result;
+    },
+
+    close() {
+      sub.close();
+      for (const [id, handler] of pending) {
+        handler.reject(new Error("RPC engine closed"));
+        pending.delete(id);
+      }
     },
   };
+}
 
-  /**
-   * Close the WebSocket relay subscription used for the NIP-46 RPC channel.
-   *
-   * After calling this, no further signing or encryption requests can be
-   * made. Call this on logout to free network resources.
-   */
-  async close(): Promise<void> {
-    await this.bunker.close();
+// ── Public API ─────────────────────────────────────────────────────
+
+/**
+ * Connect via nostrconnect:// QR code flow (NIP-46).
+ *
+ * 1. Generates an ephemeral client key pair
+ * 2. Builds a nostrconnect:// URI and passes it to onUri for QR display
+ * 3. Subscribes on relays for the signer's connect response
+ * 4. After handshake, sets up persistent RPC subscription
+ * 5. Calls get_public_key to learn the user's actual pubkey
+ */
+export async function connectNostrSigner(
+  signal: AbortSignal,
+  onUri: (uri: string) => void,
+): Promise<{ signer: NostrSigner; pubkey: string }> {
+  const sk = generateSecretKey();
+  const clientPubkey = getPublicKey(sk);
+  const secretBytes = crypto.getRandomValues(new Uint8Array(16));
+  const secret = Array.from(secretBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+
+  const params = new URLSearchParams();
+  for (const r of NIP46_RELAYS) params.append('relay', r);
+  params.append('secret', secret);
+  params.append('name', 'Nostr Planner');
+
+  const uri = `nostrconnect://${clientPubkey}?${params.toString()}`;
+  onUri(uri);
+
+  log.info("waiting for signer to scan QR...");
+
+  // Use SimplePool for the handshake — it manages WebSocket lifecycle
+  // properly and doesn't suffer from NRelay1's abort controller issues.
+  const pool = new SimplePool();
+
+  // Wait for the signer's connect response
+  const bunkerPubkey = await new Promise<string>((resolve, reject) => {
+    const onAbort = () => { sub.close(); reject(new Error("aborted")); };
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    const sub = pool.subscribe(
+      NIP46_RELAYS,
+      { kinds: [KIND_NIP46], "#p": [clientPubkey], limit: 0 },
+      {
+        onevent: (event: { pubkey: string; content: string }) => {
+          try {
+            const convKey = nip44.v2.utils.getConversationKey(sk, event.pubkey);
+            const decrypted = nip44.v2.decrypt(event.content, convKey);
+            const response = JSON.parse(decrypted);
+            if (typeof response === "object" && response !== null && response.result === secret) {
+              signal.removeEventListener("abort", onAbort);
+              sub.close();
+              resolve(event.pubkey);
+            }
+          } catch {
+            // Not our response or decryption failed
+          }
+        },
+      },
+    );
+  });
+
+  log.info("handshake complete, bunker:", bunkerPubkey.slice(0, 12));
+
+  // Set up persistent RPC engine for ongoing communication
+  const rpc = createRpcEngine(pool, NIP46_RELAYS, sk, bunkerPubkey);
+
+  log.info("calling get_public_key...");
+  const userPubkey = await rpc.sendRequest("get_public_key", []);
+  log.info("got pubkey:", userPubkey.slice(0, 12));
+
+  return {
+    signer: wrapRpcEngine(rpc, userPubkey),
+    pubkey: userPubkey,
+  };
+}
+
+/**
+ * Connect via a bunker:// or nostrconnect:// URI directly.
+ */
+export async function connectBunkerUri(
+  bunkerUri: string,
+  timeoutMs = 120_000,
+): Promise<{ signer: NostrSigner; pubkey: string }> {
+  const sk = generateSecretKey();
+
+  const url = new URL(bunkerUri);
+  const bunkerPubkey = url.hostname || url.pathname.replace("//", "");
+  const relayUrls = url.searchParams.getAll("relay");
+  const urlSecret = url.searchParams.get("secret") || undefined;
+
+  if (!bunkerPubkey || relayUrls.length === 0) {
+    throw new Error("Invalid bunker URI — must contain a pubkey and at least one relay");
   }
 
-  /**
-   * Implements the {@link NostrSigner.destroy} contract by closing the
-   * relay connection.
-   *
-   * Unlike {@link LocalSigner.destroy}, there is no key material to zero
-   * here — the ephemeral channel key was only held by the BunkerSigner
-   * internals and is released when the bunker is closed.
-   */
-  async destroy(): Promise<void> {
-    await this.close();
+  log.info("connecting via bunker URI...");
+
+  const pool = new SimplePool();
+  const rpc = createRpcEngine(pool, relayUrls, sk, bunkerPubkey);
+
+  // Send connect command (required for bunker:// flow)
+  const connectParams = [bunkerPubkey];
+  if (urlSecret) connectParams.push(urlSecret);
+
+  const connectResult = await Promise.race([
+    rpc.sendRequest("connect", connectParams),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Bunker connection timed out")), timeoutMs)
+    ),
+  ]);
+
+  if (connectResult !== "ack" && connectResult !== urlSecret) {
+    log.warn("unexpected connect result:", connectResult);
   }
+
+  log.info("bunker connected");
+  const userPubkey = await rpc.sendRequest("get_public_key", []);
+  log.info("got pubkey:", userPubkey.slice(0, 12));
+
+  return {
+    signer: wrapRpcEngine(rpc, userPubkey),
+    pubkey: userPubkey,
+  };
+}
+
+/** Wrap an RPC engine into our NostrSigner interface. */
+function wrapRpcEngine(rpc: RpcEngine, pubkey: string): NostrSigner {
+  return {
+    getPublicKey: () => Promise.resolve(pubkey),
+
+    signEvent: async (event: UnsignedEvent): Promise<NostrEvent> => {
+      const result = await rpc.sendRequest("sign_event", [JSON.stringify(event)]);
+      return JSON.parse(result) as NostrEvent;
+    },
+
+    nip44: {
+      encrypt: (recipientPubkey: string, plaintext: string) =>
+        rpc.sendRequest("nip44_encrypt", [recipientPubkey, plaintext]),
+      decrypt: (senderPubkey: string, ciphertext: string) =>
+        rpc.sendRequest("nip44_decrypt", [senderPubkey, ciphertext]),
+    },
+
+    destroy: async () => { rpc.close(); },
+  };
 }

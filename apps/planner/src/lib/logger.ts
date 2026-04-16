@@ -40,6 +40,7 @@ try {
   });
 } catch { /* SSR */ }
 
+const MAX_TIMERS = 100;
 const timers = new Map<string, number>();
 
 export interface Logger {
@@ -70,6 +71,11 @@ export function logger(module: string): Logger {
       if (isDebug()) console.log(prefix, "[debug]", ...args);
     },
     time: (label) => {
+      if (timers.size >= MAX_TIMERS) {
+        // Evict oldest entry to prevent unbounded growth
+        const firstKey = timers.keys().next().value;
+        if (firstKey !== undefined) timers.delete(firstKey);
+      }
       timers.set(`${module}:${label}`, performance.now());
     },
     timeEnd: (label) => {

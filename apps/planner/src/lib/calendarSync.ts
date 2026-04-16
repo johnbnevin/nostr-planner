@@ -71,7 +71,7 @@ export function buildDeletedCoords(
     for (const tag of del.tags) {
       if (tag[0] === "a") {
         const parts = tag[1].split(":");
-        if (parts.length >= 3) deletedCoords.add(parts[2]!);
+        if (parts.length >= 3 && parts[2]) deletedCoords.add(parts[2]);
       }
     }
   }

@@ -8,6 +8,10 @@
  *
  * Completions older than 90 days are automatically pruned before publishing
  * to keep the event payload small.
+ *
+ * **Debounced publishing:** State updates are instant (optimistic UI), but
+ * relay publishes are debounced — rapid clicks coalesce into a single write.
+ * The debounce window is 1.5 s; on unmount any pending write flushes immediately.
  */
 
 import {
@@ -29,57 +33,45 @@ import { logger } from "../lib/logger";
 
 const log = logger("tasks");
 
-// ── Types ──────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────
 
 export interface DailyHabit {
   id: string;
   title: string;
-  createdAt: number;
+  createdAt: number; // unix seconds
+}
+
+interface DailyData {
+  habits: DailyHabit[];
+  completions: Record<string, string[]>;
 }
 
 export interface ListItem {
   id: string;
   title: string;
   done: boolean;
-  createdAt: number;
+  createdAt: number; // unix seconds
 }
 
 export interface UserList {
   id: string;
   name: string;
   items: ListItem[];
-  createdAt: number;
-}
-
-interface DailyData {
-  habits: DailyHabit[];
-  completions: Record<string, string[]>; // "YYYY-MM-DD" → habit id[]
+  createdAt: number; // unix seconds
 }
 
 interface ListsData {
   lists: UserList[];
 }
 
-/**
- * Public API surface for the tasks context.
- * Provides CRUD operations for daily habits and task lists,
- * plus completion tracking and manual refresh.
- */
-/** Statistics for a single habit over a given time window. */
-export interface HabitStats {
-  /** Number of days the habit was completed within the window. */
+interface HabitStats {
   completed: number;
-  /** Total days in the window (capped to days since habit was created). */
   total: number;
-  /** Completion rate as a percentage (0–100). */
   rate: number;
-  /** Current consecutive-day streak (from today backward). */
   currentStreak: number;
-  /** Longest consecutive-day streak within the window. */
   bestStreak: number;
 }
 
-/** Statistics for all habits over multiple time windows. */
 export interface HabitStatsBundle {
   last7: HabitStats;
   last30: HabitStats;
@@ -91,23 +83,23 @@ interface TasksContextValue {
   // Daily habits
   habits: DailyHabit[];
   completions: Record<string, string[]>;
-  addHabit: (title: string) => Promise<void>;
-  removeHabit: (id: string) => Promise<void>;
-  renameHabit: (id: string, title: string) => Promise<void>;
-  toggleHabitCompletion: (habitId: string, date: string) => Promise<void>;
+  addHabit: (title: string) => void;
+  removeHabit: (id: string) => void;
+  renameHabit: (id: string, title: string) => void;
+  toggleHabitCompletion: (habitId: string, date: string) => void;
   isHabitDone: (habitId: string, date: string) => boolean;
-  reorderHabits: (fromIndex: number, toIndex: number) => Promise<void>;
+  reorderHabits: (fromIndex: number, toIndex: number) => void;
   /** Compute statistics for a habit across 7d, 30d, 365d, and all-time windows. */
   getHabitStats: (habitId: string) => HabitStatsBundle;
   // Lists
   lists: UserList[];
-  addList: (name: string) => Promise<void>;
-  removeList: (id: string) => Promise<void>;
-  renameList: (id: string, name: string) => Promise<void>;
-  addListItem: (listId: string, title: string) => Promise<void>;
-  removeListItem: (listId: string, itemId: string) => Promise<void>;
-  toggleListItem: (listId: string, itemId: string) => Promise<void>;
-  reorderListItems: (listId: string, fromIndex: number, toIndex: number) => Promise<void>;
+  addList: (name: string) => void;
+  removeList: (id: string) => void;
+  renameList: (id: string, name: string) => void;
+  addListItem: (listId: string, title: string) => void;
+  removeListItem: (listId: string, itemId: string) => void;
+  toggleListItem: (listId: string, itemId: string) => void;
+  reorderListItems: (listId: string, fromIndex: number, toIndex: number) => void;
   refreshTasks: () => Promise<void>;
   // Loading
   loading: boolean;
@@ -129,6 +121,9 @@ const LISTS_D_TAG_OLD = DTAG_LISTS_OLD;
 
 /** Keep only the last 400 days of completion data to support year-over-year statistics. */
 const COMPLETION_RETENTION_DAYS = 400;
+
+/** Debounce delay for relay publishes (ms). */
+const PUBLISH_DEBOUNCE_MS = 1500;
 
 /**
  * Remove completion entries older than COMPLETION_RETENTION_DAYS.
@@ -169,6 +164,13 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   const habitsRef = useRef(habits);
   const completionsRef = useRef(completions);
   const listsRef = useRef(lists);
+
+  // Tracks in-flight publishes. While > 0, fetchData() skips overwriting
+  // local state — the relay may not have received the latest write yet, so
+  // fetching would clobber the optimistic update and cause green dots to
+  // disappear momentarily.
+  const publishingRef = useRef(0);
+
   // Sync refs on render (effects are too late — rapid sequential operations
   // would read stale ref values between setX() and the next effect cycle).
   habitsRef.current = habits;
@@ -184,6 +186,15 @@ export function TasksProvider({ children }: { children: ReactNode }) {
    */
   const fetchData = useCallback(async () => {
     if (!pubkey) return;
+
+    // If a publish is in-flight, skip this fetch — the relay may not have
+    // the latest data yet and overwriting optimistic state would cause
+    // completions to flicker (green dots disappearing then reappearing).
+    if (publishingRef.current > 0) {
+      log.info("skipping fetch — publish in-flight");
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -192,6 +203,14 @@ export function TasksProvider({ children }: { children: ReactNode }) {
         authors: [pubkey],
         "#d": [DAILY_D_TAG, LISTS_D_TAG, LISTS_D_TAG_OLD],
       });
+
+      // Re-check after the async gap — a publish may have started while
+      // we were waiting on the relay query.
+      if (publishingRef.current > 0) {
+        log.info("skipping state update — publish started during fetch");
+        setLoading(false);
+        return;
+      }
 
       // Keep the most recent event per d-tag
       const seen = new Map<string, { raw: typeof rawEvents[0]; createdAt: number }>();
@@ -252,7 +271,7 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     if (pubkey) fetchData();
   }, [pubkey, fetchData]);
 
-  // ── Publish helpers ──────────────────────────────────────────────
+  // ── Raw publish helpers (called by debounce, not by actions) ─────
 
   /**
    * Serialize and publish the daily habits + completions to relays.
@@ -261,28 +280,32 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   const publishDaily = useCallback(
     async (newHabits: DailyHabit[], newCompletions: Record<string, string[]>) => {
       if (!pubkey) return;
-      // Prune old completions before publishing to keep payload small
-      const pruned = pruneCompletions(newCompletions);
-      const content = JSON.stringify({ habits: newHabits, completions: pruned });
-      const tags: string[][] = [["d", DAILY_D_TAG]];
+      publishingRef.current++;
+      try {
+        const pruned = pruneCompletions(newCompletions);
+        const content = JSON.stringify({ habits: newHabits, completions: pruned });
+        const tags: string[][] = [["d", DAILY_D_TAG]];
 
-      const encrypt = shouldEncrypt([]);
-      let finalTags = tags;
-      let finalContent = content;
+        const encrypt = shouldEncrypt([]);
+        let finalTags = tags;
+        let finalContent = content;
 
-      if (encrypt && signer) {
-        const encrypted = await encryptEvent(pubkey, KIND_APP_DATA, DAILY_D_TAG, tags, content, signer);
-        finalTags = encrypted.tags;
-        finalContent = encrypted.content;
+        if (encrypt && signer) {
+          const encrypted = await encryptEvent(pubkey, KIND_APP_DATA, DAILY_D_TAG, tags, content, signer);
+          finalTags = encrypted.tags;
+          finalContent = encrypted.content;
+        }
+
+        const signed = await signEvent({
+          kind: KIND_APP_DATA,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: finalTags,
+          content: finalContent,
+        });
+        await publishEvent(signed);
+      } finally {
+        publishingRef.current--;
       }
-
-      const signed = await signEvent({
-        kind: KIND_APP_DATA,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: finalTags,
-        content: finalContent,
-      });
-      await publishEvent(signed);
     },
     [pubkey, signEvent, publishEvent, shouldEncrypt, signer]
   );
@@ -294,100 +317,130 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   const publishLists = useCallback(
     async (newLists: UserList[]) => {
       if (!pubkey) return;
-      const content = JSON.stringify({ lists: newLists });
-      const tags: string[][] = [["d", LISTS_D_TAG]];
+      publishingRef.current++;
+      try {
+        const content = JSON.stringify({ lists: newLists });
+        const tags: string[][] = [["d", LISTS_D_TAG]];
 
-      const encrypt = shouldEncrypt([]);
-      let finalTags = tags;
-      let finalContent = content;
+        const encrypt = shouldEncrypt([]);
+        let finalTags = tags;
+        let finalContent = content;
 
-      if (encrypt && signer) {
-        const encrypted = await encryptEvent(pubkey, KIND_APP_DATA, LISTS_D_TAG, tags, content, signer);
-        finalTags = encrypted.tags;
-        finalContent = encrypted.content;
+        if (encrypt && signer) {
+          const encrypted = await encryptEvent(pubkey, KIND_APP_DATA, LISTS_D_TAG, tags, content, signer);
+          finalTags = encrypted.tags;
+          finalContent = encrypted.content;
+        }
+
+        const signed = await signEvent({
+          kind: KIND_APP_DATA,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: finalTags,
+          content: finalContent,
+        });
+        await publishEvent(signed);
+      } finally {
+        publishingRef.current--;
       }
-
-      const signed = await signEvent({
-        kind: KIND_APP_DATA,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: finalTags,
-        content: finalContent,
-      });
-      await publishEvent(signed);
     },
     [pubkey, signEvent, publishEvent, shouldEncrypt, signer]
   );
 
+  // ── Debounced publish scheduling ────────────────────────────────
+  //
+  // Actions update React state immediately (optimistic UI), then call
+  // scheduleDailyPublish() / scheduleListsPublish() which resets a
+  // debounce timer. When the timer fires it reads the latest state
+  // from refs and does one publish. Rapid clicks (e.g. checking off
+  // 5 habits) coalesce into a single relay write.
+
+  const dailyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const listsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushDaily = useCallback(() => {
+    if (dailyTimerRef.current !== null) {
+      clearTimeout(dailyTimerRef.current);
+      dailyTimerRef.current = null;
+    }
+    publishDaily(habitsRef.current, completionsRef.current).catch((err) =>
+      log.error("debounced daily publish failed", err)
+    );
+  }, [publishDaily]);
+
+  const flushLists = useCallback(() => {
+    if (listsTimerRef.current !== null) {
+      clearTimeout(listsTimerRef.current);
+      listsTimerRef.current = null;
+    }
+    publishLists(listsRef.current).catch((err) =>
+      log.error("debounced lists publish failed", err)
+    );
+  }, [publishLists]);
+
+  const scheduleDailyPublish = useCallback(() => {
+    if (dailyTimerRef.current !== null) clearTimeout(dailyTimerRef.current);
+    dailyTimerRef.current = setTimeout(flushDaily, PUBLISH_DEBOUNCE_MS);
+  }, [flushDaily]);
+
+  const scheduleListsPublish = useCallback(() => {
+    if (listsTimerRef.current !== null) clearTimeout(listsTimerRef.current);
+    listsTimerRef.current = setTimeout(flushLists, PUBLISH_DEBOUNCE_MS);
+  }, [flushLists]);
+
+  // Flush pending writes on unmount (e.g. navigating away)
+  useEffect(() => {
+    return () => {
+      if (dailyTimerRef.current !== null) flushDaily();
+      if (listsTimerRef.current !== null) flushLists();
+    };
+  }, [flushDaily, flushLists]);
+
   // ── Daily habit actions ──────────────────────────────────────────
 
   const addHabit = useCallback(
-    async (title: string) => {
+    (title: string) => {
       const habit: DailyHabit = {
         id: generateDTag(),
         title,
         createdAt: Math.floor(Date.now() / 1000),
       };
-      const prev = habitsRef.current;
-      const next = [...prev, habit];
+      const next = [...habitsRef.current, habit];
       setHabits(next);
-      try {
-        await publishDaily(next, completionsRef.current);
-      } catch (err) {
-        setHabits(prev);
-        log.error("addHabit publish failed, rolling back", err);
-      }
+      scheduleDailyPublish();
     },
-    [publishDaily]
+    [scheduleDailyPublish]
   );
 
   const removeHabit = useCallback(
-    async (id: string) => {
-      const prev = habitsRef.current;
-      const next = prev.filter((h) => h.id !== id);
+    (id: string) => {
+      const next = habitsRef.current.filter((h) => h.id !== id);
       setHabits(next);
-      try {
-        await publishDaily(next, completionsRef.current);
-      } catch (err) {
-        setHabits(prev);
-        log.error("removeHabit publish failed, rolling back", err);
-      }
+      scheduleDailyPublish();
     },
-    [publishDaily]
+    [scheduleDailyPublish]
   );
 
   const renameHabit = useCallback(
-    async (id: string, title: string) => {
-      const prev = habitsRef.current;
-      const next = prev.map((h) => (h.id === id ? { ...h, title } : h));
+    (id: string, title: string) => {
+      const next = habitsRef.current.map((h) => (h.id === id ? { ...h, title } : h));
       setHabits(next);
-      try {
-        await publishDaily(next, completionsRef.current);
-      } catch (err) {
-        setHabits(prev);
-        log.error("renameHabit publish failed, rolling back", err);
-      }
+      scheduleDailyPublish();
     },
-    [publishDaily]
+    [scheduleDailyPublish]
   );
 
   const toggleHabitCompletion = useCallback(
-    async (habitId: string, date: string) => {
+    (habitId: string, date: string) => {
       const curCompletions = completionsRef.current;
       const dayCompletions = curCompletions[date] || [];
       const nextDay = dayCompletions.includes(habitId)
         ? dayCompletions.filter((id) => id !== habitId)
         : [...dayCompletions, habitId];
-      const prev = curCompletions;
       const next = { ...curCompletions, [date]: nextDay };
       setCompletions(next);
-      try {
-        await publishDaily(habitsRef.current, next);
-      } catch (err) {
-        setCompletions(prev);
-        log.error("toggleHabitCompletion publish failed, rolling back", err);
-      }
+      scheduleDailyPublish();
     },
-    [publishDaily]
+    [scheduleDailyPublish]
   );
 
   const isHabitDone = useCallback(
@@ -437,32 +490,29 @@ export function TasksProvider({ children }: { children: ReactNode }) {
           d.setDate(d.getDate() + 1);
         }
 
-        // Current streak (from today backward)
+        // Current streak (from today backwards)
         let currentStreak = 0;
-        const streakDay = new Date(today);
+        const streakDate = new Date(today);
         while (true) {
-          const ds = streakDay.toISOString().slice(0, 10);
-          if ((comps[ds] || []).includes(habitId)) {
-            currentStreak++;
-            streakDay.setDate(streakDay.getDate() - 1);
-          } else {
-            break;
-          }
+          const ds = streakDate.toISOString().slice(0, 10);
+          if (!(comps[ds] || []).includes(habitId)) break;
+          currentStreak++;
+          streakDate.setDate(streakDate.getDate() - 1);
         }
 
-        // Best streak in window
+        // Best streak (scan entire window)
         let bestStreak = 0;
-        let streak = 0;
-        const scanDay = new Date(startDate);
+        let runStreak = 0;
+        const scanDate = new Date(startDate);
         for (let i = 0; i < windowDays; i++) {
-          const ds = scanDay.toISOString().slice(0, 10);
+          const ds = scanDate.toISOString().slice(0, 10);
           if ((comps[ds] || []).includes(habitId)) {
-            streak++;
-            if (streak > bestStreak) bestStreak = streak;
+            runStreak++;
+            if (runStreak > bestStreak) bestStreak = runStreak;
           } else {
-            streak = 0;
+            runStreak = 0;
           }
-          scanDay.setDate(scanDay.getDate() + 1);
+          scanDate.setDate(scanDate.getDate() + 1);
         }
 
         const rate = windowDays > 0 ? Math.round((completed / windowDays) * 100) : 0;
@@ -480,138 +530,95 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   );
 
   const reorderHabits = useCallback(
-    async (fromIndex: number, toIndex: number) => {
-      const prev = habitsRef.current;
-      const next = [...prev];
+    (fromIndex: number, toIndex: number) => {
+      const next = [...habitsRef.current];
       const [moved] = next.splice(fromIndex, 1);
       next.splice(toIndex, 0, moved);
       setHabits(next);
-      try {
-        await publishDaily(next, completionsRef.current);
-      } catch (err) {
-        setHabits(prev);
-        log.error("reorderHabits publish failed, rolling back", err);
-      }
+      scheduleDailyPublish();
     },
-    [publishDaily]
+    [scheduleDailyPublish]
   );
 
   // ── List actions ─────────────────────────────────────────────────
 
   const addList = useCallback(
-    async (name: string) => {
+    (name: string) => {
       const list: UserList = {
         id: generateDTag(),
         name,
         items: [],
         createdAt: Math.floor(Date.now() / 1000),
       };
-      const prev = listsRef.current;
-      const next = [...prev, list];
+      const next = [...listsRef.current, list];
       setLists(next);
-      try {
-        await publishLists(next);
-      } catch (err) {
-        setLists(prev);
-        log.error("addList publish failed, rolling back", err);
-      }
+      scheduleListsPublish();
     },
-    [publishLists]
+    [scheduleListsPublish]
   );
 
   const removeList = useCallback(
-    async (id: string) => {
-      const prev = listsRef.current;
-      const next = prev.filter((l) => l.id !== id);
+    (id: string) => {
+      const next = listsRef.current.filter((l) => l.id !== id);
       setLists(next);
-      try {
-        await publishLists(next);
-      } catch (err) {
-        setLists(prev);
-        log.error("removeList publish failed, rolling back", err);
-      }
+      scheduleListsPublish();
     },
-    [publishLists]
+    [scheduleListsPublish]
   );
 
   const renameList = useCallback(
-    async (id: string, name: string) => {
-      const prev = listsRef.current;
-      const next = prev.map((l) => (l.id === id ? { ...l, name } : l));
+    (id: string, name: string) => {
+      const next = listsRef.current.map((l) => (l.id === id ? { ...l, name } : l));
       setLists(next);
-      try {
-        await publishLists(next);
-      } catch (err) {
-        setLists(prev);
-        log.error("renameList publish failed, rolling back", err);
-      }
+      scheduleListsPublish();
     },
-    [publishLists]
+    [scheduleListsPublish]
   );
 
   const addListItem = useCallback(
-    async (listId: string, title: string) => {
+    (listId: string, title: string) => {
       const item: ListItem = {
         id: generateDTag(),
         title,
         done: false,
         createdAt: Math.floor(Date.now() / 1000),
       };
-      const prev = listsRef.current;
-      const next = prev.map((l) =>
+      const next = listsRef.current.map((l) =>
         l.id === listId ? { ...l, items: [...l.items, item] } : l
       );
       setLists(next);
-      try {
-        await publishLists(next);
-      } catch (err) {
-        setLists(prev);
-        log.error("addListItem publish failed, rolling back", err);
-      }
+      scheduleListsPublish();
     },
-    [publishLists]
+    [scheduleListsPublish]
   );
 
   const removeListItem = useCallback(
-    async (listId: string, itemId: string) => {
-      const prev = listsRef.current;
-      const next = prev.map((l) =>
+    (listId: string, itemId: string) => {
+      const next = listsRef.current.map((l) =>
         l.id === listId ? { ...l, items: l.items.filter((i) => i.id !== itemId) } : l
       );
       setLists(next);
-      try {
-        await publishLists(next);
-      } catch (err) {
-        setLists(prev);
-        log.error("removeListItem publish failed, rolling back", err);
-      }
+      scheduleListsPublish();
     },
-    [publishLists]
+    [scheduleListsPublish]
   );
 
   const toggleListItem = useCallback(
-    async (listId: string, itemId: string) => {
-      const prev = listsRef.current;
-      const next = prev.map((l) =>
+    (listId: string, itemId: string) => {
+      const next = listsRef.current.map((l) =>
         l.id === listId
           ? { ...l, items: l.items.map((i) => (i.id === itemId ? { ...i, done: !i.done } : i)) }
           : l
       );
       setLists(next);
-      try {
-        await publishLists(next);
-      } catch (err) {
-        setLists(prev);
-        log.error("toggleListItem publish failed, rolling back", err);
-      }
+      scheduleListsPublish();
     },
-    [publishLists]
+    [scheduleListsPublish]
   );
 
   const reorderListItems = useCallback(
-    async (listId: string, fromIndex: number, toIndex: number) => {
-      const prev = listsRef.current;
-      const next = prev.map((l) => {
+    (listId: string, fromIndex: number, toIndex: number) => {
+      const next = listsRef.current.map((l) => {
         if (l.id !== listId) return l;
         const items = [...l.items];
         const [moved] = items.splice(fromIndex, 1);
@@ -619,14 +626,9 @@ export function TasksProvider({ children }: { children: ReactNode }) {
         return { ...l, items };
       });
       setLists(next);
-      try {
-        await publishLists(next);
-      } catch (err) {
-        setLists(prev);
-        log.error("reorderListItems publish failed, rolling back", err);
-      }
+      scheduleListsPublish();
     },
-    [publishLists]
+    [scheduleListsPublish]
   );
 
   const contextValue = useMemo(() => ({

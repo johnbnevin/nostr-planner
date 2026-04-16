@@ -35,11 +35,13 @@ export function useDigest() {
   const dataPublished = useRef(false);
   const pushPublished = useRef<string>("");
 
-  // Publish push data once after events + tasks finish loading
-  // (only when push notifications are enabled)
+  // Publish push data once after events + tasks finish loading.
+  // Published whenever notifications are enabled (any method), not just "push".
+  // This ensures the daemon has a fresh snapshot if the user also has a web
+  // session with push enabled, or if they switch to push later.
   useEffect(() => {
     if (!pubkey || !isNip44Available(signer)) return;
-    if (!notification.enabled || notification.method !== "push") return;
+    if (!notification.enabled) return;
     if (calLoading || tasksLoading) return;
     if (dataPublished.current) return;
 

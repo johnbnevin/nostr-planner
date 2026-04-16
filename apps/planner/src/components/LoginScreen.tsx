@@ -18,8 +18,10 @@ import {
 } from "lucide-react";
 import { useNostr } from "../contexts/NostrContext";
 import { LocalSigner } from "../lib/localSigner";
-import { Nip46Signer } from "../lib/nip46Signer";
+import { connectNostrSigner, connectBunkerUri } from "../lib/nip46Signer";
+import { DEFAULT_RELAYS } from "../lib/nostr";
 import { isTauri } from "../lib/platform";
+import { queryEvents } from "../lib/relay";
 import { lsSet } from "../lib/storage";
 import { nip19 } from "nostr-tools";
 import {
@@ -109,10 +111,8 @@ function getTopSignerForPlatform(): { name: string; url?: string; isMobile: bool
 
 /* ── SignerRecommendations component ───────────────────────────── */
 
-function SignerRecommendations() {
-  const { isMobile, platform } = detectPlatform();
-
-  const Section = ({ title, items, highlight }: { title: string; items: Record<string, SignerRec[]>; highlight?: string }) => (
+function SignerSection({ title, items, highlight }: { title: string; items: Record<string, SignerRec[]>; highlight?: string }) {
+  return (
     <div className="space-y-1">
       <p className="font-medium text-gray-900 text-xs">{title}</p>
       <div className="space-y-0.5">
@@ -134,11 +134,15 @@ function SignerRecommendations() {
       </div>
     </div>
   );
+}
+
+function SignerRecommendations() {
+  const { isMobile, platform } = detectPlatform();
 
   return (
     <div className="space-y-2 text-xs">
-      <Section title="Mobile" items={MOBILE_SIGNERS} highlight={isMobile ? platform : undefined} />
-      <Section title="Desktop browsers" items={BROWSER_SIGNERS} highlight={!isMobile ? platform : undefined} />
+      <SignerSection title="Mobile" items={MOBILE_SIGNERS} highlight={isMobile ? platform : undefined} />
+      <SignerSection title="Desktop browsers" items={BROWSER_SIGNERS} highlight={!isMobile ? platform : undefined} />
     </div>
   );
 }
@@ -236,6 +240,17 @@ export function LoginScreen() {
     return () => clearInterval(timer);
   }, []);
 
+  // Clear sensitive state when navigating between login views to minimize
+  // key material exposure in memory (e.g. user types nsec, then switches to QR login).
+  const switchLoginView = useCallback((view: LoginView) => {
+    if (view !== "nsec") { setLoginNsec(""); setNsecLoginError(null); }
+    if (view !== "mnemonic") { setSeedPhrase(""); setSeedPassphrase(""); setSeedLoginError(null); }
+    if (view !== "signer") { connectAbortRef.current?.abort(); setConnectWaiting(false); setQrDataUrl(""); setConnectUri(""); setConnectError(null); }
+    if (view !== "unlock") { setUnlockPassword(""); setUnlockError(""); }
+    setBunkerUrl(""); setBunkerError(null);
+    setLoginView(view);
+  }, []);
+
   // On mount, check for stored Tauri key
   useEffect(() => {
     if (inTauri) {
@@ -245,9 +260,20 @@ export function LoginScreen() {
     }
   }, [inTauri]);
 
-  // Cleanup NIP-46 abort controller on unmount
+  // Cleanup on unmount: abort NIP-46 and clear sensitive state from memory
   useEffect(() => {
-    return () => { connectAbortRef.current?.abort(); };
+    return () => {
+      connectAbortRef.current?.abort();
+      // Best-effort: clear sensitive key material from React state on unmount.
+      // React may retain the state object briefly, but this minimizes the window.
+      setNsec("");
+      setMnemonic("");
+      setLoginNsec("");
+      setSeedPhrase("");
+      setSeedPassphrase("");
+      setTauriPassword("");
+      setUnlockPassword("");
+    };
   }, []);
 
   const topSigner = getTopSignerForPlatform();
@@ -279,6 +305,8 @@ export function LoginScreen() {
       await navigator.clipboard.writeText(mnemonic);
       setMnemonicCopied(true);
       setTimeout(() => setMnemonicCopied(false), 2000);
+      // Clear clipboard after 30s to limit mnemonic exposure (matches nsec behavior)
+      setTimeout(() => { navigator.clipboard.writeText("").catch(() => {}); }, 30000);
     } catch { /* clipboard denied */ }
   };
 
@@ -309,14 +337,27 @@ export function LoginScreen() {
 
       await loginWithSigner(signer);
 
-      // Publish kind:0 profile metadata (best-effort)
+      // Publish kind:0 profile metadata (best-effort, read-then-merge to
+      // preserve existing fields like picture, about, nip05, lud16, etc.)
       try {
         if (name.trim()) {
+          let existing: Record<string, unknown> = {};
+          try {
+            const pk = await signer.getPublicKey();
+            const events = await queryEvents(DEFAULT_RELAYS, {
+              kinds: [0],
+              authors: [pk],
+              limit: 1,
+            });
+            if (events.length > 0) {
+              existing = JSON.parse(events[0].content);
+            }
+          } catch { /* if fetch fails, publish name-only */ }
           const event = await signEvent({
             kind: 0,
             created_at: Math.floor(Date.now() / 1000),
             tags: [],
-            content: JSON.stringify({ name: name.trim() }),
+            content: JSON.stringify({ ...existing, name: name.trim() }),
           });
           await publishEvent(event);
         }
@@ -404,7 +445,7 @@ export function LoginScreen() {
     setConnectUri("");
     setQrDataUrl("");
     try {
-      const signer = await Nip46Signer.connect(async (uri) => {
+      const { signer } = await connectNostrSigner(controller.signal, async (uri) => {
         setConnectUri(uri);
         try {
           const dataUrl = await QRCode.toDataURL(uri, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } });
@@ -435,7 +476,7 @@ export function LoginScreen() {
     setBunkerLoading(true);
     setBunkerError(null);
     try {
-      const signer = await Nip46Signer.connect(() => {}, 120_000, trimmed);
+      const { signer } = await connectBunkerUri(trimmed, 120_000);
       if (!inTauri) lsSet("nostr-planner-login-type", "bunker");
       await loginWithSigner(signer);
     } catch (e: unknown) {
@@ -846,7 +887,7 @@ export function LoginScreen() {
               )}
               <button
                 type="button"
-                onClick={() => { setLoginView("signer"); generateConnectQR(); }}
+                onClick={() => { switchLoginView("signer"); generateConnectQR(); }}
                 className="w-full flex items-center justify-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 py-2"
               >
                 <QrCode className="w-3 h-3" />
@@ -854,7 +895,7 @@ export function LoginScreen() {
               </button>
               <button
                 type="button"
-                onClick={() => { setLoginView("mnemonic"); setSeedLoginError(null); }}
+                onClick={() => switchLoginView("mnemonic")}
                 className="w-full flex items-center justify-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 py-2"
               >
                 <BookKey className="w-3 h-3" />
@@ -862,7 +903,7 @@ export function LoginScreen() {
               </button>
               <button
                 type="button"
-                onClick={() => setLoginView("nsec")}
+                onClick={() => switchLoginView("nsec")}
                 className="w-full flex items-center justify-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 py-2"
               >
                 <KeyRound className="w-3 h-3" />
@@ -914,7 +955,7 @@ export function LoginScreen() {
               Unlock
             </button>
             <button
-              onClick={() => setLoginView("main")}
+              onClick={() => switchLoginView("main")}
               className="w-full text-sm text-gray-500 hover:text-gray-700"
             >
               Use a different key
@@ -927,7 +968,7 @@ export function LoginScreen() {
           <div className="space-y-4">
             <button
               type="button"
-              onClick={() => { connectAbortRef.current?.abort(); setConnectWaiting(false); setQrDataUrl(""); setConnectUri(""); setConnectError(null); setLoginView("main"); }}
+              onClick={() => switchLoginView("main")}
               className="flex items-center justify-center w-full gap-1 text-xs text-gray-500 hover:text-gray-700 py-1"
             >
               <ChevronLeft className="w-3 h-3" />Back
@@ -1020,7 +1061,7 @@ export function LoginScreen() {
           <div className="space-y-4">
             <button
               type="button"
-              onClick={() => setLoginView("main")}
+              onClick={() => switchLoginView("main")}
               className="flex items-center justify-center w-full gap-1 text-xs text-gray-500 hover:text-gray-700 py-1"
             >
               <ChevronLeft className="w-3 h-3" />Back
@@ -1096,7 +1137,7 @@ export function LoginScreen() {
           <div className="space-y-4">
             <button
               type="button"
-              onClick={() => setLoginView("main")}
+              onClick={() => switchLoginView("main")}
               className="flex items-center justify-center w-full gap-1 text-xs text-gray-500 hover:text-gray-700 py-1"
             >
               <ChevronLeft className="w-3 h-3" />Back

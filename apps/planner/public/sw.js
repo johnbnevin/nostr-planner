@@ -4,13 +4,20 @@
  * Features:
  * 1. Push notifications from the daemon
  * 2. Offline-first caching (app shell + assets)
+ *
+ * Base path is derived at runtime from the service worker's own URL,
+ * so it works regardless of deployment path (e.g. "/planner/", "/", or any nsite path).
  */
 
-const CACHE_NAME = "planner-v2";
+// Derive base path from the SW's own location (e.g. "/planner/sw.js" → "/planner/")
+const SW_PATH = self.location.pathname;
+const BASE_PATH = SW_PATH.substring(0, SW_PATH.lastIndexOf("/") + 1);
+
+const CACHE_NAME = "planner-v3";
 const APP_SHELL = [
-  "/",
-  "/index.html",
-  "/calendar.svg",
+  BASE_PATH,
+  BASE_PATH + "index.html",
+  BASE_PATH + "calendar.svg",
 ];
 
 // ── Install: pre-cache app shell ─────────────────────────────────────
@@ -54,7 +61,13 @@ self.addEventListener("fetch", (event) => {
   // Network-first for HTML (always try to get fresh app)
   if (event.request.mode === "navigate") {
     event.respondWith(
-      fetch(event.request).catch(() => caches.match("/index.html"))
+      fetch(event.request).catch(async () => {
+        const cached = await caches.match(BASE_PATH + "index.html");
+        return cached || new Response("Offline — please check your connection.", {
+          status: 503,
+          headers: { "Content-Type": "text/plain" },
+        });
+      })
     );
     return;
   }
@@ -92,8 +105,8 @@ self.addEventListener("push", (event) => {
   const title = data.title || "Planner";
   const options = {
     body: data.body || "",
-    icon: "/calendar.svg",
-    badge: "/calendar.svg",
+    icon: BASE_PATH + "calendar.svg",
+    badge: BASE_PATH + "calendar.svg",
     tag: data.tag || "planner-notification",
     data: { url: data.url },
   };
@@ -106,7 +119,7 @@ self.addEventListener("notificationclick", (event) => {
 
   // Validate notification URL: only allow same-origin or root fallback
   // to prevent open-redirect via crafted push payloads.
-  let targetUrl = "/";
+  let targetUrl = BASE_PATH;
   if (event.notification.data?.url) {
     try {
       const parsed = new URL(event.notification.data.url, self.location.origin);
@@ -114,7 +127,7 @@ self.addEventListener("notificationclick", (event) => {
         targetUrl = parsed.pathname + parsed.search + parsed.hash;
       }
     } catch {
-      // Invalid URL, use root
+      // Invalid URL, use base path
     }
   }
 

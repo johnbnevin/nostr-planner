@@ -129,7 +129,7 @@ export function getSharedCalendarRef(tags: string[][]): string | null {
  * 30078 (hiding it from other calendar clients) and restored to its
  * original kind after decryption.
  */
-export interface EncryptedPayload {
+interface EncryptedPayload {
   title: string;
   start?: string;       // YYYY-MM-DD for date events, unix string for time events
   end?: string;

@@ -248,6 +248,7 @@ function buildEventTags(e: CalendarEvent): string[][] {
       hashtags: e.hashtags.length > 0 ? e.hashtags : undefined,
       calendarRefs: e.calendarRefs.length > 0 ? e.calendarRefs : undefined,
       seriesId: e.seriesId, notify: e.notify,
+      recurrence: e.recurrence,
     });
   }
   return buildTimeEventTags({
@@ -259,6 +260,7 @@ function buildEventTags(e: CalendarEvent): string[][] {
     hashtags: e.hashtags.length > 0 ? e.hashtags : undefined,
     calendarRefs: e.calendarRefs.length > 0 ? e.calendarRefs : undefined,
     seriesId: e.seriesId, notify: e.notify,
+    recurrence: e.recurrence,
   });
 }
 
@@ -305,6 +307,9 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
   const refreshPromiseRef = useRef<Promise<void> | null>(null);
   /** Guard against concurrent doRefresh calls (e.g. effect + manual trigger). */
   const refreshingRef = useRef(false);
+  /** Stable ref to the latest doRefresh so the login effect always calls the
+   *  current version without needing doRefresh in its dependency array. */
+  const doRefreshRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   const allTags = useMemo(() => {
     const tagSet = new Set<string>();
@@ -465,7 +470,10 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       if (decryptResult.calendars.length > 0) {
         setCalendars(decryptResult.calendars);
         setActiveCalendarIds(new Set(decryptResult.calendars.map((c) => c.dTag)));
-      } else if (isFirstLoad) {
+      } else if (isFirstLoad && decryptResult.decryptErrors === 0) {
+        // Only prompt for calendar setup if we truly found zero calendars AND
+        // decryption didn't fail. If decrypt errors > 0, encrypted calendars
+        // may exist but we couldn't read them (e.g. remote signer timeout).
         setNeedsCalendarSetup(true);
       }
       setDecryptionErrors(decryptResult.decryptErrors);
@@ -489,32 +497,46 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
           return e.kind === KIND_DATE_EVENT || e.kind === KIND_TIME_EVENT || e.kind === KIND_CALENDAR;
         });
         (async () => {
-          let cleaned = 0;
-          for (const e of staleEvents) {
-            if (!mountedRef.current) return; // component unmounted — abort
+          // Filter to events that need deletion
+          const toDelete = staleEvents.filter((e) => {
             const eTag = e.tags.find((t) => t[0] === "d")?.[1];
-            if (!eTag) continue;
-            if (e.kind === KIND_CALENDAR && decryptResult.calendars.some((c) => c.dTag === eTag)) continue;
-            // Only delete plaintext events that also exist in encrypted form.
-            // This prevents accidentally deleting intentionally-public events.
+            if (!eTag) return false;
+            if (e.kind === KIND_CALENDAR && decryptResult.calendars.some((c) => c.dTag === eTag)) return false;
             if (e.kind !== KIND_CALENDAR) {
               const hasEncryptedVersion = decryptResult.events.some((de) => de.dTag === eTag);
-              if (!hasEncryptedVersion) continue;
+              if (!hasEncryptedVersion) return false;
             }
+            return true;
+          });
+
+          // Sign sequentially (NIP-07 needs one popup at a time), then publish in batches
+          const signed: SignedNostrEvent[] = [];
+          for (const e of toDelete) {
+            if (!mountedRef.current) return;
+            const eTag = e.tags.find((t) => t[0] === "d")![1];
             try {
-              const signed = await signEvent({
+              signed.push(await signEvent({
                 kind: 5,
                 created_at: Math.floor(Date.now() / 1000),
                 tags: [["a", `${e.kind}:${pubkey}:${eTag}`]],
                 content: "cleanup: remove old unencrypted event",
-              });
-              if (!mountedRef.current) return; // component unmounted — abort
-              await publishEvent(signed);
-              cleaned++;
+              }));
             } catch (err) {
-              log.warn("migration cleanup: failed to delete", eTag, err);
+              log.warn("migration cleanup: failed to sign deletion for", eTag, err);
             }
           }
+          if (!mountedRef.current) return;
+
+          // Publish in parallel batches of 10
+          let cleaned = 0;
+          const BATCH = 10;
+          for (let i = 0; i < signed.length; i += BATCH) {
+            if (!mountedRef.current) return;
+            const batch = signed.slice(i, i + BATCH);
+            const results = await Promise.allSettled(batch.map((s) => publishEvent(s)));
+            cleaned += results.filter((r) => r.status === "fulfilled").length;
+          }
+
           if (!mountedRef.current) return;
           lsSet(cleanupKey, "1");
           if (cleaned > 0) log.debug("migration cleanup: deleted", cleaned, "stale plaintext events");
@@ -532,10 +554,25 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- refs/setters from useSharing are stable
   }, [pubkey, relays, signer, signEvent, publishEvent, loadSharedKeysFromNostr]);
 
+  // Keep the ref in sync so the login effect always calls the latest doRefresh
+  useEffect(() => { doRefreshRef.current = doRefresh; }, [doRefresh]);
+
+  // Pending resolve/reject from the most recent debounced caller, so clearing the
+  // timer can resolve it immediately instead of leaving a hanging Promise.
+  const pendingResolveRef = useRef<{ resolve: () => void; reject: (e: unknown) => void } | null>(null);
+
   const refreshEvents = useCallback(async () => {
-    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    // If a debounce timer is pending, resolve the previous caller immediately
+    // (the new caller supersedes it) to avoid hanging Promises.
+    if (refreshTimerRef.current) {
+      clearTimeout(refreshTimerRef.current);
+      pendingResolveRef.current?.resolve();
+      pendingResolveRef.current = null;
+    }
     return new Promise<void>((resolve, reject) => {
+      pendingResolveRef.current = { resolve, reject };
       refreshTimerRef.current = setTimeout(async () => {
+        pendingResolveRef.current = null;
         if (refreshPromiseRef.current) {
           try { await refreshPromiseRef.current; resolve(); } catch (err) { reject(err); }
           return;
@@ -580,10 +617,20 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       persistDeletion(event.dTag);
       setEvents((prev) => prev.filter((e) => e.dTag !== event.dTag));
 
+      // Encrypted events are published as kind 30078 (KIND_APP_DATA) regardless
+      // of their original NIP-52 kind. The deletion a-tag must reference the
+      // *published* kind so relays can match and delete the correct event.
+      const isEncrypted = shouldEncrypt(event.calendarRefs) || !!getSharedKeyForCalendars(event.calendarRefs);
+      const publishedKind = isEncrypted ? KIND_APP_DATA : event.kind;
       const tags: string[][] = [
-        ["a", `${event.kind}:${event.pubkey}:${event.dTag}`],
+        ["a", `${publishedKind}:${event.pubkey}:${event.dTag}`],
         ["reason", "user-deleted"],
       ];
+      // If the published kind differs from the original, also delete the original
+      // coordinate to cover any pre-migration plaintext copies on relays.
+      if (publishedKind !== event.kind) {
+        tags.push(["a", `${event.kind}:${event.pubkey}:${event.dTag}`]);
+      }
       const signed = await signEvent({
         kind: 5,
         created_at: Math.floor(Date.now() / 1000),
@@ -592,7 +639,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       });
       await publishEvent(signed);
     },
-    [signEvent, publishEvent, persistDeletion]
+    [signEvent, publishEvent, persistDeletion, shouldEncrypt, getSharedKeyForCalendars]
   );
 
   // ── Move event ─────────────────────────────────────────────────────
@@ -1052,16 +1099,24 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       }
 
       if (!pubkey) return;
+      // Encrypted/shared calendars are published as kind 30078 — delete both
+      // the published kind and the original kind to cover all relay states.
+      const isEncrypted = shouldEncrypt([dTag]) || sharedKeys.has(dTag);
+      const publishedKind = isEncrypted ? KIND_APP_DATA : KIND_CALENDAR;
+      const tags: string[][] = [["a", `${publishedKind}:${pubkey}:${dTag}`]];
+      if (publishedKind !== KIND_CALENDAR) {
+        tags.push(["a", `${KIND_CALENDAR}:${pubkey}:${dTag}`]);
+      }
       const signed = await signEvent({
         kind: 5,
         created_at: Math.floor(Date.now() / 1000),
-        tags: [["a", `${KIND_CALENDAR}:${pubkey}:${dTag}`]],
+        tags,
         content: "deleted",
       });
       await publishEvent(signed);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setSharedKeys is a stable setter from useSharing
-    [pubkey, signEvent, publishEvent, persistDeletion, sharedKeys]
+    [pubkey, signEvent, publishEvent, persistDeletion, sharedKeys, shouldEncrypt]
   );
 
   // ── Leave shared calendar (wraps SharingContext + UI cleanup) ───────
@@ -1121,7 +1176,18 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       // Cache miss is fine
     });
 
-    doRefresh();
+    // Safety net: clear the loading indicator after 60s even if relay sync
+    // hasn't finished. Prevents "Loading events…" from staying forever when
+    // relays are slow or unreachable. Longer timeout because NIP-46 remote
+    // signers need RPC calls for each NIP-44 decrypt operation.
+    const safetyTimer = setTimeout(() => {
+      setEventsLoading((prev) => {
+        if (prev) log.warn("clearing eventsLoading after safety timeout");
+        return false;
+      });
+    }, 60_000);
+
+    doRefreshRef.current().finally(() => clearTimeout(safetyTimer));
   }, [pubkey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const contextValue = useMemo(() => ({

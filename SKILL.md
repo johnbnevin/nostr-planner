@@ -1,29 +1,12 @@
 # Nostr React/TypeScript Developer Skill
 
-> Paste this file as CLAUDE.md at the start of any Nostr project.
-> This is a compass, not a rulebook. Nostr is young and fast-moving.
-> Devs sometimes disagree. Specs are still drafts. Prefer live sources over anything in this file.
+> Paste this file as CLAUDE.md at the start of any Nostr project, and ask your agent to revise it as you give it instructions
+> Or include it as nostr-skill.md or similar and your agent can reference it accordingly
 
----
+## Authorities and References
+Check these nostr OG geniuses for recent code examples in production and on github or nostr repos.  This will provide real world examples of architecture choices and feature implementation.  They don't always agree with each other, and that's fine.
 
-## MCP Tools — Use These Before Guessing
-
-| Tool | Use |
-|------|-----|
-| `mcp__nostr__read_nip` | Read full NIP spec — e.g. `read_nip("52")` |
-| `mcp__nostr__read_kind` | Look up any kind number |
-| `mcp__nostr__read_tag` | Look up a tag name |
-| `mcp__nostr__read_nips_index` | Browse all NIPs |
-| `mcp__nostr__read_protocol` | Protocol fundamentals |
-| `mcp__nostr__generate_kind` | Scaffold a new event kind |
-| `mcp__nostr__fetch_event` | Fetch a live event from relays |
-
----
-
-## Authorities
-
-Check their recent GitHub repos when in doubt — they don't always agree with each other, and that's fine:
-
+Authorities:
 - **fiatjaf** — protocol architect. `khatru` (relay framework), `nak` (CLI tool), `nos2x` (NIP-07 browser extension), `awesome-nostr`
 - **jb55** — tooling. `nostril`, `nostr-js`
 - **hzrd149** — Blossom storage. `blossom`, `blossom-client-sdk`, `blossom-server`
@@ -32,7 +15,11 @@ Check their recent GitHub repos when in doubt — they don't always agree with e
 - **vitorpamplona** — `amethyst`, `quartz`
 - **purrgrammer** — `grimoire`, `https://github.com/purrgrammer/grimoire/tree/main/.claude/skills`
 - **alex gleason**  — `soapbox.pub`, `ditto.pub`, `nostrify`, `https://github.com/purrgrammer/grimoire/tree/main/.claude/skills`
-Key references:
+- **MK Fain**  — `MKStacks`
+- **Pablof7z**  — `https://github.com/pablof7z`
+- **vcavallo**  — `https://github.com/vcavallo`, `nstrfy.sh`, `attestr`
+
+References:
 - NIPs: https://nips.nostr.com
 - Kind registry (check before picking/creating a kind): https://undocumented.nostrkinds.info/
 - Outbox model research: https://github.com/nostrability/outbox
@@ -43,29 +30,31 @@ Key references:
 - NAK skill doc: https://gitlab.com/soapbox-pub/nostr-skills/-/blob/main/skills/nak/SKILL.md
 - Nostr client tools: https://github.com/nbd-wtf/nostr-tools
 - Nostr projects tools: https://github.com/soapbox-pub/nostrify
-- Cheap and fast statistics (zap totals, follower totals etc): https://antiprimal.net/
----
 
-## ⚠ Before Choosing or Creating an Event Kind
+## To Keep In Mind
+- This is a compass, not a rulebook. Nostr is young and fast-moving.
+- Devs sometimes disagree. Specs are still drafts.  Consult all projects, but prefer live sources and through-testing working models in production with recent commits and numerous contributors
+- Make variable names intuitive, explicit, and self documenting (but adhere to existing standards where applicable)
+- Do things the right way, not the easy way
+- Aim for elegance and optimized performance without compromising on privacy, security, and cypherpunk sensibilities
+- No consensus winner yet in relay selection algorithms (outbox, Thompson Sampling, etc.)
+- Never leave feature gaps between platforms.  All platforms should in all aspects be as close to the same on each to retain full functionality and seamless UX
+- Never log or transmit private keys
+- Private keys will never touch a server
+- Always encrypt private data
+- No telemetry, no tracking
+- Preserve user choice, prefer opt-in
 
-Do this every time, even if you think you know the answer:
+## Events
+Categories for nostr events:
 
-1. `mcp__nostr__read_kind` — does this kind already exist?
-2. Check https://undocumented.nostrkinds.info/ — is the number already in use?
-3. `mcp__nostr__read_nips_index` — is there a NIP covering this use case?
-4. Look at what the authority devs have shipped — don't reinvent what already exists
+- **Regular** (1–9999, 11000–19999): stored, not replaced
+- **Replaceable** (0, 10000–19999): latest per pubkey+kind wins
+- **Addressable** (30000–39999): latest per pubkey+kind+`d` tag wins
+- **Ephemeral** (20000–29999): not stored by relays
 
-When creating a new kind:
-- Don't invent kinds for things that already have NIPs (even draft ones)
-- Don't pick a number already in use — verify at undocumented.nostrkinds.info
-- Prefer 30000–39999 for addressable (parameterized replaceable) events
-- Document your reason for the specific number chosen
+Nostr event structure:
 
----
-
-## Protocol Basics (NIP-01)
-
-Event structure:
 ```json
 {
   "id": "<sha256 of serialized event>",
@@ -78,33 +67,56 @@ Event structure:
 }
 ```
 
-Event categories by kind range:
-- **Regular** (1–9999, 11000–19999): stored, not replaced
-- **Replaceable** (0, 10000–19999): latest per pubkey+kind wins
-- **Addressable** (30000–39999): latest per pubkey+kind+`d` tag wins
-- **Ephemeral** (20000–29999): not stored by relays
-
----
-
-## Key Libraries
-
-These overlap — pick one per project and stay consistent.
-
 ## Nostr Relays
+When there is no other preference expressed by user, or a hardcoded relay is needed, or when testing, try these first:
 
-When there is no other preference expressed by user, the following relay set should be used by default:
 wss://relay.damus.io
 wss://nos.lol
 wss://relay.ditto.pub
 wss://relay.primal.net
 
-## Blossom Servers
+## Nostr Archives / Indexers
+For cheap and fast statistics, such as zap totals, follower totals, or for an efficient first notecheck before outbox searches:
 
-When there is no other preference expressed by user, the following blossom servers should be used by default:
-https://cdn.sovbit.host/
+wss://antiprimal.net/
+wss://indexer.nostrarchives.com/
+
+## Blossom Servers
+When there is no other preference expressed by user, or a hardcoded server is needed, or when testing, try these blossom servers:
+
+https://blossom.nostr.build/
+https://nostr.download/
 https://blossom.yakihonne.com/
 https://blossom.primal.net/
 https://nostrcheck.me/
+
+## ⚠ Before Choosing or Creating an Event Kind
+Do this:
+
+1. `mcp__nostr__read_kind` — does this kind already exist?
+2. Check https://undocumented.nostrkinds.info/ — is the number already in use?
+3. `mcp__nostr__read_nips_index` — is there a NIP covering this use case?
+4. Look at what the authority devs have shipped — don't reinvent what already exists
+
+When creating a new kind:
+- Don't invent kinds for things that already have NIPs (even draft ones)
+- Prefer 30000–39999 for addressable (parameterized replaceable) events
+- Document your reason for the specific number chosen
+
+## Key Libraries
+These overlap — pick one per project and stay consistent.
+
+## MCP Tools — Use These Before Guessing
+
+| Tool | Use |
+|------|-----|
+| `mcp__nostr__read_nip` | Read full NIP spec — e.g. `read_nip("52")` |
+| `mcp__nostr__read_kind` | Look up any kind number |
+| `mcp__nostr__read_tag` | Look up a tag name |
+| `mcp__nostr__read_nips_index` | Browse all NIPs |
+| `mcp__nostr__read_protocol` | Protocol fundamentals |
+| `mcp__nostr__generate_kind` | Scaffold a new event kind |
+| `mcp__nostr__fetch_event` | Fetch a live event from relays |
 
 ### @nostrify/nostrify (JSR)
 ```bash
@@ -148,13 +160,6 @@ App connects to a signer app via Nostr relay. Private key never touches the web 
 **NIP-49 — encrypted local key:**
 `ncryptsec` format. Password-protected key for backup/restore flows.
 
-Rules:
-- Never accept nsec in production UI
-- Never log or transmit private keys
-- Key never touches a server you control
-
----
-
 ## Relay Strategy
 
 **NIP-65 (kind 10002) — user's relay list:**
@@ -164,10 +169,7 @@ Fetch this first for any user. It declares where to read/write their events.
 
 **NIP-42:** Some relays require authentication. Handle the `AUTH` challenge gracefully rather than failing silently.
 
----
-
 ## Blossom Storage (hzrd149)
-
 Decentralized blob storage. SHA-256 content-addressed. Nostr keys for auth.
 
 ```bash
@@ -191,7 +193,6 @@ Spec: https://github.com/hzrd149/blossom (BUD-01 through BUD-09)
 ---
 
 ## NSite (Decentralized Static Hosting)
-
 Hosts static web apps under your Nostr npub. Accessible at `<npub>.nostr.hu` and other gateways.
 
 Architecture:
@@ -205,23 +206,7 @@ npm install -g nsite-cli
 npm run build
 nsite-cli deploy ./dist
 ```
-
 Requires NIP-07 extension or nsec for signing deployments. Anyone can visit the nsite and login with their own Nostr keys — no server accounts needed.
-
----
-
-## What's Still Evolving (early 2026)
-
-No consensus winner yet in these areas:
-- Relay selection algorithms (outbox, Thompson Sampling, etc.)
-- Key management UX (NIP-07 vs NIP-46 vs custodial)
-- Blossom server discovery and federation
-- NSite tooling and gateway reliability
-- Many NIPs are still marked `draft` or `optional`
-
-When you hit uncertainty: check the authority devs' recent commits, use MCP tools to read the current NIP, and prefer simpler over clever.
-
----
 
 ## NAK CLI (useful for dev & testing)
 

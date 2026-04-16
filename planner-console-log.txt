@@ -1,0 +1,56 @@
+client:789 [vite] connecting...
+client:912 [vite] connected.
+react-dom_client.js?v=e958626c:20103 Download the React DevTools for a better development experience: https://react.dev/link/react-devtools
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] Forced reflow while executing JavaScript took 39ms
+logger.ts:67 [nip46] waiting for signer to scan QR...
+logger.ts:67 [nip46] handshake complete, bunker: 798159cef38e
+logger.ts:67 [nip46] calling get_public_key...
+logger.ts:67 [nip46] got pubkey: 61cb31a85d31
+logger.ts:67 [nostr] login finalized for 61cb31a8
+logger.ts:67 [tasks] fetched 2 app-data events, d-tags: nostr-planner-lists, nostr-planner-daily
+logger.ts:67 [tasks] fetched 2 app-data events, d-tags: nostr-planner-lists, nostr-planner-daily
+logger.ts:67 [tasks] fetched 0 app-data events, d-tags: (none)
+logger.ts:68 [calendar] clearing eventsLoading after safety timeout
+warn @ logger.ts:68
+(anonymous) @ CalendarContext.tsx:1175
+basicStateReducer @ react-dom_client.js?v=e958626c:5854
+dispatchSetStateInternal @ react-dom_client.js?v=e958626c:6822
+dispatchSetState @ react-dom_client.js?v=e958626c:6803
+(anonymous) @ CalendarContext.tsx:1174
+logger.ts:68 [calendar] clearing eventsLoading after safety timeout
+warn @ logger.ts:68
+(anonymous) @ CalendarContext.tsx:1175
+basicStateReducer @ react-dom_client.js?v=e958626c:5854
+updateReducerImpl @ react-dom_client.js?v=e958626c:5943
+updateReducer @ react-dom_client.js?v=e958626c:5887
+useState @ react-dom_client.js?v=e958626c:18996
+exports.useState @ chunk-3ANUAJBL.js?v=e958626c:959
+CalendarProvider @ CalendarContext.tsx:277
+react_stack_bottom_frame @ react-dom_client.js?v=e958626c:18509
+renderWithHooks @ react-dom_client.js?v=e958626c:5654
+updateFunctionComponent @ react-dom_client.js?v=e958626c:7475
+beginWork @ react-dom_client.js?v=e958626c:8525
+runWithFiberInDEV @ react-dom_client.js?v=e958626c:997
+performUnitOfWork @ react-dom_client.js?v=e958626c:12561
+workLoopSync @ react-dom_client.js?v=e958626c:12424
+renderRootSync @ react-dom_client.js?v=e958626c:12408
+performWorkOnRoot @ react-dom_client.js?v=e958626c:11766
+performWorkOnRootViaSchedulerTask @ react-dom_client.js?v=e958626c:13505
+performWorkUntilDeadline @ react-dom_client.js?v=e958626c:36
+logger.ts:67 [calendar] looking for backup ref…
+logger.ts:67 [calendar] found backup ref 7a1cbdddf88314948b0e7b376b4081f9936537306066a6af3df9dff3b5fdfab6
+logger.ts:67 [settings] restoring settings from backup snapshot
+logger.ts:67 [tasks] fetched 2 app-data events, d-tags: nostr-planner-daily, nostr-planner-lists
+react-dom_client.js?v=e958626c:13527 [Violation] 'click' handler took 177ms
+react-dom_client.js?v=e958626c:13527 [Violation] 'click' handler took 178ms
+logger.ts:67 [settings] restoring settings from backup snapshot
+logger.ts:67 [tasks] fetched 2 app-data events, d-tags: nostr-planner-daily, nostr-planner-lists
+react-dom_client.js?v=e958626c:13527 [Violation] 'click' handler took 191ms
+react-dom_client.js?v=e958626c:13527 [Violation] 'click' handler took 172ms

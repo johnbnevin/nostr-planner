@@ -15,70 +15,21 @@ import { nip19 } from "nostr-tools";
 import { verifyEvent } from "nostr-tools/pure";
 import type { NPool } from "@nostrify/nostrify";
 import type { Config } from "./config.js";
+import {
+  escapeIcal,
+  sanitizeRRule,
+  foldLine,
+  formatIcalDate,
+} from "@nostr-planner/ical-utils";
 
 const KIND_DATE_EVENT = 31922;
 const KIND_TIME_EVENT = 31923;
 
-/**
- * Escape special characters in iCal property values per RFC 5545 §3.3.11.
- * Also strips bare CR characters which could be used for CRLF injection.
- */
-function escapeIcal(text: string): string {
-  return text
-    .replace(/\r/g, "")       // strip stray CR (prevents CRLF injection)
-    .replace(/\\/g, "\\\\")
-    .replace(/;/g, "\\;")
-    .replace(/,/g, "\\,")
-    .replace(/\n/g, "\\n");
-}
+/** Node.js byte-length function for foldLine (avoids TextEncoder in Node). */
+const nodeByteLen = (s: string) => Buffer.byteLength(s, "utf-8");
 
-/**
- * Validate and sanitize an RRULE string.
- * Strips any CRLF sequences (injection guard), verifies the value starts with
- * a recognized FREQ= parameter, and ensures the remainder contains only safe
- * RRULE characters (letters, digits, =, comma, plus, hyphen, semicolon).
- * Returns null if the value is unsafe or malformed.
- */
-function sanitizeRRule(rrule: string): string | null {
-  const cleaned = rrule.replace(/[\r\n]/g, "");
-  if (!/^FREQ=(YEARLY|MONTHLY|WEEKLY|DAILY|HOURLY|MINUTELY|SECONDLY)(;[A-Z0-9=,+\-]+)*$/i.test(cleaned)) {
-    return null;
-  }
-  return cleaned;
-}
-
-/**
- * Fold iCal lines at 75 octets per RFC 5545 §3.1.
- * Uses Buffer.byteLength to correctly handle multibyte UTF-8 characters
- * (e.g., emoji in event titles) which occupy more than 1 byte per char.
- */
-function foldLine(line: string): string {
-  if (Buffer.byteLength(line, "utf-8") <= 75) return line;
-  const chunks: string[] = [];
-  let current = "";
-  for (const char of line) {
-    const charBytes = Buffer.byteLength(char, "utf-8");
-    const currentBytes = Buffer.byteLength(current, "utf-8");
-    const limit = chunks.length === 0 ? 75 : 74; // continuation lines have 1-byte " " prefix
-    if (currentBytes + charBytes > limit) {
-      chunks.push(current);
-      current = char;
-    } else {
-      current += char;
-    }
-  }
-  if (current) chunks.push(current);
-  return chunks.map((c, i) => (i === 0 ? c : " " + c)).join("\r\n");
-}
-
-function formatDate(unixMs: number, allDay: boolean): string {
-  const d = new Date(unixMs);
-  if (allDay) {
-    const pad = (n: number) => String(n).padStart(2, "0");
-    return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}`;
-  }
-  return d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-}
+/** Convenience: fold an iCal line using Node.js Buffer for byte counting. */
+const fold = (line: string) => foldLine(line, nodeByteLen);
 
 async function buildIcalFeed(pool: NPool, pubkey: string): Promise<string> {
   const controller = new AbortController();
@@ -114,33 +65,42 @@ async function buildIcalFeed(pool: NPool, pubkey: string): Promise<string> {
       const startRaw = event.tags.find((t) => t[0] === "start")?.[1];
       const endRaw = event.tags.find((t) => t[0] === "end")?.[1];
       const location = event.tags.find((t) => t[0] === "location")?.[1];
+      const link = event.tags.find((t) => t[0] === "r")?.[1];
       const rruleRaw = event.tags.find((t) => t[0] === "rrule")?.[1];
+      const hashtags = event.tags.filter((t) => t[0] === "t" && typeof t[1] === "string").map((t) => t[1]);
       if (!dTag || !startRaw) continue;
 
       const allDay = event.kind === KIND_DATE_EVENT;
 
       lines.push("BEGIN:VEVENT");
-      lines.push(foldLine(`UID:${escapeIcal(dTag)}@nostr-planner`));
-      lines.push(foldLine(`DTSTAMP:${formatDate(event.created_at * 1000, false)}`));
+      lines.push(fold(`UID:${escapeIcal(dTag)}@nostr-planner`));
+      lines.push(fold(`DTSTAMP:${formatIcalDate(new Date(event.created_at * 1000), false)}`));
 
       if (allDay) {
-        lines.push(foldLine(`DTSTART;VALUE=DATE:${startRaw.replace(/-/g, "")}`));
-        if (endRaw) lines.push(foldLine(`DTEND;VALUE=DATE:${endRaw.replace(/-/g, "")}`));
+        lines.push(fold(`DTSTART;VALUE=DATE:${startRaw.replace(/-/g, "")}`));
+        if (endRaw) lines.push(fold(`DTEND;VALUE=DATE:${endRaw.replace(/-/g, "")}`));
       } else {
         const startSec = parseInt(startRaw, 10);
         if (isNaN(startSec)) continue;
-        lines.push(foldLine(`DTSTART:${formatDate(startSec * 1000, false)}`));
+        lines.push(fold(`DTSTART:${formatIcalDate(new Date(startSec * 1000), false)}`));
         if (endRaw) {
           const endSec = parseInt(endRaw, 10);
-          if (!isNaN(endSec)) lines.push(foldLine(`DTEND:${formatDate(endSec * 1000, false)}`));
+          if (!isNaN(endSec)) lines.push(fold(`DTEND:${formatIcalDate(new Date(endSec * 1000), false)}`));
         }
       }
 
-      lines.push(foldLine(`SUMMARY:${escapeIcal(title)}`));
-      if (location) lines.push(foldLine(`LOCATION:${escapeIcal(location)}`));
+      lines.push(fold(`SUMMARY:${escapeIcal(title)}`));
+      if (event.content) lines.push(fold(`DESCRIPTION:${escapeIcal(event.content)}`));
+      if (location) lines.push(fold(`LOCATION:${escapeIcal(location)}`));
+      if (link && /^https?:\/\//i.test(link)) {
+        lines.push(fold(`URL:${link.replace(/[\r\n]/g, "")}`));
+      }
+      if (hashtags.length > 0) {
+        lines.push(fold(`CATEGORIES:${hashtags.map(escapeIcal).join(",")}`));
+      }
       if (rruleRaw) {
         const rrule = sanitizeRRule(rruleRaw);
-        if (rrule) lines.push(foldLine(`RRULE:${rrule}`));
+        if (rrule) lines.push(fold(`RRULE:${rrule}`));
       }
 
       lines.push("END:VEVENT");

@@ -39,6 +39,8 @@ const BLOSSOM_SERVERS = [
   "https://blossom.yakihonne.com",
   "https://blossom.primal.net",
   "https://nostrcheck.me",
+  "https://blossom.nostr.build",
+  "https://nostr.download",
 ];
 
 /** A single backup snapshot with its hash, location, and statistics. */
@@ -273,14 +275,32 @@ export async function downloadBackup(
         }
         let data = JSON.parse(new TextDecoder().decode(blob));
         // NIP-44 encrypted backup wrapper — decrypt to get the inner JSON
-        if (data.encrypted && data.v === 1 && data.data && nip44 && pubkey) {
+        if (data.encrypted && nip44 && pubkey) {
           try {
-            const decrypted = await nip44.decrypt(pubkey, data.data);
-            const parsed = JSON.parse(decrypted);
-            // Validate decrypted structure before accepting
+            let decryptedJson: string;
+            if (data.v === 2 && Array.isArray(data.chunks)) {
+              // Chunked format: decrypt each chunk and concatenate
+              const parts: string[] = [];
+              for (const chunk of data.chunks) {
+                if (typeof chunk !== "string") throw new Error("invalid chunk type");
+                parts.push(await nip44.decrypt(pubkey, chunk));
+              }
+              decryptedJson = parts.join("");
+            } else if (data.v === 1 && typeof data.data === "string") {
+              // Single-blob format
+              if (data.data.length > MAX_BACKUP_BYTES) {
+                log.warn("encrypted backup data field too large from", server);
+                continue;
+              }
+              decryptedJson = await nip44.decrypt(pubkey, data.data);
+            } else {
+              log.warn("unknown encrypted backup format from", server);
+              continue;
+            }
+            const parsed = JSON.parse(decryptedJson);
             if (Array.isArray(parsed)) {
               data = parsed; // legacy bare array format
-            } else if (parsed && typeof parsed === "object" && (parsed.version && Array.isArray(parsed.events))) {
+            } else if (parsed && typeof parsed === "object" && parsed.version && Array.isArray(parsed.events)) {
               data = parsed;
             } else {
               log.warn("Decrypted backup has invalid structure from", server);
@@ -483,8 +503,20 @@ export async function uploadBackup(
   if (!nip44 || !pubkey) {
     throw new Error("NIP-44 encryption is required for backups. Cannot upload plaintext backup.");
   }
-  const encrypted = await nip44.encrypt(pubkey, backupJson);
-  const uploadData = JSON.stringify({ encrypted: true, v: 1, data: encrypted });
+  // NIP-44 has a 65535-byte plaintext limit. Chunk the backup into pieces
+  // that fit, encrypt each separately, and store as an array.
+  const NIP44_MAX = 60_000; // leave headroom below the 65535 hard limit
+  let uploadData: string;
+  if (backupJson.length <= NIP44_MAX) {
+    const encrypted = await nip44.encrypt(pubkey, backupJson);
+    uploadData = JSON.stringify({ encrypted: true, v: 1, data: encrypted });
+  } else {
+    const chunks: string[] = [];
+    for (let i = 0; i < backupJson.length; i += NIP44_MAX) {
+      chunks.push(await nip44.encrypt(pubkey, backupJson.slice(i, i + NIP44_MAX)));
+    }
+    uploadData = JSON.stringify({ encrypted: true, v: 2, chunks });
+  }
   const blob = new Blob([uploadData], { type: "application/json" });
   // Guard against uploading unexpectedly large blobs (50 MB limit matches download cap)
   const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -614,4 +646,3 @@ export async function performFullBackup(
   return { uploadedTo, total: result.counts.total };
 }
 
-export { BLOSSOM_SERVERS };

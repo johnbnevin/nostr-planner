@@ -60,8 +60,6 @@ Technical reference for contributors. Covers data flow, encryption layers, modul
 | `nip46Signer` | `lib/nip46Signer.ts` | NIP-46 remote signer (Amber, Nsec.app) |
 | `backup` | `lib/backup.ts` | Blossom blob backup/restore with SHA-256 verification |
 | `ical` | `lib/ical.ts` | iCal import/export with RRULE support |
-| `giftwrap` | `lib/giftwrap.ts` | NIP-59 gift-wrap/unwrap for metadata-blind publishing |
-| `searchTokens` | `lib/searchTokens.ts` | HMAC-SHA256 blind search tokens for searchable encryption |
 | `platform` | `lib/platform.ts` | Tauri vs. browser detection |
 
 ## Data Flow
@@ -148,10 +146,6 @@ In Tauri builds, the user's Nostr private key is encrypted with a password using
 - Encryption: XChaCha20-Poly1305
 - Storage format: bech32-encoded `ncryptsec1...` string
 - Stored in Tauri's plugin-store JSON file (not the OS keychain, but encrypted at rest)
-
-### Layer 4: Gift-Wrap (NIP-59, optional)
-
-For metadata-blind publishing, events can be wrapped in NIP-59 gift-wrap envelopes. This hides the inner event kind, timestamp, and author behind an ephemeral outer envelope. Only available with LocalSigner (requires raw key access).
 
 ## Relay Strategy (NIP-65 Outbox)
 

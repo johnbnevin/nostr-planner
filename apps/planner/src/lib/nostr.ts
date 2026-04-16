@@ -93,7 +93,6 @@ export const DEFAULT_RELAYS = [
   "wss://relay.damus.io",
   "wss://nos.lol",
   "wss://relay.ditto.pub",
-  "wss://relay.primal.net",
 ];
 
 /** Supported recurrence frequencies, matching iCal RRULE FREQ values. */
@@ -163,15 +162,17 @@ export function fromRRule(rrule: string): RecurrenceRule | null {
     const raw = parseInt(parts.COUNT);
     count = Math.min(Math.max(1, raw || 52), MAX_RECURRENCE);
   } else if (parts.UNTIL) {
-    // UNTIL=YYYYMMDD or UNTIL=YYYYMMDDTHHMMSSZ — compute count from date range
+    // UNTIL=YYYYMMDD or UNTIL=YYYYMMDDTHHMMSSZ — estimate count from the UNTIL date.
+    // We don't have the event's start date here, so we use a generous estimate
+    // based on the span from epoch to UNTIL. The caller (expandRecurringEvent)
+    // will cap the actual expansion anyway.
     const untilStr = parts.UNTIL.replace(/[^0-9]/g, "").slice(0, 8);
     const untilDate = new Date(`${untilStr.slice(0, 4)}-${untilStr.slice(4, 6)}-${untilStr.slice(6, 8)}`);
     if (!isNaN(untilDate.getTime())) {
-      const now = new Date();
-      const diffMs = untilDate.getTime() - now.getTime();
-      const diffDays = Math.max(1, Math.ceil(diffMs / 86400000));
-      const freqDivisors: Record<RecurrenceFreq, number> = { daily: 1, weekly: 7, monthly: 30, yearly: 365 };
-      count = Math.min(Math.max(1, Math.ceil(diffDays / freqDivisors[freq])), MAX_RECURRENCE);
+      // Use a generous default: enough recurrences to cover ~2 years of the
+      // given frequency, capped by MAX_RECURRENCE.
+      const freqDefaults: Record<RecurrenceFreq, number> = { daily: 365, weekly: 104, monthly: 24, yearly: 5 };
+      count = Math.min(freqDefaults[freq], MAX_RECURRENCE);
     } else {
       count = 52;
     }
@@ -339,7 +340,10 @@ export function parseCalendarEvent(event: {
   let end: Date | undefined;
 
   if (allDay) {
-    // Date events: `start` is "YYYY-MM-DD", parsed at midnight local time
+    // Date events: `start` is "YYYY-MM-DD", parsed at local midnight.
+    // All-day dates represent calendar dates (not moments in time), so local
+    // time is correct — it ensures the date displays correctly regardless of
+    // timezone. The iCal import path (ical.ts) also normalises to local midnight.
     start = new Date(startRaw + "T00:00:00");
     if (endRaw) end = new Date(endRaw + "T00:00:00");
   } else {
@@ -509,11 +513,14 @@ export function buildTimeEventTags(opts: {
     ["start", String(opts.startUnix)],
     ["D", String(dayFloor)],
   ];
-  if (opts.endUnix) {
+  if (opts.endUnix != null) {
     tags.push(["end", String(opts.endUnix)]);
     // If the event spans multiple days, emit a `D` tag for each additional day
     // so the event is discoverable in relay queries for any day it covers.
-    const endDayFloor = Math.floor(opts.endUnix / 86400);
+    // NIP-52 end is exclusive, so subtract 1 second to avoid generating a D tag
+    // for a day the event doesn't actually cover (e.g. end exactly at midnight).
+    const effectiveEnd = opts.endUnix > opts.startUnix ? opts.endUnix - 1 : opts.endUnix;
+    const endDayFloor = Math.floor(effectiveEnd / 86400);
     // Cap multi-day D tags to 366 to prevent tag explosion from malformed events
     const maxDayFloor = Math.min(endDayFloor, dayFloor + 366);
     for (let d = dayFloor + 1; d <= maxDayFloor; d++) {
@@ -522,7 +529,7 @@ export function buildTimeEventTags(opts: {
   }
   if (opts.timezone) {
     tags.push(["start_tzid", opts.timezone]);
-    if (opts.endUnix) tags.push(["end_tzid", opts.timezone]);
+    if (opts.endUnix != null) tags.push(["end_tzid", opts.timezone]);
   }
   if (opts.location) tags.push(["location", opts.location]);
   if (opts.link) tags.push(["r", opts.link]);
@@ -538,7 +545,8 @@ export function buildTimeEventTags(opts: {
   return tags;
 }
 
-/** Format a Date as YYYY-MM-DD (local time) for NIP-52 date event tags. */
+/** Format a Date as YYYY-MM-DD (local time) for NIP-52 date event tags.
+ *  All-day dates represent calendar dates, so local time accessors are correct. */
 export function formatDateTag(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }

@@ -27,7 +27,9 @@ import { useNotifications } from "../hooks/useNotifications";
 import { useAutoBackup } from "../hooks/useAutoBackup";
 import { useDigest } from "../hooks/useDigest";
 import { decodeInvitePayload } from "../lib/sharing";
+import { onPublishFailure, queryEvents } from "../lib/relay";
 import type { CalendarEvent, RecurrenceFreq } from "../lib/nostr";
+import { KIND_APP_DATA } from "../lib/nostr";
 import type { ParsedIcalEvent } from "../lib/ical";
 import { logger } from "../lib/logger";
 
@@ -61,6 +63,7 @@ export function CalendarApp() {
   useDigest();
   // Guards to prevent re-running one-shot effects across re-renders
   const autoRestoreAttempted = useRef(false);
+  const [autoRestoreComplete, setAutoRestoreComplete] = useState(false);
   const viewModeInitialized = useRef(false);
 
   // Reset auto-restore guard on logout so it runs again on next login.
@@ -70,6 +73,7 @@ export function CalendarApp() {
     if (!pubkey) {
       autoRestoreAttempted.current = false;
       viewModeInitialized.current = false;
+      setAutoRestoreComplete(false);
     }
   }, [pubkey]);
 
@@ -107,6 +111,17 @@ export function CalendarApp() {
   );
   const [prefillDate, setPrefillDate] = useState<Date | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>(viewMode);
+  const [publishError, setPublishError] = useState<string | null>(null);
+
+  // Subscribe to relay publish failures for user-facing feedback
+  useEffect(() => {
+    const unsub = onPublishFailure((error) => {
+      setPublishError(error.message);
+      // Auto-dismiss after 6 seconds
+      setTimeout(() => setPublishError(null), 6000);
+    });
+    return unsub;
+  }, []);
 
   // Sync mobileTab when viewMode changes from desktop controls, but preserve
   // mobile-only tabs (daily/todos) that don't map to a calendar viewMode.
@@ -131,6 +146,49 @@ export function CalendarApp() {
     templateEvent: CalendarEvent;
   } | null>(null);
 
+  // ── Scan additional relays for missing events ──────────────────────
+  const [scanningRelays, setScanningRelays] = useState(false);
+
+  const EXTRA_RELAYS = [
+    "wss://relay.primal.net",
+    "wss://relay.nostr.band",
+    "wss://purplepag.es",
+    "wss://relay.snort.social",
+  ];
+
+  const handleScanRelays = async () => {
+    if (!pubkey || scanningRelays) return;
+    setScanningRelays(true);
+    try {
+      // Query extra relays (not in our default set) for this user's events
+      const extraOnly = EXTRA_RELAYS.filter((r) => !relays.includes(r));
+      if (extraOnly.length === 0) {
+        log.info("no additional relays to scan");
+        setScanningRelays(false);
+        return;
+      }
+      log.info("scanning", extraOnly.length, "additional relays...");
+      const found = await queryEvents(extraOnly, {
+        kinds: [31922, 31923, 31924, KIND_APP_DATA],
+        authors: [pubkey],
+      }, 12_000);
+      if (found.length > 0) {
+        log.info("found", found.length, "events on extra relays, re-publishing to your relays");
+        // Re-publish found events to the user's relays so they're available next time
+        for (const evt of found) {
+          try { await publishEvent(evt); } catch { /* best effort */ }
+        }
+        await forceFullRefresh();
+      } else {
+        log.info("no additional events found on extra relays");
+      }
+    } catch (err) {
+      log.error("relay scan failed", err);
+    } finally {
+      setScanningRelays(false);
+    }
+  };
+
   // Auto-restore: on first login, if the relay returns zero events, look for
   // a Blossom backup blob (stored as a replaceable Nostr event with a sha256
   // ref). If found, download and re-publish all events to the user's relays.
@@ -139,6 +197,7 @@ export function CalendarApp() {
     if (!pubkey || eventsLoading || autoRestoreAttempted.current) return;
     if (events.length > 0) {
       autoRestoreAttempted.current = true;
+      setAutoRestoreComplete(true);
       return;
     }
     autoRestoreAttempted.current = true;
@@ -151,6 +210,7 @@ export function CalendarApp() {
         if (!ref) {
           log.info("no backup ref found on relays");
           setAutoRestoreStatus(null);
+          setAutoRestoreComplete(true);
           return;
         }
         log.info("found backup ref", ref.sha256);
@@ -159,6 +219,7 @@ export function CalendarApp() {
         const backup = await downloadBackup(ref, signer?.nip44, pubkey);
         if (!backup || backup.events.length === 0) {
           setAutoRestoreStatus(null);
+          setAutoRestoreComplete(true);
           return;
         }
 
@@ -170,12 +231,15 @@ export function CalendarApp() {
           restoreSettings(backup.preferences);
         }
 
+        setAutoRestoreStatus(`Restored ${backup.events.length} items. Syncing...`);
         await Promise.all([forceFullRefresh(), refreshTasks()]);
         setAutoRestoreStatus(`Restored ${backup.events.length} items from backup.`);
         setTimeout(() => setAutoRestoreStatus(null), 3000);
+        setAutoRestoreComplete(true);
       } catch (err) {
         log.error("auto-restore failed", err);
         setAutoRestoreStatus(null);
+        setAutoRestoreComplete(true);
       }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps -- signer?.nip44 is intentionally omitted; this effect runs once via autoRestoreAttempted guard
@@ -291,6 +355,8 @@ export function CalendarApp() {
         mobileTab={mobileTab}
         onMobileTabChange={handleMobileTabChange}
         onCalendars={() => setShowMobileSidebar(true)}
+        onScanRelays={handleScanRelays}
+        scanningRelays={scanningRelays}
       />
 
       {pendingInvite && (
@@ -367,9 +433,15 @@ export function CalendarApp() {
         </div>
       )}
 
+      {publishError && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 text-center cursor-pointer" onClick={() => setPublishError(null)}>
+          Failed to save: {publishError}
+        </div>
+      )}
+
       {decryptionErrors > 0 && (
         <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 text-center">
-          {decryptionErrors} event{decryptionErrors > 1 ? "s" : ""} could not be decrypted. Your signer may not support NIP-44.
+          {decryptionErrors} event{decryptionErrors > 1 ? "s" : ""} could not be decrypted. If using a remote signer, approve any pending NIP-44 requests and retry.
         </div>
       )}
 
@@ -535,7 +607,7 @@ export function CalendarApp() {
         <SharingModal calDTag={sharingCalDTag} onClose={() => setSharingCalDTag(null)} />
       )}
 
-      {needsCalendarSetup && !eventsLoading && calendars.length === 0 && (
+      {needsCalendarSetup && !eventsLoading && autoRestoreComplete && calendars.length === 0 && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-1">Welcome to Planner</h2>

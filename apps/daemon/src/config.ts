@@ -78,7 +78,6 @@ export function loadConfig(): Config {
           "wss://relay.damus.io",
           "wss://nos.lol",
           "wss://relay.ditto.pub",
-          "wss://relay.primal.net",
         ],
     vapidPublicKey: process.env.VAPID_PUBLIC_KEY || "",
     vapidPrivateKey: process.env.VAPID_PRIVATE_KEY || "",

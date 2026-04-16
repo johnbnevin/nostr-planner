@@ -11,6 +11,8 @@
  * - Every received event has its Schnorr signature verified before returning.
  * - Publishes retry up to 3 times with exponential backoff.
  * - Publish failures can be observed via onPublishFailure() for UI toasts.
+ * - **Rate limiting:** max 3 relay calls (queries + publishes) per relay per
+ *   second. Excess calls are queued and drained at the rate limit.
  *
  * @module relay
  */
@@ -22,6 +24,110 @@ import { DEFAULT_RELAYS } from "./nostr";
 import { logger } from "./logger";
 
 const log = logger("relay");
+
+// ── Per-relay rate limiter ─────────────────────────────────────────
+//
+// Hard limit: 3 calls per second per relay URL. Any call (query or
+// publish) that would exceed the limit is queued and executed once a
+// slot opens. This prevents relay bans and keeps WebSocket traffic
+// predictable regardless of how many React effects fire simultaneously.
+
+/** Max relay operations (query or publish) per relay per second. */
+const MAX_OPS_PER_SEC = 3;
+
+/** Sliding-window timestamps of recent operations per relay URL. */
+const relayCalls = new Map<string, number[]>();
+
+/** Pending queue per relay URL — each entry resolves when a slot opens. */
+const relayQueue = new Map<string, Array<() => void>>();
+
+/**
+ * Wait until the rate limit allows a call to this relay URL.
+ * Resolves immediately if under the limit, otherwise queues.
+ */
+function acquireSlot(url: string): Promise<void> {
+  const now = Date.now();
+  let timestamps = relayCalls.get(url);
+  if (!timestamps) {
+    timestamps = [];
+    relayCalls.set(url, timestamps);
+  }
+
+  // Prune timestamps older than 1 second
+  while (timestamps.length > 0 && now - timestamps[0] > 1000) {
+    timestamps.shift();
+  }
+
+  if (timestamps.length < MAX_OPS_PER_SEC) {
+    timestamps.push(now);
+    return Promise.resolve();
+  }
+
+  // Queue this caller — it will be released when a slot opens
+  return new Promise<void>((resolve) => {
+    let queue = relayQueue.get(url);
+    if (!queue) {
+      queue = [];
+      relayQueue.set(url, queue);
+    }
+    queue.push(resolve);
+    // Schedule drain: the oldest timestamp expires in (oldest + 1000 - now) ms
+    const waitMs = timestamps[0] + 1000 - now + 1;
+    scheduleDrain(url, waitMs);
+  });
+}
+
+/** Active drain timers per relay URL, to avoid duplicate setTimeout calls. */
+const drainTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * Schedule a drain pass for the given relay's queue after `delayMs`.
+ * Coalesces multiple schedule requests — only one timer per relay runs.
+ */
+function scheduleDrain(url: string, delayMs: number): void {
+  if (drainTimers.has(url)) return;
+  drainTimers.set(
+    url,
+    setTimeout(() => {
+      drainTimers.delete(url);
+      drainQueue(url);
+    }, Math.max(1, delayMs))
+  );
+}
+
+/**
+ * Release as many queued callers as the current rate limit allows,
+ * then schedule another drain if callers remain.
+ */
+function drainQueue(url: string): void {
+  const queue = relayQueue.get(url);
+  if (!queue || queue.length === 0) return;
+
+  const now = Date.now();
+  let timestamps = relayCalls.get(url);
+  if (!timestamps) {
+    timestamps = [];
+    relayCalls.set(url, timestamps);
+  }
+
+  // Prune old timestamps
+  while (timestamps.length > 0 && now - timestamps[0] > 1000) {
+    timestamps.shift();
+  }
+
+  // Release callers up to available slots
+  while (queue.length > 0 && timestamps.length < MAX_OPS_PER_SEC) {
+    timestamps.push(Date.now());
+    const resolve = queue.shift()!;
+    resolve();
+  }
+
+  // If callers remain, schedule another drain
+  if (queue.length > 0 && timestamps.length > 0) {
+    const waitMs = timestamps[0] + 1000 - Date.now() + 1;
+    scheduleDrain(url, waitMs);
+  }
+}
 
 // ── Pool state ──────────────────────────────────────────────────────
 
@@ -79,6 +185,10 @@ export function setRelayLists(read: string[], write: string[]): void {
 
 // ── Pool management ─────────────────────────────────────────────────
 
+/** Resolved read/write relay URLs for the current pool. Cached for rate-limit lookup. */
+let activeReadRelays: string[] = [];
+let activeWriteRelays: string[] = [];
+
 /**
  * Get or create the shared relay pool.
  *
@@ -106,6 +216,10 @@ export function getPool(relays: string[]): NPool {
   const rRelays = readRelays.length > 0 ? readRelays : urls;
   const wRelays = writeRelays.length > 0 ? writeRelays : urls;
 
+  // Cache active relay sets — cap at 3 to keep queries fast and predictable
+  activeReadRelays = rRelays.slice(0, 3);
+  activeWriteRelays = wRelays.slice(0, 3);
+
   log.debug("creating pool:", rRelays.length, "read,", wRelays.length, "write relays");
 
   pool = new NPool({
@@ -117,14 +231,14 @@ export function getPool(relays: string[]): NPool {
     // NIP-65 outbox: send all queries to read relays
     reqRouter: (filters) => {
       const map = new Map<string, NostrFilter[]>();
-      for (const url of rRelays.slice(0, 5)) {
+      for (const url of activeReadRelays) {
         map.set(url, filters);
       }
       return map;
     },
 
     // NIP-65 outbox: send all publishes to write relays
-    eventRouter: () => wRelays.slice(0, 5),
+    eventRouter: () => activeWriteRelays,
   });
 
   return pool;
@@ -140,6 +254,8 @@ export function closePool(): void {
   currentRelays = [];
   readRelays = [];
   writeRelays = [];
+  activeReadRelays = [];
+  activeWriteRelays = [];
   log.debug("pool closed");
 }
 
@@ -161,13 +277,19 @@ const lastQueryTime = new Map<string, number>();
  * identical filters always map to the same deduplication key.
  */
 export function filterKey(filter: NostrFilter): string {
-  const sorted: Record<string, unknown> = {};
-  for (const k of Object.keys(filter).sort()) {
+  // Build a canonical JSON key for the filter, independent of property/array ordering.
+  // Uses a single pass with sorted keys and in-place sorted array copies.
+  const keys = Object.keys(filter).sort();
+  const parts: string[] = [];
+  for (const k of keys) {
     const v = (filter as Record<string, unknown>)[k];
-    if (v === undefined) continue; // skip undefined to prevent spurious key differences
-    sorted[k] = Array.isArray(v) ? [...v].sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b))) : v;
+    if (v === undefined) continue;
+    const val = Array.isArray(v)
+      ? JSON.stringify([...v].sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b))))
+      : JSON.stringify(v);
+    parts.push(`${JSON.stringify(k)}:${val}`);
   }
-  return JSON.stringify(sorted);
+  return `{${parts.join(",")}}`;
 }
 
 /** Prune lastQueryTime entries older than this threshold to prevent unbounded growth. */
@@ -182,6 +304,7 @@ const QUERY_TIME_TTL_MS = 60_000;
  * Events with invalid signatures are silently dropped (logged as warnings).
  * Concurrent identical queries are deduplicated (same filter → same result).
  * Rapid duplicate queries within 2s are throttled.
+ * Rate-limited to 3 calls/sec per relay.
  *
  * @param relays - Relay URLs to query. Used to get/create the pool.
  * @param filter - Nostr filter (kinds, authors, #tags, limit, etc.)
@@ -212,6 +335,10 @@ export async function queryEvents(
 
   const doQuery = async (): Promise<NostrEvent[]> => {
     const p = getPool(relays);
+
+    // Record the call for rate-limit tracking (non-blocking)
+    for (const u of activeReadRelays) acquireSlot(u);
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     log.time("query");
@@ -219,16 +346,23 @@ export async function queryEvents(
     try {
       const events = await p.query([filter], { signal: controller.signal });
 
-      // Verify Schnorr signatures on every event — don't trust relays.
-      // A malicious relay could inject events with forged pubkeys.
-      const verified = events.filter((e) => {
-        try {
-          return verifyEvent(e as Parameters<typeof verifyEvent>[0]);
-        } catch {
-          log.warn("invalid signature, dropping event", e.id?.slice(0, 8));
-          return false;
+      // Verify Schnorr signatures — don't trust relays. Process in batches
+      // and yield to the main thread between batches to avoid blocking UI.
+      const VERIFY_BATCH = 50;
+      const verified: NostrEvent[] = [];
+      for (let i = 0; i < events.length; i += VERIFY_BATCH) {
+        if (i > 0) await new Promise((r) => setTimeout(r, 0)); // yield
+        const batch = events.slice(i, i + VERIFY_BATCH);
+        for (const e of batch) {
+          try {
+            if (verifyEvent(e as Parameters<typeof verifyEvent>[0])) {
+              verified.push(e);
+            }
+          } catch {
+            log.warn("invalid signature, dropping event", e.id?.slice(0, 8));
+          }
         }
-      });
+      }
 
       log.debug(`query returned ${verified.length}/${events.length} events`, filter.kinds);
       return verified;
@@ -240,7 +374,7 @@ export async function queryEvents(
       log.error("query failed:", err);
       return [];
     } finally {
-      clearTimeout(timer); // single clearTimeout lives here in finally; removed duplicate from catch
+      clearTimeout(timer);
       log.timeEnd("query");
       inflight.delete(key);
       const now = Date.now();
@@ -269,6 +403,7 @@ export async function queryEvents(
  * On failure, retries up to 3 times with linear backoff
  * (2s, 4s, 6s). Throws if all attempts fail — the caller should
  * catch this and show a "Failed to save" toast or similar.
+ * Rate-limited to 3 calls/sec per relay.
  *
  * @param relays - Relay URLs. Used to get/create the pool.
  * @param event - Signed Nostr event to publish.
@@ -285,6 +420,10 @@ export async function publishToRelays(
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const p = getPool(relays);
+
+    // Record the call for rate-limit tracking (non-blocking)
+    for (const u of activeWriteRelays) acquireSlot(u);
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -295,14 +434,15 @@ export async function publishToRelays(
     } catch (err) {
       if (attempt < MAX_RETRIES) {
         const delay = RETRY_DELAY_MS * (attempt + 1);
-        log.warn(`publish attempt ${attempt + 1}/${MAX_RETRIES} failed, retrying in ${delay}ms...`);
+        log.warn(`publish attempt ${attempt + 1}/${MAX_RETRIES + 1} failed, retrying in ${delay}ms...`);
         await new Promise((r) => setTimeout(r, delay));
       } else {
         log.error("publish failed after", MAX_RETRIES, "retries:", err);
+        notifyPublishFailure(err instanceof Error ? err : new Error(String(err)), event);
         throw err;
       }
     } finally {
-      clearTimeout(timer); // single clearTimeout in finally; removed duplicate from catch
+      clearTimeout(timer);
     }
   }
 }

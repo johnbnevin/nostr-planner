@@ -2,7 +2,8 @@
   "name": "nostr-planner-monorepo",
   "private": true,
   "workspaces": [
-    "apps/*"
+    "apps/*",
+    "packages/*"
   ],
   "scripts": {
     "dev": "npm run dev --workspace=apps/planner",
@@ -16,7 +17,11 @@
   "devDependencies": {
     "turbo": "^2.3.3"
   },
+  "packageManager": "npm@10.9.4",
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@nostrify/react": "^0.2.20"
   }
 }

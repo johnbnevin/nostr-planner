@@ -80,9 +80,12 @@ export async function sendNotification(opts: {
     Notification.requestPermission();
     return;
   }
+  // Use import.meta.env.BASE_URL so the icon resolves correctly regardless of
+  // deployment path (e.g. "/planner/" vs "/"). Falls back to "/calendar.svg".
+  const base = typeof import.meta !== "undefined" ? (import.meta.env?.BASE_URL || "/") : "/";
   new Notification(opts.title, {
     body: opts.body,
-    icon: "/calendar.svg",
+    icon: `${base}calendar.svg`,
     tag: opts.tag ?? opts.title,
   });
 }

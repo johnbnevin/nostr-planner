@@ -547,11 +547,34 @@ export async function fetchMemberLists(opts: {
  * @param opts.nip44  - NIP-44 encrypt/decrypt interface.
  * @returns Map from calendar `d`-tag to `{ ownerPubkey, keyBase64 }`.
  */
+// ── Invitation result cache ──────────────────────────────────────────
+// fetchMyInvitations is bandwidth-heavy (fetches ALL kind 30078 events).
+// Cache the result for 10 minutes to avoid hammering relays on every
+// refresh cycle. The cache is keyed by pubkey and invalidated on force.
+let invitationCache: {
+  pubkey: string;
+  result: Map<string, { ownerPubkey: string; keyBase64: string }>;
+  fetchedAt: number;
+} | null = null;
+const INVITATION_CACHE_TTL_MS = 10 * 60_000; // 10 minutes
+
 export async function fetchMyInvitations(opts: {
   pubkey: string;
   relays: string[];
   nip44: Nip44;
+  force?: boolean;
 }): Promise<Map<string, { ownerPubkey: string; keyBase64: string }>> {
+  // Return cached result if still fresh and for the same pubkey
+  if (
+    !opts.force &&
+    invitationCache &&
+    invitationCache.pubkey === opts.pubkey &&
+    Date.now() - invitationCache.fetchedAt < INVITATION_CACHE_TTL_MS
+  ) {
+    log.debug("fetchMyInvitations: returning cached result");
+    return invitationCache.result;
+  }
+
   // Broad fetch: no #p filter, no authors filter — intentional for metadata privacy.
   // See JSDoc above for the full rationale on this privacy-vs-bandwidth trade-off.
   // Time-bound to last 90 days to limit bandwidth and reduce DoS surface.
@@ -588,6 +611,10 @@ export async function fetchMyInvitations(opts: {
       // Decryption failure is expected for envelopes addressed to other pubkeys
     }
   }
+
+  // Cache the result for subsequent calls
+  invitationCache = { pubkey: opts.pubkey, result, fetchedAt: Date.now() };
+
   return result;
 }
 
@@ -784,7 +811,12 @@ export async function lookupNip05(identifier: string): Promise<string | null> {
       { signal: controller.signal }
     );
     if (!res.ok) return null;
-    const data = await res.json();
+    // Guard against malicious NIP-05 servers returning huge responses
+    const contentLength = res.headers.get("content-length");
+    if (contentLength && parseInt(contentLength) > 100_000) return null;
+    const text = await res.text();
+    if (text.length > 100_000) return null;
+    const data = JSON.parse(text);
     const pubkey = data?.names?.[name];
     // NIP-01 mandates lowercase hex pubkeys
     return typeof pubkey === "string" && /^[0-9a-f]{64}$/.test(pubkey) ? pubkey : null;
