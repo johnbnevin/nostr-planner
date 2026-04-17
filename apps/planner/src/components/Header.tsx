@@ -37,6 +37,7 @@ interface HeaderProps {
   profile: NostrProfile | null;
   backingUp: boolean;
   unsavedChanges: boolean;
+  saveCountdown: number | null;
   onBackupNow: () => Promise<void>;
   onLogout: () => void;
   onNewEvent: () => void;
@@ -73,6 +74,7 @@ export function Header({
   profile,
   backingUp,
   unsavedChanges,
+  saveCountdown,
   onBackupNow,
   onLogout,
   onNewEvent,
@@ -272,7 +274,7 @@ export function Header({
                 setAutoBackup(next);
                 if (next) onBackupNow();
               }}
-              className={`p-1.5 rounded-lg transition-colors ${
+              className={`relative p-1.5 rounded-lg transition-colors min-w-[1.75rem] ${
                 autoBackup
                   ? unsavedChanges
                     ? "bg-red-50 hover:bg-red-100"
@@ -281,13 +283,16 @@ export function Header({
               }`}
               title={
                 backingUp ? "Saving backup…"
-                : unsavedChanges ? "Unsaved changes — autosave pending"
+                : unsavedChanges && saveCountdown !== null ? `Autosaving in ${saveCountdown}s`
+                : unsavedChanges ? "Unsaved changes"
                 : autoBackup ? "Auto-backup on"
                 : "Auto-backup off"
               }
             >
               {backingUp ? (
                 <Loader className={`w-4 h-4 animate-spin ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
+              ) : autoBackup && unsavedChanges && saveCountdown !== null ? (
+                <span className="text-[11px] font-semibold text-red-600 tabular-nums leading-4">{saveCountdown}s</span>
               ) : autoBackup ? (
                 <CloudUpload className={`w-4 h-4 ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
               ) : (
@@ -365,7 +370,7 @@ export function Header({
                 setAutoBackup(next);
                 if (next) onBackupNow();
               }}
-              className={`p-1.5 rounded-lg transition-colors ${
+              className={`relative p-1.5 rounded-lg transition-colors min-w-[1.75rem] ${
                 autoBackup
                   ? unsavedChanges
                     ? "bg-red-50 hover:bg-red-100"
@@ -374,13 +379,16 @@ export function Header({
               }`}
               title={
                 backingUp ? "Saving backup…"
-                : unsavedChanges ? "Unsaved changes — autosave pending"
+                : unsavedChanges && saveCountdown !== null ? `Autosaving in ${saveCountdown}s`
+                : unsavedChanges ? "Unsaved changes"
                 : autoBackup ? "Auto-backup on"
                 : "Auto-backup off"
               }
             >
               {backingUp ? (
                 <Loader className={`w-4 h-4 animate-spin ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
+              ) : autoBackup && unsavedChanges && saveCountdown !== null ? (
+                <span className="text-[11px] font-semibold text-red-600 tabular-nums leading-4">{saveCountdown}s</span>
               ) : autoBackup ? (
                 <CloudUpload className={`w-4 h-4 ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
               ) : (

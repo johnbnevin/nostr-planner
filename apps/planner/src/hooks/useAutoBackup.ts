@@ -25,7 +25,13 @@ const log = logger("auto-backup");
 
 const DEBOUNCE_MS = 15_000; // 15s of no changes triggers autosave
 const LAST_BACKUP_KEY = "nostr-planner-last-autobackup";
-export function useAutoBackup(): { backingUp: boolean; dirty: boolean; backupNow: () => Promise<void> } {
+export function useAutoBackup(): {
+  backingUp: boolean;
+  dirty: boolean;
+  /** Seconds until the next autosave fires, or `null` if no save is pending. */
+  countdown: number | null;
+  backupNow: () => Promise<void>;
+} {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
   const { events, calendars, eventsLoading } = useCalendar();
   const { habits, completions, lists, loading: tasksLoading } = useTasks();
@@ -45,6 +51,10 @@ export function useAutoBackup(): { backingUp: boolean; dirty: boolean; backupNow
    *  the moment of change and the debounced backup completing. */
   const dirtyRef = useRef(false);
   const [dirty, setDirty] = useState(false);
+  /** Unix ms when the currently-pending save will fire. Null when idle.
+   *  Exposed as a seconds countdown for the UI. */
+  const [saveDueAt, setSaveDueAt] = useState<number | null>(null);
+  const [countdown, setCountdown] = useState<number | null>(null);
 
   // Stable ref to latest backup args so beforeunload can use them
   const argsRef = useRef({ pubkey, relays, signEvent, publishEvent, getSettings, autoBackup, signer });
@@ -96,6 +106,8 @@ export function useAutoBackup(): { backingUp: boolean; dirty: boolean; backupNow
       // On failure, dirtyRef stays true so a retry fires if data changes again.
       dirtyRef.current = false;
       setDirty(false);
+      setSaveDueAt(null);
+      setCountdown(null);
       lsSet(LAST_BACKUP_KEY, new Date().toISOString());
     } catch (err) {
       log.error("backup failed", err);
@@ -124,6 +136,7 @@ export function useAutoBackup(): { backingUp: boolean; dirty: boolean; backupNow
     // Debounce: 15 seconds of no further changes → autosave.
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(doBackup, DEBOUNCE_MS);
+    setSaveDueAt(Date.now() + DEBOUNCE_MS);
 
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
@@ -146,7 +159,19 @@ export function useAutoBackup(): { backingUp: boolean; dirty: boolean; backupNow
     return () => window.removeEventListener("beforeunload", handleUnload);
   }, [doBackup]);
 
-  return { backingUp, dirty, backupNow: doBackup };
+  // Tick the visible countdown once per second while a save is scheduled.
+  useEffect(() => {
+    if (saveDueAt === null) { setCountdown(null); return; }
+    const tick = () => {
+      const remainingMs = saveDueAt - Date.now();
+      setCountdown(Math.max(0, Math.ceil(remainingMs / 1000)));
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [saveDueAt]);
+
+  return { backingUp, dirty, countdown, backupNow: doBackup };
 }
 
 export function getLastAutoBackupTime(): string | null {

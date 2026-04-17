@@ -149,13 +149,20 @@ export async function connectBunkerUri(
 
   const bunker = BunkerSigner.fromBunker(sk, bp, { pool });
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    await bunker.connect();
-  } finally {
-    clearTimeout(timer);
-  }
+  // Bunker's connect RPC can hang if the bunker rejects a reused secret
+  // silently (per NIP-46: "remote-signer SHOULD ignore new attempts to
+  // establish connection with old secret"). Race against a wall-clock
+  // timeout so the user gets an actionable error instead of an infinite
+  // spinner when they paste a stale bunker:// URL.
+  await Promise.race([
+    bunker.connect(),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(
+        "Bunker connect timed out. If you've logged in with this URL " +
+        "before, generate a fresh bunker URL from your signer and try again."
+      )), timeoutMs)
+    ),
+  ]);
 
   log.info("bunker connected");
   const userPubkey = await bunker.getPublicKey();

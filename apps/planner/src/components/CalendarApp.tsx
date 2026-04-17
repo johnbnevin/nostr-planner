@@ -48,7 +48,7 @@ export function CalendarApp() {
   const { acceptInviteLink } = useSharing();
   const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode } = useSettings();
   const { alerts, dismiss } = useNotifications();
-  const { backingUp, dirty: unsavedChanges, backupNow } = useAutoBackup();
+  const { backingUp, dirty: unsavedChanges, countdown: saveCountdown, backupNow } = useAutoBackup();
   useDigest();
   // Guards to prevent re-running one-shot effects across re-renders
   const autoRestoreAttempted = useRef(false);
@@ -246,6 +246,7 @@ export function CalendarApp() {
         profile={profile}
         backingUp={backingUp}
         unsavedChanges={unsavedChanges}
+        saveCountdown={saveCountdown}
         onBackupNow={backupNow}
         onLogout={logout}
         onNewEvent={() => handleNewEvent()}

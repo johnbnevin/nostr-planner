@@ -63,17 +63,17 @@ export function rehydrateMaterialized(m: MaterializedState): MaterializedState {
 
 const log = logger("backup");
 
-/** Well-known Blossom CDN servers used for backup blob storage.
- *  Uploads are attempted on all of them for redundancy; downloads try
- *  the event-listed servers first, then fall back to this list. */
+/** Well-known Blossom CDN servers in preferred order. The first server to
+ *  accept an upload wins and is published as the initial reference; the
+ *  remaining three are mirrored to lazily in the background for redundancy.
+ *  Target is 4 copies total; downloads only need ONE to succeed. */
 const BLOSSOM_SERVERS = [
   "https://cdn.sovbit.host",
-  "https://blossom.yakihonne.com",
   "https://blossom.primal.net",
-  "https://nostrcheck.me",
+  "https://blossom.yakihonne.com",
   "https://blossom.nostr.build",
-  "https://nostr.download",
 ];
+const REDUNDANCY_TARGET = 4;
 
 /** A single backup snapshot with its hash, location, and statistics. */
 export interface BackupEntry {
@@ -375,108 +375,111 @@ export async function downloadBackup(
   nip44?: { decrypt: (pubkey: string, ciphertext: string) => Promise<string> },
   pubkey?: string
 ): Promise<{ events: RawEvent[]; preferences: PersistedSettings | null; materialized: MaterializedState | null } | null> {
-  // De-duplicate and merge event-listed servers with hardcoded fallbacks
+  const MAX_BACKUP_BYTES = 50 * 1024 * 1024;
+  // De-duplicate and merge event-listed servers with hardcoded fallbacks.
   const servers = [...new Set([...ref.servers, ...BLOSSOM_SERVERS])];
 
-  for (const server of servers) {
+  // Race all servers in parallel — we only need ONE to return a sha256-
+  // verified blob. This replaces the old sequential loop where a single
+  // slow/unreachable server could stall loads for many seconds.
+  const fetchAndVerify = async (server: string): Promise<Uint8Array | null> => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15_000);
     try {
-      const res = await fetch(`${server}/${ref.sha256}`);
-      if (res.ok) {
-        const MAX_BACKUP_BYTES = 50 * 1024 * 1024;
-        // Reject responses larger than 50 MB to prevent memory exhaustion
-        const contentLength = res.headers.get("content-length");
-        if (contentLength && parseInt(contentLength) > MAX_BACKUP_BYTES) {
-          log.warn("backup blob too large from", server, contentLength, "bytes");
-          continue;
+      const res = await fetch(`${server}/${ref.sha256}`, { signal: ctrl.signal });
+      if (!res.ok) return null;
+      const contentLength = res.headers.get("content-length");
+      if (contentLength && parseInt(contentLength) > MAX_BACKUP_BYTES) return null;
+
+      let bytes: Uint8Array;
+      if (res.body) {
+        const reader = res.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let totalBytes = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          totalBytes += value.byteLength;
+          if (totalBytes > MAX_BACKUP_BYTES) { reader.cancel(); return null; }
+          chunks.push(value);
         }
-        // Stream the response body with byte counting to abort early if
-        // the server omitted Content-Length but sends a huge payload.
-        let blob: ArrayBuffer;
-        if (res.body) {
-          const reader = res.body.getReader();
-          const chunks: Uint8Array[] = [];
-          let totalBytes = 0;
-          let aborted = false;
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            totalBytes += value.byteLength;
-            if (totalBytes > MAX_BACKUP_BYTES) {
-              reader.cancel();
-              aborted = true;
-              break;
-            }
-            chunks.push(value);
-          }
-          if (aborted) {
-            log.warn("backup blob exceeded 50 MB (streaming) from", server);
-            continue;
-          }
-          const combined = new Uint8Array(totalBytes);
-          let offset = 0;
-          for (const chunk of chunks) {
-            combined.set(chunk, offset);
-            offset += chunk.byteLength;
-          }
-          blob = combined.buffer;
-        } else {
-          // Fallback for environments without ReadableStream
-          blob = await res.arrayBuffer();
-          if (blob.byteLength > MAX_BACKUP_BYTES) {
-            log.warn("backup blob exceeded 50 MB from", server);
-            continue;
-          }
-        }
-        // Verify SHA-256: recompute the hash of the downloaded bytes and
-        // compare to the expected hash. This catches corruption or tampering.
-        const hashBuf = await crypto.subtle.digest("SHA-256", blob);
-        const actualHash = Array.from(new Uint8Array(hashBuf))
-          .map((b) => b.toString(16).padStart(2, "0"))
-          .join("");
-        if (actualHash !== ref.sha256) {
-          log.warn("SHA-256 mismatch from", server);
-          continue;
-        }
-        let data = JSON.parse(new TextDecoder().decode(blob));
-        // Encrypted envelope — route to the shared decrypt helper which
-        // handles v1 (single NIP-44), v2 (chunked NIP-44), and v3 (AES+NIP-44 hybrid).
-        if (data.encrypted && nip44 && pubkey) {
-          try {
-            const decryptedJson = await decryptBackupEnvelope(data, nip44, pubkey);
-            const parsed = JSON.parse(decryptedJson);
-            if (Array.isArray(parsed)) {
-              data = parsed; // legacy bare array format
-            } else if (parsed && typeof parsed === "object" && parsed.version && Array.isArray(parsed.events)) {
-              data = parsed;
-            } else {
-              log.warn("Decrypted backup has invalid structure from", server);
-              continue;
-            }
-          } catch (err) {
-            log.warn("Failed to decrypt encrypted backup from", server, err);
-            continue;
-          }
-        }
-        // Support both new format (with version/preferences) and old format (raw array)
-        if (Array.isArray(data)) {
-          return { events: data, preferences: null, materialized: null };
-        } else if (data.version && data.events) {
-          // Validate backup version — reject unknown future versions that
-          // may have an incompatible schema.
-          if (data.version !== 1 && data.version !== 2) {
-            log.warn("unsupported backup version", data.version, "from", server);
-            continue;
-          }
-          const materialized: MaterializedState | null =
-            data.materialized && Array.isArray(data.materialized.events) && Array.isArray(data.materialized.calendars)
-              ? rehydrateMaterialized(data.materialized as MaterializedState)
-              : null;
-          return { events: data.events, preferences: data.preferences || null, materialized };
-        }
+        bytes = new Uint8Array(totalBytes);
+        let offset = 0;
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      } else {
+        const buf = await res.arrayBuffer();
+        if (buf.byteLength > MAX_BACKUP_BYTES) return null;
+        bytes = new Uint8Array(buf);
       }
+      const hashBuf = await crypto.subtle.digest("SHA-256", bytes);
+      const actual = Array.from(new Uint8Array(hashBuf))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      if (actual !== ref.sha256) { log.warn("SHA-256 mismatch from", server); return null; }
+      return bytes;
     } catch {
-      // Try next server
+      return null;
+    } finally {
+      clearTimeout(timer);
     }
+  };
+
+  // First-success race: resolves with the first server's verified blob
+  // bytes, or null if every attempt fails. Can't use Promise.any because
+  // our target is ES2020; implement the same semantics manually.
+  const verifiedBytes = await new Promise<Uint8Array | null>((resolve) => {
+    let remaining = servers.length;
+    if (remaining === 0) { resolve(null); return; }
+    let resolved = false;
+    for (const s of servers) {
+      fetchAndVerify(s).then((bytes) => {
+        remaining--;
+        if (resolved) return;
+        if (bytes) { resolved = true; resolve(bytes); return; }
+        if (remaining === 0) resolve(null);
+      }).catch(() => {
+        remaining--;
+        if (!resolved && remaining === 0) resolve(null);
+      });
+    }
+  });
+
+  if (!verifiedBytes) return null;
+
+  let data = JSON.parse(new TextDecoder().decode(verifiedBytes));
+  // Encrypted envelope — route to the shared decrypt helper which handles
+  // v1 (single NIP-44), v2 (chunked NIP-44), and v3 (AES+NIP-44 hybrid).
+  if (data.encrypted && nip44 && pubkey) {
+    try {
+      const decryptedJson = await decryptBackupEnvelope(data, nip44, pubkey);
+      const parsed = JSON.parse(decryptedJson);
+      if (Array.isArray(parsed)) {
+        data = parsed;
+      } else if (parsed && typeof parsed === "object" && parsed.version && Array.isArray(parsed.events)) {
+        data = parsed;
+      } else {
+        log.warn("Decrypted backup has invalid structure");
+        return null;
+      }
+    } catch (err) {
+      log.warn("Failed to decrypt encrypted backup:", err);
+      return null;
+    }
+  }
+
+  if (Array.isArray(data)) {
+    return { events: data, preferences: null, materialized: null };
+  }
+  if (data.version && data.events) {
+    if (data.version !== 1 && data.version !== 2) {
+      log.warn("unsupported backup version", data.version);
+      return null;
+    }
+    const materialized: MaterializedState | null =
+      data.materialized && Array.isArray(data.materialized.events) && Array.isArray(data.materialized.calendars)
+        ? rehydrateMaterialized(data.materialized as MaterializedState)
+        : null;
+    return { events: data.events, preferences: data.preferences || null, materialized };
   }
   return null;
 }
@@ -600,7 +603,13 @@ export async function buildBackupBlob(
     allEvents = [...calendarEvents, ...appDataEvents];
   }
 
-  if (allEvents.length === 0) return null;
+  // With the Blossom-first architecture, private events never land on relays,
+  // so allEvents can legitimately be empty even though the user has plenty
+  // of data. The backup is worth doing as long as we have EITHER raw relay
+  // events OR a materialized snapshot. Returning null here used to silently
+  // abort autosave and leave the cloud icon stuck red.
+  const hasMaterialized = !!materialized && (materialized.events.length > 0 || materialized.calendars.length > 0);
+  if (allEvents.length === 0 && !hasMaterialized) return null;
 
   const backupData: Record<string, unknown> = {
     version: 2,
@@ -611,9 +620,21 @@ export async function buildBackupBlob(
     backupData.materialized = materialized;
   }
 
+  // Derive counts from whatever we have: prefer raw events when present
+  // (they give an exact breakdown by kind), fall back to the materialized
+  // snapshot when the user's data is entirely Blossom-only.
+  const counts = allEvents.length > 0
+    ? summarizeCounts(allEvents)
+    : {
+        calCount: materialized?.events.length ?? 0,
+        colCount: materialized?.calendars.length ?? 0,
+        taskCount: 0,
+        total: (materialized?.events.length ?? 0) + (materialized?.calendars.length ?? 0),
+      };
+
   return {
     json: JSON.stringify(backupData),
-    counts: summarizeCounts(allEvents),
+    counts,
   };
 }
 
@@ -723,11 +744,8 @@ export async function uploadBackup(
     "sign Blossom upload auth"
   );
 
-  // Fan out to every configured Blossom server in parallel. Success means
-  // the server returned a Blob Descriptor whose sha256 matches ours — that's
-  // the server's own confirmation it stored the exact bytes. A server that
-  // accepts the PUT but reports a different sha256 (or hangs, or 4xxs) is
-  // dropped from the verified set.
+  // Success means the server returned a Blob Descriptor whose sha256 matches
+  // ours — the server's own confirmation it stored the exact bytes.
   const tryServer = async (server: string): Promise<string | null> => {
     try {
       const res = await fetchWithTimeout(new URL("/upload", server), {
@@ -752,14 +770,47 @@ export async function uploadBackup(
     }
   };
 
-  const results = await Promise.all(BLOSSOM_SERVERS.map(tryServer));
-  const verifiedServers = results.filter((r): r is string => r !== null);
+  // Fast path: upload to the first server that accepts and return. Only
+  // one successful upload is needed for the backup to be recoverable —
+  // waiting for parallel uploads to 4+ servers was the main cause of
+  // "save takes forever". Redundancy is handled below as a background
+  // task so the user never blocks on it.
+  let primaryServer: string | null = null;
+  const remainingServers: string[] = [];
+  for (const server of BLOSSOM_SERVERS) {
+    if (primaryServer) { remainingServers.push(server); continue; }
+    const ok = await tryServer(server);
+    if (ok) primaryServer = ok;
+    else remainingServers.push(server); // try again later via mirror
+  }
 
-  if (verifiedServers.length === 0) {
+  if (!primaryServer) {
     throw new Error(
       "Backup upload failed: no Blossom server accepted the blob. " +
       "Your data on Nostr relays is unaffected — please try again."
     );
+  }
+  const verifiedServers: string[] = [primaryServer];
+
+  // Background: mirror to up to 3 more servers (REDUNDANCY_TARGET - 1).
+  // Uses requestIdleCallback when available, else setTimeout. Fire-and-
+  // forget — the user's backup is already durable via primaryServer.
+  const scheduleIdle = (fn: () => void) => {
+    type IC = { requestIdleCallback?: (cb: () => void) => void };
+    const ric = (globalThis as unknown as IC).requestIdleCallback;
+    if (typeof ric === "function") ric(fn); else setTimeout(fn, 2_000);
+  };
+  const wanted = Math.max(0, REDUNDANCY_TARGET - verifiedServers.length);
+  const mirrorTargets = remainingServers.slice(0, wanted);
+  if (mirrorTargets.length > 0) {
+    scheduleIdle(() => {
+      (async () => {
+        for (const server of mirrorTargets) {
+          const ok = await tryServer(server);
+          if (ok) log.debug("Blossom mirror ok:", server);
+        }
+      })();
+    });
   }
 
   // Build history: fetch existing entries, prepend new one, keep 3
