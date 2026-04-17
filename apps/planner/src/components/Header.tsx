@@ -36,6 +36,7 @@ interface HeaderProps {
   pubkey: string;
   profile: NostrProfile | null;
   backingUp: boolean;
+  unsavedChanges: boolean;
   onBackupNow: () => Promise<void>;
   onLogout: () => void;
   onNewEvent: () => void;
@@ -71,6 +72,7 @@ export function Header({
   pubkey,
   profile,
   backingUp,
+  unsavedChanges,
   onBackupNow,
   onLogout,
   onNewEvent,
@@ -272,15 +274,22 @@ export function Header({
               }}
               className={`p-1.5 rounded-lg transition-colors ${
                 autoBackup
-                  ? "bg-emerald-50 hover:bg-emerald-100"
+                  ? unsavedChanges
+                    ? "bg-red-50 hover:bg-red-100"
+                    : "bg-emerald-50 hover:bg-emerald-100"
                   : "hover:bg-gray-100"
               }`}
-              title={backingUp ? "Saving backup…" : autoBackup ? "Auto-backup on" : "Auto-backup off"}
+              title={
+                backingUp ? "Saving backup…"
+                : unsavedChanges ? "Unsaved changes — autosave pending"
+                : autoBackup ? "Auto-backup on"
+                : "Auto-backup off"
+              }
             >
               {backingUp ? (
-                <Loader className="w-4 h-4 text-emerald-600 animate-spin" />
+                <Loader className={`w-4 h-4 animate-spin ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
               ) : autoBackup ? (
-                <CloudUpload className="w-4 h-4 text-emerald-600" />
+                <CloudUpload className={`w-4 h-4 ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
               ) : (
                 <CloudOff className="w-4 h-4 text-gray-400" />
               )}
@@ -358,15 +367,22 @@ export function Header({
               }}
               className={`p-1.5 rounded-lg transition-colors ${
                 autoBackup
-                  ? "bg-emerald-50 hover:bg-emerald-100"
+                  ? unsavedChanges
+                    ? "bg-red-50 hover:bg-red-100"
+                    : "bg-emerald-50 hover:bg-emerald-100"
                   : "hover:bg-gray-100"
               }`}
-              title={backingUp ? "Saving backup…" : autoBackup ? "Auto-backup on" : "Auto-backup off"}
+              title={
+                backingUp ? "Saving backup…"
+                : unsavedChanges ? "Unsaved changes — autosave pending"
+                : autoBackup ? "Auto-backup on"
+                : "Auto-backup off"
+              }
             >
               {backingUp ? (
-                <Loader className="w-4 h-4 text-emerald-600 animate-spin" />
+                <Loader className={`w-4 h-4 animate-spin ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
               ) : autoBackup ? (
-                <CloudUpload className="w-4 h-4 text-emerald-600" />
+                <CloudUpload className={`w-4 h-4 ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
               ) : (
                 <CloudOff className="w-4 h-4 text-gray-400" />
               )}

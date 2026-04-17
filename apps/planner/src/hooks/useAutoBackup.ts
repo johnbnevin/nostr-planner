@@ -23,9 +23,9 @@ import { lsSet } from "../lib/storage";
 
 const log = logger("auto-backup");
 
-const DEBOUNCE_MS = 5_000; // 5s after last change
+const DEBOUNCE_MS = 15_000; // 15s of no changes triggers autosave
 const LAST_BACKUP_KEY = "nostr-planner-last-autobackup";
-export function useAutoBackup(): { backingUp: boolean; backupNow: () => Promise<void> } {
+export function useAutoBackup(): { backingUp: boolean; dirty: boolean; backupNow: () => Promise<void> } {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
   const { events, calendars, eventsLoading } = useCalendar();
   const { habits, completions, lists, loading: tasksLoading } = useTasks();
@@ -40,8 +40,11 @@ export function useAutoBackup(): { backingUp: boolean; backupNow: () => Promise<
   const fingerprint = useRef("");
   /** Prevents a backup on the very first render (data load is not a "change") */
   const initialLoadDone = useRef(false);
-  /** True when a change has been detected but backup hasn't run yet */
+  /** True when a change has been detected but backup hasn't run yet.
+   *  Exposed to the UI as `dirty` so the cloud icon can turn red between
+   *  the moment of change and the debounced backup completing. */
   const dirtyRef = useRef(false);
+  const [dirty, setDirty] = useState(false);
 
   // Stable ref to latest backup args so beforeunload can use them
   const argsRef = useRef({ pubkey, relays, signEvent, publishEvent, getSettings, autoBackup, signer });
@@ -92,6 +95,7 @@ export function useAutoBackup(): { backingUp: boolean; backupNow: () => Promise<
       // Only clear the dirty flag and record the timestamp on success.
       // On failure, dirtyRef stays true so a retry fires if data changes again.
       dirtyRef.current = false;
+      setDirty(false);
       lsSet(LAST_BACKUP_KEY, new Date().toISOString());
     } catch (err) {
       log.error("backup failed", err);
@@ -115,8 +119,9 @@ export function useAutoBackup(): { backingUp: boolean; backupNow: () => Promise<
     if (newFp === fingerprint.current) return;
     fingerprint.current = newFp;
     dirtyRef.current = true;
+    setDirty(true);
 
-    // Debounce
+    // Debounce: 15 seconds of no further changes → autosave.
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(doBackup, DEBOUNCE_MS);
 
@@ -141,7 +146,7 @@ export function useAutoBackup(): { backingUp: boolean; backupNow: () => Promise<
     return () => window.removeEventListener("beforeunload", handleUnload);
   }, [doBackup]);
 
-  return { backingUp, backupNow: doBackup };
+  return { backingUp, dirty, backupNow: doBackup };
 }
 
 export function getLastAutoBackupTime(): string | null {

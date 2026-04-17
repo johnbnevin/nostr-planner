@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from "react";
 import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useSharing } from "../contexts/SharingContext";
-import { useTasks } from "../contexts/TasksContext";
 import { useSettings } from "../contexts/SettingsContext";
 import { Header } from "./Header";
 import type { MobileTab } from "./Header";
@@ -18,11 +17,6 @@ import { BackupPanel } from "./BackupPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import { ImportReviewModal } from "./ImportReviewModal";
 import { SharingModal } from "./SharingModal";
-import {
-  findBackupRef,
-  downloadBackup,
-  republishEvents,
-} from "../lib/backup";
 import { useNotifications } from "../hooks/useNotifications";
 import { useAutoBackup } from "../hooks/useAutoBackup";
 import { useDigest } from "../hooks/useDigest";
@@ -30,9 +24,6 @@ import { decodeInvitePayload } from "../lib/sharing";
 import { onPublishFailure } from "../lib/relay";
 import type { CalendarEvent, RecurrenceFreq } from "../lib/nostr";
 import type { ParsedIcalEvent } from "../lib/ical";
-import { logger } from "../lib/logger";
-
-const log = logger("calendar");
 
 /**
  * Top-level app shell rendered after authentication. Orchestrates the entire
@@ -52,13 +43,12 @@ const log = logger("calendar");
  *   no calendars exist yet.
  */
 export function CalendarApp() {
-  const { pubkey, relays, profile, signEvent, publishEvent, logout, signer } = useNostr();
-  const { viewMode, setViewMode, eventsLoading, events, calendars, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError } = useCalendar();
+  const { pubkey, profile, logout } = useNostr();
+  const { viewMode, setViewMode, eventsLoading, calendars, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError } = useCalendar();
   const { acceptInviteLink } = useSharing();
-  const { refreshTasks } = useTasks();
-  const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, restoreSettings } = useSettings();
+  const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode } = useSettings();
   const { alerts, dismiss } = useNotifications();
-  const { backingUp, backupNow } = useAutoBackup();
+  const { backingUp, dirty: unsavedChanges, backupNow } = useAutoBackup();
   useDigest();
   // Guards to prevent re-running one-shot effects across re-renders
   const autoRestoreAttempted = useRef(false);
@@ -90,7 +80,6 @@ export function CalendarApp() {
       setSavedViewMode(viewMode);
     }
   }, [viewMode, setSavedViewMode]);
-  const [autoRestoreStatus, setAutoRestoreStatus] = useState<string | null>(null);
   const [showEventModal, setShowEventModal] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -145,61 +134,17 @@ export function CalendarApp() {
     templateEvent: CalendarEvent;
   } | null>(null);
 
-  // Auto-restore: on first login, if the relay returns zero events, look for
-  // a Blossom backup blob (stored as a replaceable Nostr event with a sha256
-  // ref). If found, download and re-publish all events to the user's relays.
-  // Runs exactly once per session thanks to the autoRestoreAttempted ref.
+  // (Removed: legacy auto-restore flow that downloaded the Blossom blob
+  // and republished its events to relays. That behavior is obsolete —
+  // CalendarContext's login useEffect now loads materialized state from
+  // Blossom directly, and private events are Blossom-only so republishing
+  // to relays would violate the privacy model. Also fires late and was
+  // causing the random "Loading events…" banner minutes into a session.)
   useEffect(() => {
-    if (!pubkey || eventsLoading || autoRestoreAttempted.current) return;
-    if (events.length > 0) {
-      autoRestoreAttempted.current = true;
-      setAutoRestoreComplete(true);
-      return;
-    }
+    if (!pubkey || autoRestoreAttempted.current) return;
     autoRestoreAttempted.current = true;
-
-    (async () => {
-      setAutoRestoreStatus("Checking for backup...");
-      try {
-        log.info("looking for backup ref…");
-        const ref = await findBackupRef(pubkey, relays);
-        if (!ref) {
-          log.info("no backup ref found on relays");
-          setAutoRestoreStatus(null);
-          setAutoRestoreComplete(true);
-          return;
-        }
-        log.info("found backup ref", ref.sha256);
-
-        setAutoRestoreStatus("Found backup. Restoring from Blossom...");
-        const backup = await downloadBackup(ref, signer?.nip44, pubkey);
-        if (!backup || backup.events.length === 0) {
-          setAutoRestoreStatus(null);
-          setAutoRestoreComplete(true);
-          return;
-        }
-
-        setAutoRestoreStatus(`Restoring ${backup.events.length} items...`);
-        await republishEvents(backup.events, { signEvent, publishEvent });
-
-        // Restore all settings
-        if (backup.preferences) {
-          restoreSettings(backup.preferences);
-        }
-
-        setAutoRestoreStatus(`Restored ${backup.events.length} items. Syncing...`);
-        await Promise.all([forceFullRefresh(), refreshTasks()]);
-        setAutoRestoreStatus(`Restored ${backup.events.length} items from backup.`);
-        setTimeout(() => setAutoRestoreStatus(null), 3000);
-        setAutoRestoreComplete(true);
-      } catch (err) {
-        log.error("auto-restore failed", err);
-        setAutoRestoreStatus(null);
-        setAutoRestoreComplete(true);
-      }
-    })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- signer?.nip44 is intentionally omitted; this effect runs once via autoRestoreAttempted guard
-  }, [pubkey, eventsLoading, events.length, relays, signEvent, publishEvent, forceFullRefresh, refreshTasks, restoreSettings]);
+    setAutoRestoreComplete(true);
+  }, [pubkey]);
 
   // Detect shared-calendar invite links in URL hash (#invite=...).
   // The payload is base64-encoded and contains the calendar dTag + AES key.
@@ -300,6 +245,7 @@ export function CalendarApp() {
         pubkey={pubkey!}
         profile={profile}
         backingUp={backingUp}
+        unsavedChanges={unsavedChanges}
         onBackupNow={backupNow}
         onLogout={logout}
         onNewEvent={() => handleNewEvent()}
@@ -349,12 +295,6 @@ export function CalendarApp() {
           >
             Dismiss
           </button>
-        </div>
-      )}
-
-      {autoRestoreStatus && (
-        <div className="bg-emerald-50 border-b border-emerald-200 px-4 py-2 text-sm text-emerald-800 text-center">
-          {autoRestoreStatus}
         </div>
       )}
 
