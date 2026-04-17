@@ -109,6 +109,15 @@ const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs: numbe
   finally { clearTimeout(t); }
 };
 
+// Sha256s of pointers this tab just published. watchPointer uses this to
+// ignore its own publishes so the user never sees "Synced from another
+// device" for a save they made themselves on this device.
+const ownPublishedShas = new Set<string>();
+const markOwnPublish = (sha: string) => {
+  ownPublishedShas.add(sha);
+  setTimeout(() => ownPublishedShas.delete(sha), 60_000);
+};
+
 const withTimeout = async <T>(p: Promise<T>, ms: number, label: string): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -210,6 +219,7 @@ export async function saveSnapshot(
   }
   const sha256 = await BlossomClient.getFileSha256(blob);
   log.info(`snapshot ${sha256.slice(0, 8)} — ${blob.size} bytes encrypted`);
+  markOwnPublish(sha256);
 
   // 2. Sign ONE upload auth, reuse across all servers.
   const authEvent = await withTimeout(
@@ -449,6 +459,7 @@ export function watchPointer(
         if (closed) return;
         const sha = event.tags.find((t) => t[0] === "x")?.[1];
         if (!sha || sha === lastSha) return;
+        if (ownPublishedShas.has(sha)) { lastSha = sha; return; }
         // Race-fetch the new blob and decrypt.
         const servers = event.tags.filter((t) => t[0] === "server").map((t) => t[1]);
         const allServers = [...new Set([...servers, ...BLOSSOM_SERVERS])];

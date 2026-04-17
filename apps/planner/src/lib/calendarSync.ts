@@ -85,6 +85,7 @@ export interface DecryptResult {
   events: CalendarEvent[];
   calendars: CalendarCollection[];
   decryptErrors: number;
+  decryptSuccesses: number;
 }
 
 /**
@@ -195,6 +196,7 @@ export async function decryptCalendarData(opts: {
 
   // ── Pass 2: Decrypt events in parallel batches ───────────────────
   let decryptErrors = 0;
+  let decryptSuccesses = 0;
   const CONCURRENCY = 20;
 
   const decryptOne = async (raw: NostrEvent) => {
@@ -211,6 +213,7 @@ export async function decryptCalendarData(opts: {
         const rebuilt = { ...raw, kind: decrypted.kind, tags: decrypted.tags, content: decrypted.content };
         const parsed = parseCalendarEvent(rebuilt);
         if (parsed) addEvent(parsed);
+        decryptSuccesses++;
       } catch (err) {
         log.warn("AES-GCM event decrypt failed for", dTag, err);
         decryptErrors++;
@@ -222,6 +225,7 @@ export async function decryptCalendarData(opts: {
         const rebuilt = { ...raw, kind: decrypted.kind, tags: decrypted.tags, content: decrypted.content };
         const parsed = parseCalendarEvent(rebuilt);
         if (parsed) addEvent(parsed);
+        decryptSuccesses++;
       } catch (err) {
         log.warn("NIP-44 event decrypt failed for", dTag, err);
         decryptErrors++;
@@ -244,5 +248,6 @@ export async function decryptCalendarData(opts: {
     events: allEvents,
     calendars: [...seenCalendars.values()],
     decryptErrors,
+    decryptSuccesses,
   };
 }
