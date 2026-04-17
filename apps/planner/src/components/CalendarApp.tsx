@@ -216,6 +216,10 @@ export function CalendarApp() {
   };
 
   const handleNewEvent = (date?: Date) => {
+    // Block event creation until calendars are actually loaded — without
+    // a target calendar the save can't pick a NIP-52 kind or encryption
+    // mode, and the event would silently vanish.
+    if (eventsLoading || calendars.length === 0) return;
     setEditEvent(null);
     setPrefillDate(date || null);
     setExtendSeries(null);
@@ -290,6 +294,7 @@ export function CalendarApp() {
         onBackupNow={backupNow}
         onLogout={logout}
         onNewEvent={() => handleNewEvent()}
+        canAddEvent={!eventsLoading && calendars.length > 0}
         onBackup={() => setShowBackup(true)}
         onSettings={() => setShowSettings(true)}
         showDaily={showDaily}

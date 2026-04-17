@@ -42,6 +42,7 @@ interface HeaderProps {
   onBackupNow: () => Promise<void>;
   onLogout: () => void;
   onNewEvent: () => void;
+  canAddEvent: boolean;
   onBackup: () => void;
   onSettings: () => void;
   showDaily: boolean;
@@ -79,6 +80,7 @@ export function Header({
   onBackupNow,
   onLogout,
   onNewEvent,
+  canAddEvent,
   onBackup,
   onSettings,
   showDaily,
@@ -166,7 +168,7 @@ export function Header({
             <CalendarDays className="w-6 h-6 text-primary-600 shrink-0" />
             <h1 className="text-xl font-bold text-primary-700 shrink-0">
               Planner
-              <span className="text-xs font-normal text-gray-400 ml-1">v1.8.0b</span>
+              <span className="text-xs font-normal text-gray-400 ml-1">v1.9.0b</span>
             </h1>
           </div>
 
@@ -247,7 +249,9 @@ export function Header({
 
             <button
               onClick={onNewEvent}
-              className="flex items-center gap-1 bg-primary-600 hover:bg-primary-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+              disabled={!canAddEvent}
+              title={canAddEvent ? "" : "Loading calendars…"}
+              className="flex items-center gap-1 bg-primary-600 hover:bg-primary-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Plus className="w-4 h-4" />
               <span>Event</span>
@@ -348,7 +352,7 @@ export function Header({
             <CalendarDays className="w-5 h-5 text-primary-600 shrink-0" />
             <h1 className="text-base font-bold text-primary-700">
               Planner
-              <span className="text-[10px] font-normal text-gray-400 ml-1">v1.8.0b</span>
+              <span className="text-[10px] font-normal text-gray-400 ml-1">v1.9.0b</span>
             </h1>
           </div>
           <div className="flex items-center gap-0.5">
@@ -475,7 +479,9 @@ export function Header({
           </div>
           <button
             onClick={onNewEvent}
-            className="flex items-center gap-1 bg-primary-600 hover:bg-primary-700 text-white px-2 py-1 rounded-lg text-xs font-medium transition-colors"
+            disabled={!canAddEvent}
+            title={canAddEvent ? "" : "Loading calendars…"}
+            className="flex items-center gap-1 bg-primary-600 hover:bg-primary-700 text-white px-2 py-1 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Plus className="w-3.5 h-3.5" />
             Event

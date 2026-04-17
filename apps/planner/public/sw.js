@@ -13,7 +13,7 @@
 const SW_PATH = self.location.pathname;
 const BASE_PATH = SW_PATH.substring(0, SW_PATH.lastIndexOf("/") + 1);
 
-const CACHE_NAME = "planner-v4";
+const CACHE_NAME = "planner-v5";
 const APP_SHELL = [
   BASE_PATH,
   BASE_PATH + "index.html",
