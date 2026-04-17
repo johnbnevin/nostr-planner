@@ -57,11 +57,20 @@ export async function connectNostrSigner(
   const secretBytes = crypto.getRandomValues(new Uint8Array(16));
   const secret = Array.from(secretBytes).map(b => b.toString(16).padStart(2, '0')).join('');
 
+  // Request all permissions the app will ever need up front, so Amber-style
+  // bunkers can prompt the user ONCE at connect time instead of on every
+  // subsequent action. Scope:
+  //   - sign_event: blossom upload auth (24242), backup reference (30078),
+  //     public NIP-52 events (31922/31923), calendar collections (31924),
+  //     shared events (30078), deletion events (5), RSVPs (31925).
+  //   - nip44_encrypt: wrap the per-backup AES key.
+  //   - nip44_decrypt: unwrap the AES key on restore/cold-load.
   const uri = createNostrConnectURI({
     clientPubkey,
     relays: NIP46_RELAYS,
     secret,
     name: 'Nostr Planner',
+    perms: ['sign_event', 'nip44_encrypt', 'nip44_decrypt'],
   });
 
   // Pool with generous relay-connect timeout (default 3s is too tight —
