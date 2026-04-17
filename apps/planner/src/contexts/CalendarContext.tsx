@@ -457,6 +457,12 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       const deletedCoords = buildDeletedCoords(rawDeletions, deletedDTagsRef.current);
 
       // ── Phase 5+6: Two-pass decrypt (calendars first, then events) ──
+      // Treat as incremental whenever we have any in-memory state (e.g.
+      // from IndexedDB or the Blossom materialized snapshot) so the relay
+      // refresh MERGES onto that state rather than wiping it. Private
+      // calendar events are Blossom-authoritative and never appear in
+      // `rawEvents` — without the merge, every refresh would nuke them.
+      const hasPriorState = eventsRef.current.length > 0 || calendarsRef.current.length > 0;
       const decryptResult = await decryptCalendarData({
         rawEvents,
         deletedCoords,
@@ -465,7 +471,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
         sharedKeys: freshKeys,
         existingEvents: eventsRef.current,
         existingCalendars: calendarsRef.current,
-        isIncremental: !!sinceFilter.since,
+        isIncremental: !!sinceFilter.since || hasPriorState,
       });
 
       if (decryptResult.calendars.length > 0) {

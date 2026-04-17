@@ -159,12 +159,16 @@ export function CalendarApp() {
   const handleScanRelays = async () => {
     if (!pubkey || scanningRelays) return;
     setScanningRelays(true);
+    // Hard wall-clock timeout — without this, a single slow relay or a
+    // hanging republish could keep the spinner going indefinitely.
+    const deadline = setTimeout(() => {
+      log.warn("relay scan hit 30s wall-clock timeout");
+      setScanningRelays(false);
+    }, 30_000);
     try {
-      // Query extra relays (not in our default set) for this user's events
       const extraOnly = EXTRA_RELAYS.filter((r) => !relays.includes(r));
       if (extraOnly.length === 0) {
         log.info("no additional relays to scan");
-        setScanningRelays(false);
         return;
       }
       log.info("scanning", extraOnly.length, "additional relays...");
@@ -173,11 +177,10 @@ export function CalendarApp() {
         authors: [pubkey],
       }, 12_000);
       if (found.length > 0) {
-        log.info("found", found.length, "events on extra relays, re-publishing to your relays");
-        // Re-publish found events to the user's relays so they're available next time
-        for (const evt of found) {
-          try { await publishEvent(evt); } catch { /* best effort */ }
-        }
+        log.info("found", found.length, "events on extra relays, re-publishing");
+        // Parallel publish — sequential was too slow and could stall the
+        // spinner if any single relay was unresponsive.
+        await Promise.allSettled(found.map((evt) => publishEvent(evt)));
         await forceFullRefresh();
       } else {
         log.info("no additional events found on extra relays");
@@ -185,6 +188,7 @@ export function CalendarApp() {
     } catch (err) {
       log.error("relay scan failed", err);
     } finally {
+      clearTimeout(deadline);
       setScanningRelays(false);
     }
   };
