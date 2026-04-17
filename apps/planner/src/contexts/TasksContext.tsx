@@ -101,6 +101,8 @@ interface TasksContextValue {
   toggleListItem: (listId: string, itemId: string) => void;
   reorderListItems: (listId: string, fromIndex: number, toIndex: number) => void;
   refreshTasks: () => Promise<void>;
+  /** Replace in-memory tasks state wholesale. Called on snapshot restore. */
+  applySnapshot: (habits: DailyHabit[], completions: Record<string, string[]>, lists: UserList[]) => void;
   // Loading
   loading: boolean;
 }
@@ -650,6 +652,11 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     toggleListItem,
     reorderListItems,
     refreshTasks: fetchData,
+    applySnapshot: (h: DailyHabit[], c: Record<string, string[]>, l: UserList[]) => {
+      setHabits(h);
+      setCompletions(c);
+      setLists(l);
+    },
     loading,
   }), [habits, completions, addHabit, removeHabit, renameHabit, toggleHabitCompletion, isHabitDone, getHabitStats, reorderHabits, lists, addList, removeList, renameList, addListItem, removeListItem, toggleListItem, reorderListItems, fetchData, loading]);
 

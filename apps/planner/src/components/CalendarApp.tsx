@@ -3,6 +3,8 @@ import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useSharing } from "../contexts/SharingContext";
 import { useSettings } from "../contexts/SettingsContext";
+import { useTasks } from "../contexts/TasksContext";
+import { loadSnapshot } from "../lib/backup";
 import { Header } from "./Header";
 import type { MobileTab } from "./Header";
 import { Sidebar } from "./Sidebar";
@@ -43,13 +45,37 @@ import type { ParsedIcalEvent } from "../lib/ical";
  *   no calendars exist yet.
  */
 export function CalendarApp() {
-  const { pubkey, profile, logout } = useNostr();
-  const { viewMode, setViewMode, eventsLoading, calendars, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError } = useCalendar();
+  const { pubkey, profile, logout, signer, relays } = useNostr();
+  const { viewMode, setViewMode, eventsLoading, calendars, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot } = useCalendar();
   const { acceptInviteLink } = useSharing();
-  const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode } = useSettings();
+  const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, restoreSettings } = useSettings();
   const { alerts, dismiss } = useNotifications();
+  const { applySnapshot: applyTasksSnapshot } = useTasks();
   const { phase: backupPhase, countdown: saveCountdown, lastError: backupError, backupNow } = useAutoBackup();
   useDigest();
+
+  // ── Restore the Blossom snapshot on login ──────────────────────────
+  // Single entry point for "login → restore" — applies calendar, tasks
+  // and settings state in one pass so you don't see a flash of empty
+  // events while tasks populate separately.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (!pubkey) { restoredRef.current = false; return; }
+    if (restoredRef.current) return;
+    if (!signer?.nip44) return;
+    restoredRef.current = true;
+    (async () => {
+      try {
+        const snap = await loadSnapshot(pubkey, relays, signer.nip44);
+        if (!snap) return;
+        applyCalendarSnapshot(snap.events, snap.calendars);
+        applyTasksSnapshot(snap.habits, snap.completions, snap.lists);
+        restoreSettings(snap.settings);
+      } catch (err) {
+        console.warn("snapshot restore failed:", err);
+      }
+    })();
+  }, [pubkey, signer, relays, applyCalendarSnapshot, applyTasksSnapshot, restoreSettings]);
   // Guards to prevent re-running one-shot effects across re-renders
   const autoRestoreAttempted = useRef(false);
   // Refs to the scrollable calendar containers so we can reset them to the

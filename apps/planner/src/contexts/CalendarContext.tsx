@@ -72,8 +72,7 @@ import {
 import type { NostrSigner } from "../lib/signer";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
-import { cacheCalendarData, loadCachedCalendarData } from "../lib/eventCache";
-import { loadMaterializedFromBlossom } from "../lib/backup";
+import { cacheCalendarData } from "../lib/eventCache";
 
 const log = logger("calendar");
 
@@ -137,6 +136,8 @@ interface CalendarContextValue {
   leaveSharedCalendarAndCleanup: (calDTag: string) => Promise<void>;
   /** Add an event to state immediately (before relay confirmation). */
   addEventOptimistic: (event: CalendarEvent) => void;
+  /** Replace in-memory calendar state wholesale. Called on snapshot restore. */
+  applySnapshot: (events: CalendarEvent[], calendars: CalendarCollection[]) => void;
   /** True when the user has no calendars and needs to create their first one. */
   needsCalendarSetup: boolean;
   /** Create the user's first calendar during onboarding. */
@@ -714,6 +715,13 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const applySnapshot = useCallback((evs: CalendarEvent[], cals: CalendarCollection[]) => {
+    setEvents(evs);
+    setCalendars(cals);
+    setActiveCalendarIds(new Set(cals.map((c) => c.dTag)));
+    setEventsLoading(false);
+  }, []);
+
   // ── Calendar toggle ────────────────────────────────────────────────
 
   const toggleCalendar = useCallback((dTag: string) => {
@@ -1175,48 +1183,12 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     await doRefresh();
   }, [doRefresh]);
 
-  // On login: try IndexedDB cache first (warm return), fall through to the
-  // Blossom materialized snapshot (fast cold start — one HTTP GET + one
-  // NIP-44 signer call regardless of event count), then the relay refresh.
+  // On login, reset the relay refresh cursor. CalendarApp drives the
+  // actual Blossom snapshot restore so it can apply state to every context
+  // (calendar + tasks + settings) in one pass.
   useEffect(() => {
     if (!pubkey) return;
     lastFetchRef.current = 0;
-
-    const applySnapshot = (events: CalendarEvent[], calendars: CalendarCollection[], source: string) => {
-      setEvents(events);
-      setCalendars(calendars);
-      setActiveCalendarIds(new Set(calendars.map((c) => c.dTag)));
-      setEventsLoading(false);
-      log.debug(`showing ${source} snapshot while relay sync runs`);
-    };
-
-    (async () => {
-      try {
-        const cached = await loadCachedCalendarData(pubkey);
-        if (cached && cached.events.length > 0) {
-          applySnapshot(cached.events, cached.calendars, "IndexedDB cache");
-          return;
-        }
-      } catch { /* cache miss is fine */ }
-
-      if (!signer?.nip44) return;
-      try {
-        // Hard timeout — legacy v1/v2 blobs require many sequential NIP-44
-        // round-trips to decrypt (one per chunk), which on Amber/bunker
-        // signers can queue behind user-approval dialogs and stall for
-        // minutes. We'd rather fall through to the relay refresh than
-        // block every other load path waiting on it.
-        const materialized = await Promise.race([
-          loadMaterializedFromBlossom(pubkey, relays, signer.nip44),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 20_000)),
-        ]);
-        if (materialized && materialized.events.length > 0) {
-          applySnapshot(materialized.events, materialized.calendars, "Blossom");
-        }
-      } catch (err) {
-        log.debug("Blossom cold-start load failed (non-fatal):", err);
-      }
-    })();
 
     // Safety net: clear the loading indicator after 60s even if relay sync
     // hasn't finished. Prevents "Loading events…" from staying forever when
@@ -1261,11 +1233,12 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     convertToShared,
     leaveSharedCalendarAndCleanup,
     addEventOptimistic,
+    applySnapshot,
     needsCalendarSetup,
     completeCalendarSetup,
     decryptionErrors,
     syncError,
-  }), [events, filteredEvents, calendars, activeCalendarIds, allTags, tagsByUsage, eventsLoading, currentDate, viewMode, toggleCalendar, createCalendar, createSharedCalendar, updateCalendarEvents, getSeriesEvents, renameCalendar, recolorCalendar, deleteCalendar, reorderCalendars, refreshEvents, forceFullRefresh, deleteEvent, moveEvent, removeMember, convertToShared, leaveSharedCalendarAndCleanup, addEventOptimistic, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError]);
+  }), [events, filteredEvents, calendars, activeCalendarIds, allTags, tagsByUsage, eventsLoading, currentDate, viewMode, toggleCalendar, createCalendar, createSharedCalendar, updateCalendarEvents, getSeriesEvents, renameCalendar, recolorCalendar, deleteCalendar, reorderCalendars, refreshEvents, forceFullRefresh, deleteEvent, moveEvent, removeMember, convertToShared, leaveSharedCalendarAndCleanup, addEventOptimistic, applySnapshot, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError]);
 
   return (
     <CalendarContext.Provider

@@ -34,7 +34,6 @@ const NIP46_RELAYS = [
   "wss://relay.nsecbunker.com",
   "wss://relay.damus.io",
   "wss://nos.lol",
-  "wss://relay.primal.net",
 ];
 
 /** Longer relay-connect budget than SimplePool's 3-second default.

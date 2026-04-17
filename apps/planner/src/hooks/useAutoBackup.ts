@@ -1,22 +1,19 @@
 /**
- * useAutoBackup — automatic Blossom backup triggered by data changes.
+ * useAutoBackup — debounced Blossom snapshot saves.
  *
  * Lifecycle:
  *   idle (green cloud)
- *     ↓ user edits data
- *   dirty + countdown (red cloud with "15s → 0s" badge)
- *     ↓ countdown reaches 0
+ *     ↓ data changes
+ *   dirty + countdown (red cloud + corner countdown "15→0")
+ *     ↓ countdown hits 0
  *   saving (red spinner)
  *     ├─ success → idle
- *     └─ failure → error (red exclamation + retry countdown)
- *          ↓ retry countdown reaches 0
- *        saving
- *          └─ …
+ *     └─ failure → error (red CloudAlert + retry countdown 30s)
+ *          ↓ countdown hits 0 → saving again …
  *
- * The debounce timer lives in a ref and is deliberately NOT cleared by the
- * change-detection effect's cleanup — React re-running that effect on every
- * unrelated re-render was previously wiping the timer before it could fire,
- * which is why "cloud stays red but never saves" was happening.
+ * The debounce timer lives in a ref and is deliberately NOT cleared on
+ * every render — the previous design wiped it whenever any dependency
+ * shifted, which silently stalled autosaves forever.
  */
 
 import { useEffect, useRef, useCallback, useState } from "react";
@@ -24,15 +21,13 @@ import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useSettings } from "../contexts/SettingsContext";
 import { useTasks } from "../contexts/TasksContext";
-import { performFullBackup } from "../lib/backup";
+import { saveSnapshot, buildSnapshot } from "../lib/backup";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
 
 const log = logger("auto-backup");
 
-/** 15s of no further changes before autosave fires. */
 const DEBOUNCE_MS = 15_000;
-/** After a failure, wait this long before auto-retrying. */
 const RETRY_AFTER_FAILURE_MS = 30_000;
 const LAST_BACKUP_KEY = "nostr-planner-last-autobackup";
 
@@ -40,91 +35,95 @@ export type BackupPhase = "idle" | "dirty" | "saving" | "error";
 
 export function useAutoBackup(): {
   phase: BackupPhase;
-  /** Seconds until the next autosave (either debounced or retry). Null when idle/saving. */
+  /** Seconds until the next save fires (debounced or retry). Null when idle/saving. */
   countdown: number | null;
-  /** Most recent failure message, for the error tooltip. */
+  /** Human-readable text of the most recent failure. */
   lastError: string | null;
-  /** Trigger a save right now; bypasses the debounce but respects the single-flight guard. */
+  /** Force a save right now, bypassing the debounce. */
   backupNow: () => Promise<void>;
 } {
-  const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
+  const { pubkey, signEvent, publishEvent, signer } = useNostr();
   const { events, calendars, eventsLoading } = useCalendar();
   const { habits, completions, lists, loading: tasksLoading } = useTasks();
   const { getSettings, autoBackup } = useSettings();
 
-  // ── State that drives the cloud icon ─────────────────────────────────
   const [phase, setPhase] = useState<BackupPhase>("idle");
   const [lastError, setLastError] = useState<string | null>(null);
-  /** Unix ms when the pending save will fire. Null when not scheduled. */
   const [saveDueAt, setSaveDueAt] = useState<number | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
 
-  // ── Timers & single-flight tracking ──────────────────────────────────
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backingUpRef = useRef(false);
   const fingerprint = useRef("");
   const initialLoadDone = useRef(false);
 
-  // ── Stable refs to the latest backup args (so doBackup's closure
-  //    always sees fresh pubkey/signer/state even though doBackup itself
-  //    is memoized with empty deps to keep its identity stable). ────────
-  const argsRef = useRef({ pubkey, relays, signEvent, publishEvent, getSettings, autoBackup, signer });
-  argsRef.current = { pubkey, relays, signEvent, publishEvent, getSettings, autoBackup, signer };
+  // Stable refs so the stable-identity doBackup always sees latest state.
+  const stateRef = useRef({
+    pubkey, signEvent, publishEvent, signer,
+    getSettings, autoBackup,
+    events, calendars, habits, completions, lists,
+  });
+  stateRef.current = {
+    pubkey, signEvent, publishEvent, signer,
+    getSettings, autoBackup,
+    events, calendars, habits, completions, lists,
+  };
 
-  const materializedRef = useRef<{ events: typeof events; calendars: typeof calendars }>({ events, calendars });
-  materializedRef.current = { events, calendars };
-
-  // ── Fingerprint: cheap hash of all user data so we can detect real
-  //    changes vs. incidental re-renders. Kept deliberately non-memoed
-  //    (plain function) to avoid identity-churn invalidating the change
-  //    detection effect — the effect calls it inside its body. ──────────
   const computeFingerprint = (): string => {
-    let hash = events.length;
+    const { events, calendars, habits, completions, lists, getSettings } = stateRef.current;
+    let eh = events.length;
     for (const e of events) {
-      hash = (hash * 31 + e.start.getTime()) | 0;
-      hash = (hash * 31 + (e.end?.getTime() ?? 0)) | 0;
-      hash = (hash * 31 + e.createdAt) | 0;
-      hash = (hash * 31 + e.content.length) | 0;
+      eh = (eh * 31 + e.start.getTime()) | 0;
+      eh = (eh * 31 + (e.end?.getTime() ?? 0)) | 0;
+      eh = (eh * 31 + e.createdAt) | 0;
+      eh = (eh * 31 + e.content.length) | 0;
+      eh = (eh * 31 + e.title.length) | 0;
     }
-    let calHash = calendars.length;
+    let ch = calendars.length;
     for (const c of calendars) {
-      calHash = (calHash * 31 + c.eventRefs.length) | 0;
-      calHash = (calHash * 31 + c.title.length) | 0;
+      ch = (ch * 31 + c.eventRefs.length) | 0;
+      ch = (ch * 31 + c.title.length) | 0;
     }
-    const habitHash = habits.length;
-    const completionKeys = Object.keys(completions).length;
-    let completionCount = 0;
-    for (const k in completions) completionCount += completions[k].length;
-    let listHash = lists.length;
+    const hh = habits.length;
+    const ck = Object.keys(completions).length;
+    let cc = 0;
+    for (const k in completions) cc += completions[k].length;
+    let lh = lists.length;
     for (const l of lists) {
-      listHash = (listHash * 31 + l.items.length) | 0;
-      for (const i of l.items) listHash = (listHash * 31 + (i.done ? 1 : 0)) | 0;
+      lh = (lh * 31 + l.items.length) | 0;
+      for (const i of l.items) lh = (lh * 31 + (i.done ? 1 : 0)) | 0;
     }
-    const settingsPart = JSON.stringify(argsRef.current.getSettings());
-    return `${hash}|${calHash}|${habitHash}|${completionKeys}:${completionCount}|${listHash}|${settingsPart}`;
+    return `${eh}|${ch}|${hh}|${ck}:${cc}|${lh}|${JSON.stringify(getSettings())}`;
   };
 
   const scheduleSave = (delayMs: number) => {
     if (timerRef.current) clearTimeout(timerRef.current);
-    const due = Date.now() + delayMs;
-    setSaveDueAt(due);
+    setSaveDueAt(Date.now() + delayMs);
     timerRef.current = setTimeout(() => { void doBackup(); }, delayMs);
   };
 
   const doBackup = useCallback(async () => {
-    const { pubkey: pk, relays: r, signEvent: se, publishEvent: pe, getSettings: gs, signer: s } = argsRef.current;
-    if (backingUpRef.current || !pk) return;
+    const s = stateRef.current;
+    if (backingUpRef.current || !s.pubkey || !s.signer?.nip44) return;
     backingUpRef.current = true;
     setPhase("saving");
     setSaveDueAt(null);
     try {
-      await performFullBackup(pk, r, gs(), se, pe, s?.nip44, materializedRef.current);
+      const snapshot = buildSnapshot({
+        calendars: s.calendars,
+        events: s.events,
+        habits: s.habits,
+        completions: s.completions,
+        lists: s.lists,
+        settings: s.getSettings(),
+      });
+      await saveSnapshot(s.pubkey, snapshot, s.signEvent, s.publishEvent, s.signer.nip44);
       lsSet(LAST_BACKUP_KEY, new Date().toISOString());
       setLastError(null);
       setPhase("idle");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error("backup failed:", msg);
+      log.error("save failed:", msg);
       setLastError(msg);
       setPhase("error");
       scheduleSave(RETRY_AFTER_FAILURE_MS);
@@ -133,30 +132,24 @@ export function useAutoBackup(): {
     }
   }, []);
 
-  // ── Change detection ─────────────────────────────────────────────────
-  // Runs on every render; cheap enough because computeFingerprint is O(n).
-  // Critically: DOES NOT return a cleanup that clears the timer — that was
-  // the bug that stalled autosaves forever across unrelated re-renders.
+  // Change detection — runs every render; cheap enough.
+  // NO cleanup that clears the timer: that was the autosave-never-fires bug.
   useEffect(() => {
     if (!pubkey || !autoBackup || eventsLoading || tasksLoading) return;
-
     if (!initialLoadDone.current) {
       initialLoadDone.current = true;
       fingerprint.current = computeFingerprint();
       return;
     }
-
-    const newFp = computeFingerprint();
-    if (newFp === fingerprint.current) return;
-    fingerprint.current = newFp;
-
-    // Real change → enter dirty state and arm the debounce timer.
+    const next = computeFingerprint();
+    if (next === fingerprint.current) return;
+    fingerprint.current = next;
     setLastError(null);
     setPhase((prev) => (prev === "saving" ? prev : "dirty"));
     scheduleSave(DEBOUNCE_MS);
   });
 
-  // ── autoBackup toggled off: cancel any pending save. ─────────────────
+  // autoBackup toggled off → cancel pending.
   useEffect(() => {
     if (autoBackup) return;
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
@@ -165,30 +158,25 @@ export function useAutoBackup(): {
     setLastError(null);
   }, [autoBackup]);
 
-  // ── Logout cleanup. ──────────────────────────────────────────────────
-  useEffect(() => {
-    return () => {
-      if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
-    };
+  // Unmount.
+  useEffect(() => () => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
   }, []);
 
-  // ── Flush on unload (best-effort — browser won't wait for async). ────
+  // Flush on unload (best-effort).
   useEffect(() => {
     const handleUnload = () => {
-      if (phase !== "dirty" || !argsRef.current.pubkey || !argsRef.current.autoBackup) return;
+      if (phase !== "dirty" || !stateRef.current.pubkey || !stateRef.current.autoBackup) return;
       void doBackup();
     };
     window.addEventListener("beforeunload", handleUnload);
     return () => window.removeEventListener("beforeunload", handleUnload);
   }, [phase, doBackup]);
 
-  // ── Countdown ticker. Runs while a save is scheduled. ────────────────
+  // Countdown ticker.
   useEffect(() => {
     if (saveDueAt === null) { setCountdown(null); return; }
-    const tick = () => {
-      const remainingMs = saveDueAt - Date.now();
-      setCountdown(Math.max(0, Math.ceil(remainingMs / 1000)));
-    };
+    const tick = () => setCountdown(Math.max(0, Math.ceil((saveDueAt - Date.now()) / 1000)));
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
