@@ -27,9 +27,8 @@ import { useNotifications } from "../hooks/useNotifications";
 import { useAutoBackup } from "../hooks/useAutoBackup";
 import { useDigest } from "../hooks/useDigest";
 import { decodeInvitePayload } from "../lib/sharing";
-import { onPublishFailure, queryEvents } from "../lib/relay";
+import { onPublishFailure } from "../lib/relay";
 import type { CalendarEvent, RecurrenceFreq } from "../lib/nostr";
-import { KIND_APP_DATA } from "../lib/nostr";
 import type { ParsedIcalEvent } from "../lib/ical";
 import { logger } from "../lib/logger";
 
@@ -145,53 +144,6 @@ export function CalendarApp() {
     fromDate: Date;
     templateEvent: CalendarEvent;
   } | null>(null);
-
-  // ── Scan additional relays for missing events ──────────────────────
-  const [scanningRelays, setScanningRelays] = useState(false);
-
-  const EXTRA_RELAYS = [
-    "wss://relay.primal.net",
-    "wss://relay.nostr.band",
-    "wss://purplepag.es",
-    "wss://relay.snort.social",
-  ];
-
-  const handleScanRelays = async () => {
-    if (!pubkey || scanningRelays) return;
-    setScanningRelays(true);
-    // Hard wall-clock timeout — without this, a single slow relay or a
-    // hanging republish could keep the spinner going indefinitely.
-    const deadline = setTimeout(() => {
-      log.warn("relay scan hit 30s wall-clock timeout");
-      setScanningRelays(false);
-    }, 30_000);
-    try {
-      const extraOnly = EXTRA_RELAYS.filter((r) => !relays.includes(r));
-      if (extraOnly.length === 0) {
-        log.info("no additional relays to scan");
-        return;
-      }
-      log.info("scanning", extraOnly.length, "additional relays...");
-      const found = await queryEvents(extraOnly, {
-        kinds: [31922, 31923, 31924, KIND_APP_DATA],
-        authors: [pubkey],
-      }, 12_000);
-      if (found.length > 0) {
-        log.info("found", found.length, "events on extra relays, re-publishing");
-        // Parallel publish — sequential was too slow and could stall the
-        // spinner if any single relay was unresponsive.
-        await Promise.allSettled(found.map((evt) => publishEvent(evt)));
-        await forceFullRefresh();
-      } else {
-        log.info("no additional events found on extra relays");
-      }
-    } catch (err) {
-      log.error("relay scan failed", err);
-    } finally {
-      clearTimeout(deadline);
-      setScanningRelays(false);
-    }
-  };
 
   // Auto-restore: on first login, if the relay returns zero events, look for
   // a Blossom backup blob (stored as a replaceable Nostr event with a sha256
@@ -360,8 +312,6 @@ export function CalendarApp() {
         mobileTab={mobileTab}
         onMobileTabChange={handleMobileTabChange}
         onCalendars={() => setShowMobileSidebar(true)}
-        onScanRelays={handleScanRelays}
-        scanningRelays={scanningRelays}
       />
 
       {pendingInvite && (

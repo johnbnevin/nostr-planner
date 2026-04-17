@@ -16,7 +16,6 @@ import {
   CloudOff,
   Loader,
   Layers,
-  HelpCircle,
 } from "lucide-react";
 import {
   format,
@@ -49,8 +48,6 @@ interface HeaderProps {
   mobileTab: MobileTab;
   onMobileTabChange: (tab: MobileTab) => void;
   onCalendars: () => void;
-  onScanRelays: () => void;
-  scanningRelays: boolean;
 }
 
 /**
@@ -86,8 +83,6 @@ export function Header({
   mobileTab,
   onMobileTabChange,
   onCalendars,
-  onScanRelays,
-  scanningRelays,
 }: HeaderProps) {
   const { currentDate, setCurrentDate, viewMode, setViewMode, refreshEvents, decryptionErrors } =
     useCalendar();
@@ -292,19 +287,6 @@ export function Header({
             </button>
 
             <button
-              onClick={onScanRelays}
-              disabled={scanningRelays}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
-              title="Missing events? Check additional relays"
-            >
-              {scanningRelays ? (
-                <Loader className="w-4 h-4 text-amber-500 animate-spin" />
-              ) : (
-                <HelpCircle className="w-4 h-4 text-gray-400" />
-              )}
-            </button>
-
-            <button
               onClick={onSettings}
               className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
               title="Settings"
@@ -387,18 +369,6 @@ export function Header({
                 <CloudUpload className="w-4 h-4 text-emerald-600" />
               ) : (
                 <CloudOff className="w-4 h-4 text-gray-400" />
-              )}
-            </button>
-            <button
-              onClick={onScanRelays}
-              disabled={scanningRelays}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
-              title="Missing events? Check additional relays"
-            >
-              {scanningRelays ? (
-                <Loader className="w-4 h-4 text-amber-500 animate-spin" />
-              ) : (
-                <HelpCircle className="w-4 h-4 text-gray-400" />
               )}
             </button>
             <button
