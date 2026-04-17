@@ -66,7 +66,13 @@ export async function connectNostrSigner(
 
   // Pool with generous relay-connect timeout (default 3s is too tight —
   // a single slow relay can otherwise tank the whole handshake).
-  const pool = new SimplePool();
+  // enablePing: keeps WebSockets alive across the (potentially long) window
+  //   between showing the QR/URI and the user actually approving in Amber —
+  //   without it, strfry closes idle sockets and the whole sub collapses.
+  // enableReconnect: if a relay drops anyway, transparently re-dial.
+  // maxWaitForConnection: raised from the 3s default because first-connect
+  //   latency (DNS + TLS + WS handshake) can exceed that on mobile networks.
+  const pool = new SimplePool({ enablePing: true, enableReconnect: true });
   pool.maxWaitForConnection = NIP46_CONNECT_TIMEOUT_MS;
 
   // Hand the URI to the UI only after the pool exists — the sub itself
@@ -122,7 +128,13 @@ export async function connectBunkerUri(
   if (bp.relays.length === 0) throw new Error("Bunker URI has no relays");
 
   const sk = generateSecretKey();
-  const pool = new SimplePool();
+  // enablePing: keeps WebSockets alive across the (potentially long) window
+  //   between showing the QR/URI and the user actually approving in Amber —
+  //   without it, strfry closes idle sockets and the whole sub collapses.
+  // enableReconnect: if a relay drops anyway, transparently re-dial.
+  // maxWaitForConnection: raised from the 3s default because first-connect
+  //   latency (DNS + TLS + WS handshake) can exceed that on mobile networks.
+  const pool = new SimplePool({ enablePing: true, enableReconnect: true });
   pool.maxWaitForConnection = NIP46_CONNECT_TIMEOUT_MS;
   log.info("connecting via bunker URI...");
 
