@@ -39,6 +39,10 @@ export interface DailyHabit {
   id: string;
   title: string;
   createdAt: number; // unix seconds
+  /** Unix ms of last local mutation; used by multi-device merge. */
+  updatedAt?: number;
+  /** Tombstone marker. */
+  deleted?: boolean;
 }
 
 interface DailyData {
@@ -58,6 +62,10 @@ export interface UserList {
   name: string;
   items: ListItem[];
   createdAt: number; // unix seconds
+  /** Unix ms of last local mutation; used by multi-device merge. */
+  updatedAt?: number;
+  /** Tombstone marker. */
+  deleted?: boolean;
 }
 
 interface ListsData {

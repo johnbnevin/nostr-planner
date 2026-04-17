@@ -162,13 +162,13 @@ export function Header({
       <div className="max-w-[1600px] mx-auto px-3 sm:px-4">
 
         {/* ===== DESKTOP LAYOUT (sm+) ===== */}
-        <div className="hidden sm:flex items-center justify-between py-3">
+        <div className="hidden lg:flex items-center justify-between py-3">
           {/* Left: app name */}
           <div className="flex items-center gap-2 min-w-0">
             <CalendarDays className="w-6 h-6 text-primary-600 shrink-0" />
             <h1 className="text-xl font-bold text-primary-700 shrink-0">
               Planner
-              <span className="text-xs font-normal text-gray-400 ml-1">v1.9.0b</span>
+              <span className="text-xs font-normal text-gray-400 ml-1">{`v${__APP_VERSION__}b`}</span>
             </h1>
           </div>
 
@@ -347,12 +347,12 @@ export function Header({
         {/* ===== MOBILE LAYOUT (< sm) ===== */}
 
         {/* Row 1: Top menu — title + version + global actions */}
-        <div className="flex items-center justify-between py-2 sm:hidden">
+        <div className="flex items-center justify-between py-2 lg:hidden">
           <div className="flex items-center gap-1.5">
             <CalendarDays className="w-5 h-5 text-primary-600 shrink-0" />
             <h1 className="text-base font-bold text-primary-700">
               Planner
-              <span className="text-[10px] font-normal text-gray-400 ml-1">v1.9.0b</span>
+              <span className="text-[10px] font-normal text-gray-400 ml-1">{`v${__APP_VERSION__}b`}</span>
             </h1>
           </div>
           <div className="flex items-center gap-0.5">
@@ -447,7 +447,7 @@ export function Header({
         </div>
 
         {/* Row 2: Submenu — date navigation + new event */}
-        <div className="flex items-center justify-between pb-1.5 sm:hidden">
+        <div className="flex items-center justify-between pb-1.5 lg:hidden">
           <div className="flex items-center gap-1">
             <button
               onClick={goToday}
@@ -489,7 +489,7 @@ export function Header({
         </div>
 
         {/* Row 3: Tab bar — one view at a time */}
-        <div className="flex border-t border-gray-100 sm:hidden">
+        <div className="flex border-t border-gray-100 lg:hidden">
           {mobileTabs.map(({ id, label }) => (
             <button
               key={id}

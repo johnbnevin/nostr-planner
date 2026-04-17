@@ -31,11 +31,13 @@
  */
 
 import { BlossomClient } from "blossom-client-sdk";
+import { SimplePool } from "nostr-tools/pool";
 import { KIND_APP_DATA, DTAG_BACKUP, type CalendarEvent, type CalendarCollection } from "./nostr";
 import { queryEvents } from "./relay";
 import { logger } from "./logger";
 import type { PersistedSettings } from "../contexts/SettingsContext";
 import type { DailyHabit, UserList } from "../contexts/TasksContext";
+import { mergeSnapshots } from "./merge";
 
 const log = logger("backup");
 
@@ -169,12 +171,35 @@ export async function saveSnapshot(
   snapshot: Snapshot,
   signEvent: SignEventFn,
   publishEvent: PublishEventFn,
-  nip44: Nip44
+  nip44: Nip44,
+  /** User's Nostr relays, used for the optimistic-concurrency pre-check. */
+  relays?: string[],
+  /** sha256 this tab last loaded/saved. When another device has raced us
+   *  and published a newer pointer with a different sha256, we merge first
+   *  so we don't clobber their edits. */
+  lastKnownSha?: string
 ): Promise<SnapshotPointer> {
   const startedAt = Date.now();
 
+  // 0. Optimistic-concurrency guard. If another device has published a
+  //    newer pointer since we last synced, merge its snapshot into ours
+  //    before uploading so we don't silently overwrite their edits.
+  let working = snapshot;
+  if (relays && lastKnownSha !== undefined) {
+    try {
+      const current = await findPointer(pubkey, relays);
+      if (current && current.sha256 !== lastKnownSha) {
+        log.info(`pointer raced (ours=${lastKnownSha.slice(0, 8)}, remote=${current.sha256.slice(0, 8)}); merging`);
+        const remote = await loadSnapshot(pubkey, relays, nip44);
+        if (remote) working = mergeSnapshots(working, remote);
+      }
+    } catch (err) {
+      log.warn("pre-save pointer check failed (continuing with local):", err);
+    }
+  }
+
   // 1. Serialize + encrypt. One NIP-44 signer call.
-  const json = JSON.stringify(snapshot);
+  const json = JSON.stringify(working);
   log.info(`encrypting snapshot — ${json.length} bytes plaintext`);
   const envelope = await withTimeout(
     wrapEnvelope(json, pubkey, nip44), 60_000, "encrypt snapshot key"
@@ -230,12 +255,12 @@ export async function saveSnapshot(
   //    step 5 may arrive after the pointer is published, but that's OK
   //    because restore also falls back to BLOSSOM_SERVERS.
   const servers = [primary, ...BLOSSOM_SERVERS.filter((s) => s !== primary)];
-  const savedAt = snapshot.savedAt;
+  const savedAt = working.savedAt;
   const counts = {
-    events: snapshot.events.length,
-    calendars: snapshot.calendars.length,
-    habits: snapshot.habits.length,
-    lists: snapshot.lists.length,
+    events: working.events.length,
+    calendars: working.calendars.length,
+    habits: working.habits.length,
+    lists: working.lists.length,
   };
   const refEvent = await withTimeout(signEvent({
     kind: KIND_APP_DATA,
@@ -290,7 +315,7 @@ export async function loadSnapshot(
   pubkey: string,
   relays: string[],
   nip44: Nip44
-): Promise<Snapshot | null> {
+): Promise<(Snapshot & { _sha256: string }) | null> {
   const pointer = await findPointer(pubkey, relays);
   if (!pointer) {
     log.info("no snapshot pointer found");
@@ -332,7 +357,7 @@ export async function loadSnapshot(
     if (e.end) e.end = new Date(e.end as unknown as string);
   }
   log.info(`restored: ${snap.events.length} events, ${snap.calendars.length} calendars, ${snap.habits.length} habits, ${snap.lists.length} lists`);
-  return snap;
+  return { ...snap, _sha256: pointer.sha256 };
 }
 
 async function findPointer(
@@ -391,6 +416,66 @@ async function raceFetch(sha256: string, servers: string[]): Promise<string | nu
       });
     }
   });
+}
+
+// ── Live pointer subscription (multi-device sync) ───────────────────
+
+/**
+ * Watch for newer snapshot pointer events published by OTHER devices of
+ * the same user. When a newer pointer arrives (different sha256 from the
+ * last one this tab is aware of), fetch + decrypt the blob and hand it
+ * to `onNewer`. Returns a close function.
+ *
+ * The caller is responsible for merging the remote snapshot with its
+ * local state and re-applying to the UI.
+ */
+export function watchPointer(
+  pubkey: string,
+  relays: string[],
+  nip44: Nip44,
+  initialSha: string | null,
+  onNewer: (snapshot: Snapshot) => void
+): () => void {
+  const pool = new SimplePool();
+  let lastSha = initialSha;
+  let closed = false;
+
+  const urls = relays.length > 0 ? relays.slice(0, 5) : ["wss://relay.damus.io", "wss://nos.lol"];
+  const sub = pool.subscribe(
+    urls,
+    { kinds: [KIND_APP_DATA], authors: [pubkey], "#d": [DTAG_BACKUP], since: Math.floor(Date.now() / 1000) },
+    {
+      onevent: async (event) => {
+        if (closed) return;
+        const sha = event.tags.find((t) => t[0] === "x")?.[1];
+        if (!sha || sha === lastSha) return;
+        // Race-fetch the new blob and decrypt.
+        const servers = event.tags.filter((t) => t[0] === "server").map((t) => t[1]);
+        const allServers = [...new Set([...servers, ...BLOSSOM_SERVERS])];
+        const body = await raceFetch(sha, allServers);
+        if (!body || closed) return;
+        try {
+          const env: Envelope = JSON.parse(body);
+          const plaintext = await unwrapEnvelope(env, pubkey, nip44);
+          const snap = JSON.parse(plaintext) as Snapshot;
+          if (snap.version !== 1) return;
+          for (const e of snap.events) {
+            e.start = new Date(e.start as unknown as string);
+            if (e.end) e.end = new Date(e.end as unknown as string);
+          }
+          lastSha = sha;
+          onNewer({ ...snap, _sha256: sha } as Snapshot & { _sha256: string });
+        } catch (err) {
+          log.warn("watchPointer: remote snapshot decrypt failed:", err);
+        }
+      },
+    }
+  );
+
+  return () => {
+    closed = true;
+    try { sub.close(); pool.close(urls); } catch { /* ignore */ }
+  };
 }
 
 // ── Clear pointer (escape hatch for a corrupt backup) ───────────────

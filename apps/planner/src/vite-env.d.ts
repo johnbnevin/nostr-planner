@@ -1,5 +1,8 @@
 /// <reference types="vite/client" />
 
+// Injected by vite.config.ts `define` at build time, sourced from package.json.
+declare const __APP_VERSION__: string;
+
 interface Window {
   nostr?: {
     getPublicKey(): Promise<string>;

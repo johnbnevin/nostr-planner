@@ -13,7 +13,10 @@
 const SW_PATH = self.location.pathname;
 const BASE_PATH = SW_PATH.substring(0, SW_PATH.lastIndexOf("/") + 1);
 
-const CACHE_NAME = "planner-v5";
+// `__APP_VERSION__` is replaced at build time by vite.config.ts's
+// swVersionInjector plugin so this always matches package.json.version.
+// In dev (no build), the literal string is harmless — SW only runs in prod.
+const CACHE_NAME = "planner-__APP_VERSION__";
 const APP_SHELL = [
   BASE_PATH,
   BASE_PATH + "index.html",

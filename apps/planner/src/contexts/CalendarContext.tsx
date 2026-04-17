@@ -138,6 +138,10 @@ interface CalendarContextValue {
   addEventOptimistic: (event: CalendarEvent) => void;
   /** Replace in-memory calendar state wholesale. Called on snapshot restore. */
   applySnapshot: (events: CalendarEvent[], calendars: CalendarCollection[]) => void;
+  /** sha256 of the Blossom snapshot this tab last loaded or saved. Consumed
+   *  by useAutoBackup to detect concurrent writes from other devices. */
+  lastRemoteSha: string | null;
+  setLastRemoteSha: (sha: string | null) => void;
   /** True when the user has no calendars and needs to create their first one. */
   needsCalendarSetup: boolean;
   /** Create the user's first calendar during onboarding. */
@@ -277,6 +281,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     new Set()
   );
   const [eventsLoading, setEventsLoading] = useState(true);
+  const [lastRemoteSha, setLastRemoteSha] = useState<string | null>(null);
   const [deletedDTags, setDeletedDTags] = useState<Set<string>>(new Set());
   const [currentDate, setCurrentDate] = useState(new Date());
   const [viewMode, setViewMode] = useState<ViewMode>("month");
@@ -1234,11 +1239,13 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     leaveSharedCalendarAndCleanup,
     addEventOptimistic,
     applySnapshot,
+    lastRemoteSha,
+    setLastRemoteSha,
     needsCalendarSetup,
     completeCalendarSetup,
     decryptionErrors,
     syncError,
-  }), [events, filteredEvents, calendars, activeCalendarIds, allTags, tagsByUsage, eventsLoading, currentDate, viewMode, toggleCalendar, createCalendar, createSharedCalendar, updateCalendarEvents, getSeriesEvents, renameCalendar, recolorCalendar, deleteCalendar, reorderCalendars, refreshEvents, forceFullRefresh, deleteEvent, moveEvent, removeMember, convertToShared, leaveSharedCalendarAndCleanup, addEventOptimistic, applySnapshot, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError]);
+  }), [events, filteredEvents, calendars, activeCalendarIds, allTags, tagsByUsage, eventsLoading, currentDate, viewMode, toggleCalendar, createCalendar, createSharedCalendar, updateCalendarEvents, getSeriesEvents, renameCalendar, recolorCalendar, deleteCalendar, reorderCalendars, refreshEvents, forceFullRefresh, deleteEvent, moveEvent, removeMember, convertToShared, leaveSharedCalendarAndCleanup, addEventOptimistic, applySnapshot, lastRemoteSha, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError]);
 
   return (
     <CalendarContext.Provider

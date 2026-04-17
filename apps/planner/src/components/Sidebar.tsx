@@ -108,7 +108,7 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
 
   // Desktop inline mode
   return (
-    <aside className="w-64 flex-shrink-0 bg-white border-r border-gray-200 p-4 overflow-y-auto hidden sm:block">
+    <aside className="w-64 flex-shrink-0 bg-white border-r border-gray-200 p-4 overflow-y-auto hidden lg:block">
       <SidebarContent
         onImportParsed={onImportParsed}
         onShareCalendar={onShareCalendar}

@@ -2,6 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- Revalidate the entry HTML on every navigation so a stale cached
+         copy can't pin users to old hashed bundle filenames after a deploy. -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <link rel="icon" type="image/svg+xml" href="/calendar.svg" />
     <link rel="manifest" href="/manifest.json" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
@@ -16,7 +21,14 @@
         // Derive SW path from document location so the app works at any
         // deployment subpath (e.g. "/", "/planner/", or an nsite URL).
         var swBase = location.pathname.replace(/[^/]*$/, "");
-        navigator.serviceWorker.register(swBase + "sw.js").catch(() => {});
+        navigator.serviceWorker.register(swBase + "sw.js")
+          .then(function (reg) {
+            // Force an update check every page load. Without this, browsers
+            // only check sw.js once per ~24h, so users can linger on a stale
+            // SW (and its stale cached bundles) long after a deploy.
+            if (reg && reg.update) { reg.update().catch(function () {}); }
+          })
+          .catch(function () {});
       }
     </script>
   </body>

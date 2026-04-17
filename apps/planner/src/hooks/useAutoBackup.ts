@@ -42,8 +42,8 @@ export function useAutoBackup(): {
   /** Force a save right now, bypassing the debounce. */
   backupNow: () => Promise<void>;
 } {
-  const { pubkey, signEvent, publishEvent, signer } = useNostr();
-  const { events, calendars, eventsLoading } = useCalendar();
+  const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
+  const { events, calendars, eventsLoading, lastRemoteSha, setLastRemoteSha } = useCalendar();
   const { habits, completions, lists, loading: tasksLoading } = useTasks();
   const { getSettings, autoBackup } = useSettings();
 
@@ -59,13 +59,13 @@ export function useAutoBackup(): {
 
   // Stable refs so the stable-identity doBackup always sees latest state.
   const stateRef = useRef({
-    pubkey, signEvent, publishEvent, signer,
-    getSettings, autoBackup,
+    pubkey, relays, signEvent, publishEvent, signer,
+    getSettings, autoBackup, lastRemoteSha, setLastRemoteSha,
     events, calendars, habits, completions, lists,
   });
   stateRef.current = {
-    pubkey, signEvent, publishEvent, signer,
-    getSettings, autoBackup,
+    pubkey, relays, signEvent, publishEvent, signer,
+    getSettings, autoBackup, lastRemoteSha, setLastRemoteSha,
     events, calendars, habits, completions, lists,
   };
 
@@ -117,7 +117,11 @@ export function useAutoBackup(): {
         lists: s.lists,
         settings: s.getSettings(),
       });
-      await saveSnapshot(s.pubkey, snapshot, s.signEvent, s.publishEvent, s.signer.nip44);
+      const ptr = await saveSnapshot(
+        s.pubkey, snapshot, s.signEvent, s.publishEvent, s.signer.nip44,
+        s.relays, s.lastRemoteSha ?? undefined
+      );
+      s.setLastRemoteSha(ptr.sha256);
       lsSet(LAST_BACKUP_KEY, new Date().toISOString());
       setLastError(null);
       setPhase("idle");

@@ -201,6 +201,10 @@ export interface CalendarCollection {
   color?: string;
   /** Set when this is a shared calendar owned by another user. */
   ownerPubkey?: string;
+  /** Unix ms of last local mutation; used by multi-device merge to pick a winner. */
+  updatedAt?: number;
+  /** Tombstone marker kept in the snapshot so a stale peer can't resurrect a deleted calendar. */
+  deleted?: boolean;
 }
 
 /**
@@ -228,6 +232,10 @@ export interface CalendarEvent {
   notify?: boolean; // per-event notification opt-in/out
   tags: string[][];
   createdAt: number;
+  /** Unix ms of last local mutation; used by multi-device merge to pick a winner. */
+  updatedAt?: number;
+  /** Tombstone marker — present for deleted events so stale peers can't resurrect them. */
+  deleted?: boolean;
 }
 
 /**

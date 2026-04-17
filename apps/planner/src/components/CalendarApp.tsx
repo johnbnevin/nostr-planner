@@ -4,7 +4,8 @@ import { useCalendar } from "../contexts/CalendarContext";
 import { useSharing } from "../contexts/SharingContext";
 import { useSettings } from "../contexts/SettingsContext";
 import { useTasks } from "../contexts/TasksContext";
-import { loadSnapshot } from "../lib/backup";
+import { loadSnapshot, watchPointer, buildSnapshot, type Snapshot } from "../lib/backup";
+import { mergeSnapshots } from "../lib/merge";
 import { Header } from "./Header";
 import type { MobileTab } from "./Header";
 import { Sidebar } from "./Sidebar";
@@ -46,11 +47,11 @@ import type { ParsedIcalEvent } from "../lib/ical";
  */
 export function CalendarApp() {
   const { pubkey, profile, logout, signer, relays } = useNostr();
-  const { viewMode, setViewMode, eventsLoading, calendars, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot } = useCalendar();
+  const { viewMode, setViewMode, eventsLoading, calendars, events, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot, setLastRemoteSha } = useCalendar();
   const { acceptInviteLink } = useSharing();
-  const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, restoreSettings } = useSettings();
+  const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, getSettings, restoreSettings } = useSettings();
   const { alerts, dismiss } = useNotifications();
-  const { applySnapshot: applyTasksSnapshot } = useTasks();
+  const { habits, completions, lists, applySnapshot: applyTasksSnapshot } = useTasks();
   const { phase: backupPhase, countdown: saveCountdown, lastError: backupError, backupNow } = useAutoBackup();
   useDigest();
 
@@ -59,6 +60,7 @@ export function CalendarApp() {
   // and settings state in one pass so you don't see a flash of empty
   // events while tasks populate separately.
   const restoredRef = useRef(false);
+  const [syncedFromOther, setSyncedFromOther] = useState(false);
   useEffect(() => {
     if (!pubkey) { restoredRef.current = false; return; }
     if (restoredRef.current) return;
@@ -71,11 +73,42 @@ export function CalendarApp() {
         applyCalendarSnapshot(snap.events, snap.calendars);
         applyTasksSnapshot(snap.habits, snap.completions, snap.lists);
         restoreSettings(snap.settings);
+        setLastRemoteSha(snap._sha256);
       } catch (err) {
         console.warn("snapshot restore failed:", err);
       }
     })();
-  }, [pubkey, signer, relays, applyCalendarSnapshot, applyTasksSnapshot, restoreSettings]);
+  }, [pubkey, signer, relays, applyCalendarSnapshot, applyTasksSnapshot, restoreSettings, setLastRemoteSha]);
+
+  // ── Multi-device sync: watch for snapshot pointer updates from other
+  //    devices signed into the same npub. On new pointer, fetch + merge +
+  //    apply, silently (with a small toast). ────────────────────────────
+  //
+  // The watchPointer callback must read CURRENT state each time it fires,
+  // not snapshots taken when the subscription opened — so we thread state
+  // through a ref that's updated every render.
+  const mergeStateRef = useRef({ calendars, events, habits, completions, lists, getSettings });
+  mergeStateRef.current = { calendars, events, habits, completions, lists, getSettings };
+  useEffect(() => {
+    if (!pubkey || !signer?.nip44) return;
+    const close = watchPointer(pubkey, relays, signer.nip44, null, (remote) => {
+      const s = mergeStateRef.current;
+      const local = buildSnapshot({
+        calendars: s.calendars, events: s.events,
+        habits: s.habits, completions: s.completions, lists: s.lists,
+        settings: s.getSettings(),
+      });
+      const merged = mergeSnapshots(local, remote);
+      applyCalendarSnapshot(merged.events, merged.calendars);
+      applyTasksSnapshot(merged.habits, merged.completions, merged.lists);
+      restoreSettings(merged.settings);
+      const remoteSha = (remote as Snapshot & { _sha256?: string })._sha256;
+      if (remoteSha) setLastRemoteSha(remoteSha);
+      setSyncedFromOther(true);
+      setTimeout(() => setSyncedFromOther(false), 2500);
+    });
+    return close;
+  }, [pubkey, signer, relays, applyCalendarSnapshot, applyTasksSnapshot, restoreSettings, setLastRemoteSha]);
   // Guards to prevent re-running one-shot effects across re-renders
   const autoRestoreAttempted = useRef(false);
   // Refs to the scrollable calendar containers so we can reset them to the
@@ -380,6 +413,12 @@ export function CalendarApp() {
         </div>
       )}
 
+      {syncedFromOther && (
+        <div className="bg-emerald-50 border-b border-emerald-200 px-4 py-1.5 text-xs text-emerald-800 text-center">
+          Synced from another device
+        </div>
+      )}
+
       {decryptionErrors > 0 && (
         <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 text-center">
           {decryptionErrors} event{decryptionErrors > 1 ? "s" : ""} could not be decrypted. If using a remote signer, approve any pending NIP-44 requests and retry.
@@ -387,7 +426,7 @@ export function CalendarApp() {
       )}
 
       {/* ===== MOBILE LAYOUT (< sm): single focused tab ===== */}
-      <div className="sm:hidden flex-1 overflow-y-auto" ref={mobileScrollRef}>
+      <div className="lg:hidden flex-1 overflow-y-auto" ref={mobileScrollRef}>
         {eventsLoading && (
           <div className="flex items-center justify-center gap-2 py-1.5 bg-primary-50 text-primary-700 text-xs">
             <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-primary-600" />
@@ -431,7 +470,7 @@ export function CalendarApp() {
       </div>
 
       {/* ===== DESKTOP LAYOUT (sm+): multi-panel ===== */}
-      <div className="hidden sm:flex flex-1 overflow-hidden">
+      <div className="hidden lg:flex flex-1 overflow-hidden">
         <Sidebar
           onImportParsed={(evts, name) => setImportData({ events: evts, fileName: name })}
           onShareCalendar={(dTag) => setSharingCalDTag(dTag)}
