@@ -1201,7 +1201,15 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
 
       if (!signer?.nip44) return;
       try {
-        const materialized = await loadMaterializedFromBlossom(pubkey, relays, signer.nip44);
+        // Hard timeout — legacy v1/v2 blobs require many sequential NIP-44
+        // round-trips to decrypt (one per chunk), which on Amber/bunker
+        // signers can queue behind user-approval dialogs and stall for
+        // minutes. We'd rather fall through to the relay refresh than
+        // block every other load path waiting on it.
+        const materialized = await Promise.race([
+          loadMaterializedFromBlossom(pubkey, relays, signer.nip44),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 20_000)),
+        ]);
         if (materialized && materialized.events.length > 0) {
           applySnapshot(materialized.events, materialized.calendars, "Blossom");
         }
