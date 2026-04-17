@@ -24,8 +24,14 @@ const log = logger("nip46");
 // timeout is aggressive, and if every listed relay fails to connect within
 // that budget the whole handshake subscription collapses with "subscription
 // closed before connection was established".
+// NIP-46-friendly relays. relay.nsec.app is the de-facto default for most
+// bunker apps (Amber, nsec.app, nsecbunker). The others are widely reachable
+// public relays that don't require NIP-42 AUTH for kind-24133 traffic, so a
+// bunker scanning our nostrconnect:// URI can publish ack/response events
+// to at least one of them even if its preferred relay is down.
 const NIP46_RELAYS = [
   "wss://relay.nsec.app",
+  "wss://relay.nsecbunker.com",
   "wss://relay.damus.io",
   "wss://nos.lol",
   "wss://relay.primal.net",

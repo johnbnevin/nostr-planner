@@ -14,6 +14,7 @@ import {
   List,
   CloudUpload,
   CloudOff,
+  CloudAlert,
   Loader,
   Layers,
 } from "lucide-react";
@@ -35,9 +36,9 @@ export type MobileTab = "month" | "week" | "day" | "daily" | "todos";
 interface HeaderProps {
   pubkey: string;
   profile: NostrProfile | null;
-  backingUp: boolean;
-  unsavedChanges: boolean;
+  backupPhase: "idle" | "dirty" | "saving" | "error";
   saveCountdown: number | null;
+  backupError: string | null;
   onBackupNow: () => Promise<void>;
   onLogout: () => void;
   onNewEvent: () => void;
@@ -72,9 +73,9 @@ interface HeaderProps {
 export function Header({
   pubkey,
   profile,
-  backingUp,
-  unsavedChanges,
+  backupPhase,
   saveCountdown,
+  backupError,
   onBackupNow,
   onLogout,
   onNewEvent,
@@ -274,29 +275,37 @@ export function Header({
                 setAutoBackup(next);
                 if (next) onBackupNow();
               }}
-              className={`relative p-1.5 rounded-lg transition-colors min-w-[1.75rem] ${
-                autoBackup
-                  ? unsavedChanges
-                    ? "bg-red-50 hover:bg-red-100"
-                    : "bg-emerald-50 hover:bg-emerald-100"
-                  : "hover:bg-gray-100"
+              className={`relative p-1.5 rounded-lg transition-colors ${
+                !autoBackup ? "hover:bg-gray-100"
+                : backupPhase === "idle" ? "bg-emerald-50 hover:bg-emerald-100"
+                : "bg-red-50 hover:bg-red-100"
               }`}
               title={
-                backingUp ? "Saving backup…"
-                : unsavedChanges && saveCountdown !== null ? `Autosaving in ${saveCountdown}s`
-                : unsavedChanges ? "Unsaved changes"
-                : autoBackup ? "Auto-backup on"
-                : "Auto-backup off"
+                !autoBackup ? "Auto-backup off"
+                : backupPhase === "saving" ? "Saving backup…"
+                : backupPhase === "error"
+                  ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
+                : backupPhase === "dirty" && saveCountdown !== null ? `Unsaved — autosave in ${saveCountdown}s`
+                : "Auto-backup on"
               }
             >
-              {backingUp ? (
-                <Loader className={`w-4 h-4 animate-spin ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
-              ) : autoBackup && unsavedChanges && saveCountdown !== null ? (
-                <span className="text-[11px] font-semibold text-red-600 tabular-nums leading-4">{saveCountdown}s</span>
-              ) : autoBackup ? (
-                <CloudUpload className={`w-4 h-4 ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
-              ) : (
+              {!autoBackup ? (
                 <CloudOff className="w-4 h-4 text-gray-400" />
+              ) : backupPhase === "saving" ? (
+                <Loader className="w-4 h-4 animate-spin text-red-600" />
+              ) : backupPhase === "error" ? (
+                <CloudAlert className="w-4 h-4 text-red-600" />
+              ) : backupPhase === "dirty" ? (
+                <CloudUpload className="w-4 h-4 text-red-600" />
+              ) : (
+                <CloudUpload className="w-4 h-4 text-emerald-600" />
+              )}
+
+              {/* Countdown badge in the corner for dirty/error phases. */}
+              {autoBackup && saveCountdown !== null && (backupPhase === "dirty" || backupPhase === "error") && (
+                <span className="absolute -top-0.5 -right-0.5 min-w-[1rem] h-4 px-0.5 rounded-full bg-red-600 text-white text-[9px] font-semibold leading-4 text-center tabular-nums">
+                  {saveCountdown}
+                </span>
               )}
             </button>
 
@@ -370,29 +379,37 @@ export function Header({
                 setAutoBackup(next);
                 if (next) onBackupNow();
               }}
-              className={`relative p-1.5 rounded-lg transition-colors min-w-[1.75rem] ${
-                autoBackup
-                  ? unsavedChanges
-                    ? "bg-red-50 hover:bg-red-100"
-                    : "bg-emerald-50 hover:bg-emerald-100"
-                  : "hover:bg-gray-100"
+              className={`relative p-1.5 rounded-lg transition-colors ${
+                !autoBackup ? "hover:bg-gray-100"
+                : backupPhase === "idle" ? "bg-emerald-50 hover:bg-emerald-100"
+                : "bg-red-50 hover:bg-red-100"
               }`}
               title={
-                backingUp ? "Saving backup…"
-                : unsavedChanges && saveCountdown !== null ? `Autosaving in ${saveCountdown}s`
-                : unsavedChanges ? "Unsaved changes"
-                : autoBackup ? "Auto-backup on"
-                : "Auto-backup off"
+                !autoBackup ? "Auto-backup off"
+                : backupPhase === "saving" ? "Saving backup…"
+                : backupPhase === "error"
+                  ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
+                : backupPhase === "dirty" && saveCountdown !== null ? `Unsaved — autosave in ${saveCountdown}s`
+                : "Auto-backup on"
               }
             >
-              {backingUp ? (
-                <Loader className={`w-4 h-4 animate-spin ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
-              ) : autoBackup && unsavedChanges && saveCountdown !== null ? (
-                <span className="text-[11px] font-semibold text-red-600 tabular-nums leading-4">{saveCountdown}s</span>
-              ) : autoBackup ? (
-                <CloudUpload className={`w-4 h-4 ${unsavedChanges ? "text-red-600" : "text-emerald-600"}`} />
-              ) : (
+              {!autoBackup ? (
                 <CloudOff className="w-4 h-4 text-gray-400" />
+              ) : backupPhase === "saving" ? (
+                <Loader className="w-4 h-4 animate-spin text-red-600" />
+              ) : backupPhase === "error" ? (
+                <CloudAlert className="w-4 h-4 text-red-600" />
+              ) : backupPhase === "dirty" ? (
+                <CloudUpload className="w-4 h-4 text-red-600" />
+              ) : (
+                <CloudUpload className="w-4 h-4 text-emerald-600" />
+              )}
+
+              {/* Countdown badge in the corner for dirty/error phases. */}
+              {autoBackup && saveCountdown !== null && (backupPhase === "dirty" || backupPhase === "error") && (
+                <span className="absolute -top-0.5 -right-0.5 min-w-[1rem] h-4 px-0.5 rounded-full bg-red-600 text-white text-[9px] font-semibold leading-4 text-center tabular-nums">
+                  {saveCountdown}
+                </span>
               )}
             </button>
             <button

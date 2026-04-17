@@ -1,15 +1,22 @@
 /**
  * useAutoBackup — automatic Blossom backup triggered by data changes.
  *
- * Trigger conditions:
- *   1. Auto-backup must be enabled in user settings (`autoBackup` flag).
- *   2. Initial data load must be complete (events, calendars, tasks all loaded).
- *   3. A data fingerprint (derived from events, calendars, habits, completions,
- *      lists, and settings) must differ from the last-seen fingerprint.
+ * Lifecycle:
+ *   idle (green cloud)
+ *     ↓ user edits data
+ *   dirty + countdown (red cloud with "15s → 0s" badge)
+ *     ↓ countdown reaches 0
+ *   saving (red spinner)
+ *     ├─ success → idle
+ *     └─ failure → error (red exclamation + retry countdown)
+ *          ↓ retry countdown reaches 0
+ *        saving
+ *          └─ …
  *
- * When triggered, the hook debounces for 5 seconds of inactivity before
- * performing a full Blossom backup via `performFullBackup`. If a change is
- * still pending when the page unloads, a best-effort backup is fired.
+ * The debounce timer lives in a ref and is deliberately NOT cleared by the
+ * change-detection effect's cleanup — React re-running that effect on every
+ * unrelated re-render was previously wiping the timer before it could fire,
+ * which is why "cloud stays red but never saves" was happening.
  */
 
 import { useEffect, useRef, useCallback, useState } from "react";
@@ -23,47 +30,55 @@ import { lsSet } from "../lib/storage";
 
 const log = logger("auto-backup");
 
-const DEBOUNCE_MS = 15_000; // 15s of no changes triggers autosave
+/** 15s of no further changes before autosave fires. */
+const DEBOUNCE_MS = 15_000;
+/** After a failure, wait this long before auto-retrying. */
+const RETRY_AFTER_FAILURE_MS = 30_000;
 const LAST_BACKUP_KEY = "nostr-planner-last-autobackup";
+
+export type BackupPhase = "idle" | "dirty" | "saving" | "error";
+
 export function useAutoBackup(): {
-  backingUp: boolean;
-  dirty: boolean;
-  /** Seconds until the next autosave fires, or `null` if no save is pending. */
+  phase: BackupPhase;
+  /** Seconds until the next autosave (either debounced or retry). Null when idle/saving. */
   countdown: number | null;
+  /** Most recent failure message, for the error tooltip. */
+  lastError: string | null;
+  /** Trigger a save right now; bypasses the debounce but respects the single-flight guard. */
   backupNow: () => Promise<void>;
 } {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
   const { events, calendars, eventsLoading } = useCalendar();
   const { habits, completions, lists, loading: tasksLoading } = useTasks();
   const { getSettings, autoBackup } = useSettings();
-  const settings = getSettings();
 
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** Guard against concurrent backup runs */
-  const backingUpRef = useRef(false);
-  const [backingUp, setBackingUp] = useState(false);
-  /** Serialized snapshot of all user data; compared to detect changes */
-  const fingerprint = useRef("");
-  /** Prevents a backup on the very first render (data load is not a "change") */
-  const initialLoadDone = useRef(false);
-  /** True when a change has been detected but backup hasn't run yet.
-   *  Exposed to the UI as `dirty` so the cloud icon can turn red between
-   *  the moment of change and the debounced backup completing. */
-  const dirtyRef = useRef(false);
-  const [dirty, setDirty] = useState(false);
-  /** Unix ms when the currently-pending save will fire. Null when idle.
-   *  Exposed as a seconds countdown for the UI. */
+  // ── State that drives the cloud icon ─────────────────────────────────
+  const [phase, setPhase] = useState<BackupPhase>("idle");
+  const [lastError, setLastError] = useState<string | null>(null);
+  /** Unix ms when the pending save will fire. Null when not scheduled. */
   const [saveDueAt, setSaveDueAt] = useState<number | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
 
-  // Stable ref to latest backup args so beforeunload can use them
+  // ── Timers & single-flight tracking ──────────────────────────────────
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const backingUpRef = useRef(false);
+  const fingerprint = useRef("");
+  const initialLoadDone = useRef(false);
+
+  // ── Stable refs to the latest backup args (so doBackup's closure
+  //    always sees fresh pubkey/signer/state even though doBackup itself
+  //    is memoized with empty deps to keep its identity stable). ────────
   const argsRef = useRef({ pubkey, relays, signEvent, publishEvent, getSettings, autoBackup, signer });
   argsRef.current = { pubkey, relays, signEvent, publishEvent, getSettings, autoBackup, signer };
 
-  // Build a cheap fingerprint of all data to detect any change.
-  // Uses counts + lengths + key fields instead of serializing entire datasets,
-  // which avoids building huge strings on every render for users with many events.
-  const currentFingerprint = useCallback(() => {
+  const materializedRef = useRef<{ events: typeof events; calendars: typeof calendars }>({ events, calendars });
+  materializedRef.current = { events, calendars };
+
+  // ── Fingerprint: cheap hash of all user data so we can detect real
+  //    changes vs. incidental re-renders. Kept deliberately non-memoed
+  //    (plain function) to avoid identity-churn invalidating the change
+  //    detection effect — the effect calls it inside its body. ──────────
+  const computeFingerprint = (): string => {
     let hash = events.length;
     for (const e of events) {
       hash = (hash * 31 + e.start.getTime()) | 0;
@@ -85,81 +100,89 @@ export function useAutoBackup(): {
       listHash = (listHash * 31 + l.items.length) | 0;
       for (const i of l.items) listHash = (listHash * 31 + (i.done ? 1 : 0)) | 0;
     }
-    const settingsPart = JSON.stringify(settings);
+    const settingsPart = JSON.stringify(argsRef.current.getSettings());
     return `${hash}|${calHash}|${habitHash}|${completionKeys}:${completionCount}|${listHash}|${settingsPart}`;
-  }, [events, calendars, habits, completions, lists, settings]);
+  };
 
-  // Keep a ref to the latest decrypted calendar state so doBackup always
-  // snapshots what the user is looking at right now — the materialized
-  // payload is what makes cold-start Blossom loads instant.
-  const materializedRef = useRef<{ events: typeof events; calendars: typeof calendars }>({ events, calendars });
-  materializedRef.current = { events, calendars };
+  const scheduleSave = (delayMs: number) => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    const due = Date.now() + delayMs;
+    setSaveDueAt(due);
+    timerRef.current = setTimeout(() => { void doBackup(); }, delayMs);
+  };
 
   const doBackup = useCallback(async () => {
     const { pubkey: pk, relays: r, signEvent: se, publishEvent: pe, getSettings: gs, signer: s } = argsRef.current;
     if (backingUpRef.current || !pk) return;
     backingUpRef.current = true;
-    setBackingUp(true);
+    setPhase("saving");
+    setSaveDueAt(null);
     try {
       await performFullBackup(pk, r, gs(), se, pe, s?.nip44, materializedRef.current);
-      // Only clear the dirty flag and record the timestamp on success.
-      // On failure, dirtyRef stays true so a retry fires if data changes again.
-      dirtyRef.current = false;
-      setDirty(false);
-      setSaveDueAt(null);
-      setCountdown(null);
       lsSet(LAST_BACKUP_KEY, new Date().toISOString());
+      setLastError(null);
+      setPhase("idle");
     } catch (err) {
-      log.error("backup failed", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error("backup failed:", msg);
+      setLastError(msg);
+      setPhase("error");
+      scheduleSave(RETRY_AFTER_FAILURE_MS);
     } finally {
       backingUpRef.current = false;
-      setBackingUp(false);
     }
   }, []);
 
+  // ── Change detection ─────────────────────────────────────────────────
+  // Runs on every render; cheap enough because computeFingerprint is O(n).
+  // Critically: DOES NOT return a cleanup that clears the timer — that was
+  // the bug that stalled autosaves forever across unrelated re-renders.
   useEffect(() => {
     if (!pubkey || !autoBackup || eventsLoading || tasksLoading) return;
 
-    // Skip the very first load — don't backup just because we loaded data
     if (!initialLoadDone.current) {
       initialLoadDone.current = true;
-      fingerprint.current = currentFingerprint();
+      fingerprint.current = computeFingerprint();
       return;
     }
 
-    const newFp = currentFingerprint();
+    const newFp = computeFingerprint();
     if (newFp === fingerprint.current) return;
     fingerprint.current = newFp;
-    dirtyRef.current = true;
-    setDirty(true);
 
-    // Debounce: 15 seconds of no further changes → autosave.
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(doBackup, DEBOUNCE_MS);
-    setSaveDueAt(Date.now() + DEBOUNCE_MS);
+    // Real change → enter dirty state and arm the debounce timer.
+    setLastError(null);
+    setPhase((prev) => (prev === "saving" ? prev : "dirty"));
+    scheduleSave(DEBOUNCE_MS);
+  });
 
+  // ── autoBackup toggled off: cancel any pending save. ─────────────────
+  useEffect(() => {
+    if (autoBackup) return;
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    setSaveDueAt(null);
+    setPhase("idle");
+    setLastError(null);
+  }, [autoBackup]);
+
+  // ── Logout cleanup. ──────────────────────────────────────────────────
+  useEffect(() => {
     return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
+      if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
     };
-  // currentFingerprint already closes over events/calendars/habits/completions/lists/settings,
-  // so adding them again here would be redundant and cause excessive re-runs.
-  }, [pubkey, autoBackup, eventsLoading, tasksLoading, currentFingerprint, doBackup]);
+  }, []);
 
-  // Flush pending backup on page unload.
-  // NOTE: This is best-effort only. `beforeunload` is synchronous — the browser
-  // will not wait for the async `doBackup()` promise to resolve. The periodic
-  // debounced backup (5s after last change) is the real safety net; this handler
-  // just catches the narrow window between a change and the debounce firing.
+  // ── Flush on unload (best-effort — browser won't wait for async). ────
   useEffect(() => {
     const handleUnload = () => {
-      if (!dirtyRef.current || !argsRef.current.pubkey || !argsRef.current.autoBackup) return;
-      doBackup();
+      if (phase !== "dirty" || !argsRef.current.pubkey || !argsRef.current.autoBackup) return;
+      void doBackup();
     };
     window.addEventListener("beforeunload", handleUnload);
     return () => window.removeEventListener("beforeunload", handleUnload);
-  }, [doBackup]);
+  }, [phase, doBackup]);
 
-  // Tick the visible countdown once per second while a save is scheduled.
+  // ── Countdown ticker. Runs while a save is scheduled. ────────────────
   useEffect(() => {
     if (saveDueAt === null) { setCountdown(null); return; }
     const tick = () => {
@@ -171,7 +194,7 @@ export function useAutoBackup(): {
     return () => clearInterval(id);
   }, [saveDueAt]);
 
-  return { backingUp, dirty, countdown, backupNow: doBackup };
+  return { phase, countdown, lastError, backupNow: doBackup };
 }
 
 export function getLastAutoBackupTime(): string | null {

@@ -48,10 +48,24 @@ export function CalendarApp() {
   const { acceptInviteLink } = useSharing();
   const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode } = useSettings();
   const { alerts, dismiss } = useNotifications();
-  const { backingUp, dirty: unsavedChanges, countdown: saveCountdown, backupNow } = useAutoBackup();
+  const { phase: backupPhase, countdown: saveCountdown, lastError: backupError, backupNow } = useAutoBackup();
   useDigest();
   // Guards to prevent re-running one-shot effects across re-renders
   const autoRestoreAttempted = useRef(false);
+  // Refs to the scrollable calendar containers so we can reset them to the
+  // top on login — otherwise the app restores whatever scroll position
+  // WeekView/DayView computed on mount, hiding the "Loading events…" banner.
+  const mobileScrollRef = useRef<HTMLDivElement | null>(null);
+  const desktopScrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!pubkey) return;
+    // Next frame — let views mount first, then override their scroll.
+    requestAnimationFrame(() => {
+      mobileScrollRef.current?.scrollTo(0, 0);
+      desktopScrollRef.current?.scrollTo(0, 0);
+    });
+  }, [pubkey]);
   const [autoRestoreComplete, setAutoRestoreComplete] = useState(false);
   const viewModeInitialized = useRef(false);
 
@@ -244,9 +258,9 @@ export function CalendarApp() {
       <Header
         pubkey={pubkey!}
         profile={profile}
-        backingUp={backingUp}
-        unsavedChanges={unsavedChanges}
+        backupPhase={backupPhase}
         saveCountdown={saveCountdown}
+        backupError={backupError}
         onBackupNow={backupNow}
         onLogout={logout}
         onNewEvent={() => handleNewEvent()}
@@ -342,7 +356,7 @@ export function CalendarApp() {
       )}
 
       {/* ===== MOBILE LAYOUT (< sm): single focused tab ===== */}
-      <div className="sm:hidden flex-1 overflow-y-auto">
+      <div className="sm:hidden flex-1 overflow-y-auto" ref={mobileScrollRef}>
         {eventsLoading && (
           <div className="flex items-center justify-center gap-2 py-1.5 bg-primary-50 text-primary-700 text-xs">
             <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-primary-600" />
@@ -402,7 +416,7 @@ export function CalendarApp() {
           )}
 
           {/* Calendar — center, always visible */}
-          <main className="flex-1 p-4 overflow-y-auto min-w-0">
+          <main className="flex-1 p-4 overflow-y-auto min-w-0" ref={desktopScrollRef}>
             {eventsLoading && (
               <div className="flex items-center justify-center gap-2 py-1.5 mb-2 bg-primary-50 text-primary-700 text-sm rounded-lg">
                 <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-primary-600" />
