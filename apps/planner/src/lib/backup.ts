@@ -460,11 +460,16 @@ export function watchPointer(
   pubkey: string,
   relays: string[],
   nip44: Nip44,
-  initialSha: string | null,
+  /** Ref holding the sha256 of the snapshot this tab most recently
+   *  loaded or saved. Read once at subscription open to seed lastSha so
+   *  the initial pointer (which we already have locally) doesn't trigger
+   *  a spurious re-fetch. Passed as a ref — not a value — so callers
+   *  don't have to re-open the subscription on every save. */
+  initialShaRef: { current: string | null },
   onNewer: (snapshot: Snapshot) => void
 ): () => void {
   let closed = false;
-  let lastSha = initialSha;
+  let lastSha = initialShaRef.current;
   let pool: SimplePool | null = null;
   let sub: { close: () => void } | null = null;
   const urls = relays.length > 0 ? relays.slice(0, 5) : ["wss://relay.damus.io", "wss://nos.lol"];
@@ -547,6 +552,10 @@ export function watchPointer(
   };
 
   openSubscription();
+  // Kick off an immediate poll so we don't wait up to POLL_MS for the
+  // first pointer on a fresh load — relays sometimes don't backfill
+  // replaceable events reliably to subscriptions using a `since` filter.
+  void pollOnce();
   const pollTimer = setInterval(() => { void pollOnce(); }, POINTER_POLL_MS);
   document.addEventListener("visibilitychange", onVisibilityChange);
   window.addEventListener("focus", onVisibilityChange);

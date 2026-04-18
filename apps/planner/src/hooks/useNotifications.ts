@@ -17,6 +17,7 @@ import { useCalendar } from "../contexts/CalendarContext";
 import { useSettings } from "../contexts/SettingsContext";
 import type { CalendarEvent } from "../lib/nostr";
 import { sendNotification } from "../lib/notify";
+import { isTauri } from "../lib/platform";
 import { lsSet, lsGet } from "../lib/storage";
 const CHECK_INTERVAL_MS = 30_000; // check every 30s
 const STORAGE_KEY = "nostr-planner-notified";
@@ -107,7 +108,10 @@ export function useNotifications(): {
 
           const message = `${event.title} — ${timeStr}`;
 
-          if (n.method === "push") {
+          // On Tauri the OS-scheduled notification (see
+          // useTauriScheduledNotifications) already fires at this time, so
+          // skip the foreground-polled send to avoid a duplicate banner.
+          if (n.method === "push" && !isTauri()) {
             sendNotification({
               title: event.title,
               body: `Event ${timeStr}`,

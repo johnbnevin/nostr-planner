@@ -223,6 +223,10 @@ export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onC
 
   const handleSave = async () => {
     if (!title.trim() || !canPublish(selectedCalendars)) return;
+    if (recurring && recurrenceCount < 1) {
+      setErrorMsg("Recurring count must be at least 1.");
+      return;
+    }
     // Sanitize link: reject non-http(s) schemes to prevent XSS via javascript: URIs
     const safeLink = link && /^https?:\/\//i.test(link) ? link : "";
 
@@ -880,11 +884,9 @@ export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onC
                 <label className="text-xs text-gray-500">for</label>
                 <input
                   type="number"
-                  min={2}
-                  max={52}
                   value={recurrenceCount}
                   onChange={(e) =>
-                    setRecurrenceCount(Math.min(Math.max(parseInt(e.target.value) || 2, 2), 52))
+                    setRecurrenceCount(parseInt(e.target.value) || 0)
                   }
                   className="w-16 px-2 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
                 />

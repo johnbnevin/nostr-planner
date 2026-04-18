@@ -25,6 +25,7 @@ import { useApplyInitialViewHash, parseViewHash } from "../hooks/useViewShare";
 import { useNotifications } from "../hooks/useNotifications";
 import { useAutoBackup } from "../hooks/useAutoBackup";
 import { useDigest } from "../hooks/useDigest";
+import { useTauriScheduledNotifications } from "../hooks/useTauriScheduledNotifications";
 import { decodeInvitePayload } from "../lib/sharing";
 import { onPublishFailure } from "../lib/relay";
 import type { CalendarEvent, RecurrenceFreq } from "../lib/nostr";
@@ -49,7 +50,7 @@ import type { ParsedIcalEvent } from "../lib/ical";
  */
 export function CalendarApp() {
   const { pubkey, profile, logout, signer, relays } = useNostr();
-  const { viewMode, setViewMode, eventsLoading, calendars, events, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot, setLastRemoteSha, undoDepth, redoDepth, undo, redo } = useCalendar();
+  const { viewMode, setViewMode, eventsLoading, calendars, events, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot, lastRemoteSha, setLastRemoteSha, undoDepth, redoDepth, undo, redo } = useCalendar();
   const { acceptInviteLink } = useSharing();
   const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, getSettings, restoreSettings } = useSettings();
   const { alerts, dismiss } = useNotifications();
@@ -57,6 +58,7 @@ export function CalendarApp() {
   const { phase: backupPhase, countdown: saveCountdown, lastError: backupError, backupNow } = useAutoBackup();
   const [syncingNow, setSyncingNow] = useState(false);
   useDigest();
+  useTauriScheduledNotifications();
   // Apply URL-hash view state once calendars have loaded. Enables the
   // "Add to Home Screen" widget-URL flow — open a pre-filtered view via
   // a bookmarked link.
@@ -103,6 +105,11 @@ export function CalendarApp() {
   // callback identity stable so it doesn't thrash watchPointer.
   const openEventRef = useRef<{ dTag: string; createdAt: number } | null>(null);
 
+  // Mirror lastRemoteSha into a ref so watchPointer can seed its
+  // initial sha without us re-subscribing on every save.
+  const lastRemoteShaRef = useRef(lastRemoteSha);
+  useEffect(() => { lastRemoteShaRef.current = lastRemoteSha; }, [lastRemoteSha]);
+
   // Apply a remote snapshot into local state via merge. Shared by the
   // live watchPointer subscription and the manual "Sync now" button.
   const applyRemoteSnapshot = useCallback((remote: Snapshot & { _sha256?: string }) => {
@@ -134,7 +141,7 @@ export function CalendarApp() {
 
   useEffect(() => {
     if (!pubkey || !signer?.nip44) return;
-    const close = watchPointer(pubkey, relays, signer.nip44, null, applyRemoteSnapshot);
+    const close = watchPointer(pubkey, relays, signer.nip44, lastRemoteShaRef, applyRemoteSnapshot);
     return close;
   }, [pubkey, signer, relays, applyRemoteSnapshot]);
 
@@ -160,6 +167,31 @@ export function CalendarApp() {
       setSyncingNow(false);
     }
   }, [syncingNow, backupPhase, backupNow, pubkey, signer, relays, applyRemoteSnapshot]);
+
+  // Auto-sync on return: when the tab becomes visible or the window
+  // regains focus, flush any pending local changes and pull the latest
+  // remote snapshot. This is what the user expects after switching
+  // between devices — pick up the other device's edits automatically.
+  // Debounced so rapid OS-level focus flicker doesn't spam.
+  const syncNowRef = useRef(syncNow);
+  syncNowRef.current = syncNow;
+  useEffect(() => {
+    if (!pubkey) return;
+    let lastAt = 0;
+    const trigger = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastAt < 5_000) return;
+      lastAt = now;
+      void syncNowRef.current();
+    };
+    document.addEventListener("visibilitychange", trigger);
+    window.addEventListener("focus", trigger);
+    return () => {
+      document.removeEventListener("visibilitychange", trigger);
+      window.removeEventListener("focus", trigger);
+    };
+  }, [pubkey]);
   // Guards to prevent re-running one-shot effects across re-renders
   const autoRestoreAttempted = useRef(false);
   // Refs to the scrollable calendar containers so we can reset them to the
@@ -476,9 +508,7 @@ export function CalendarApp() {
         onLogout={logout}
         onNewEvent={() => handleNewEvent()}
         canAddEvent={!eventsLoading && calendars.length > 0}
-        onBackup={() => setShowBackup(true)}
         onSettings={() => setShowSettings(true)}
-        onShareView={() => setShowShareView(true)}
         showDaily={showDaily}
         showLists={showLists}
         onToggleDaily={() => setShowDaily(!showDaily)}
@@ -785,13 +815,17 @@ export function CalendarApp() {
 
       {showShareView && <ShareViewModal onClose={() => setShowShareView(false)} />}
       {showBackup && <BackupPanel onClose={() => setShowBackup(false)} />}
-      {showSettings && <SettingsPanel onClose={() => {
-        setShowSettings(false);
-        if (returnToEventModal) {
-          setReturnToEventModal(false);
-          setShowEventModal(true);
-        }
-      }} />}
+      {showSettings && <SettingsPanel
+        onBackup={() => setShowBackup(true)}
+        onShareView={() => setShowShareView(true)}
+        onClose={() => {
+          setShowSettings(false);
+          if (returnToEventModal) {
+            setReturnToEventModal(false);
+            setShowEventModal(true);
+          }
+        }}
+      />}
       {sharingCalDTag && (
         <SharingModal calDTag={sharingCalDTag} onClose={() => setSharingCalDTag(null)} />
       )}

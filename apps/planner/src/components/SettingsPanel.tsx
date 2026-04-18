@@ -1,13 +1,15 @@
-import { X, Shield, ShieldOff, AlertTriangle, Bell } from "lucide-react";
+import { X, Shield, ShieldOff, AlertTriangle, Bell, Archive, Share2 } from "lucide-react";
 import { useSettings, type NotifyMethod } from "../contexts/SettingsContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { isTauri } from "../lib/platform";
 
 interface SettingsPanelProps {
   onClose: () => void;
+  onBackup: () => void;
+  onShareView: () => void;
 }
 
-export function SettingsPanel({ onClose }: SettingsPanelProps) {
+export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelProps) {
   const {
     nip44Available,
     publicCalendars,
@@ -31,6 +33,30 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         </div>
 
         <div className="p-4 space-y-5">
+          {/* Quick actions */}
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => {
+                onClose();
+                onBackup();
+              }}
+              className="flex items-center justify-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              <Archive className="w-4 h-4 text-gray-600" />
+              <span className="text-gray-700">Backup / Restore</span>
+            </button>
+            <button
+              onClick={() => {
+                onClose();
+                onShareView();
+              }}
+              className="flex items-center justify-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              <Share2 className="w-4 h-4 text-gray-600" />
+              <span className="text-gray-700">Share View</span>
+            </button>
+          </div>
+
           {/* Encryption status */}
           <div>
             <h3 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
