@@ -24,7 +24,9 @@ import { useSettings } from "../contexts/SettingsContext";
 export interface ViewShareState {
   view?: "upcoming" | "month";
   cals?: string[];
-  tag?: string | null;
+  /** Active hashtag filter (OR logic). Empty array = no filter. Key is
+   *  now `tags` (comma-separated); `tag` stays readable for back-compat. */
+  tags?: string[];
   panels?: { daily: boolean; lists: boolean };
   focus?: "daily" | "lists" | "calendar" | "upcoming";
   date?: string;
@@ -42,8 +44,12 @@ export function parseViewHash(hash: string): ViewShareState {
   else if (view === "week" || view === "day") out.view = "month";
   const cals = params.get("cals");
   if (cals !== null) out.cals = cals ? cals.split(",").filter(Boolean) : [];
-  const tag = params.get("tag");
-  if (tag !== null) out.tag = tag || null;
+  // New multi-tag param `tags` wins if present. Old single `tag` param is
+  // still parsed for links shared in v1.11 or earlier.
+  const tagsParam = params.get("tags");
+  const tagParam = params.get("tag");
+  if (tagsParam !== null) out.tags = tagsParam ? tagsParam.split(",").filter(Boolean) : [];
+  else if (tagParam !== null) out.tags = tagParam ? [tagParam] : [];
   const panels = params.get("panels");
   if (panels !== null) {
     const set = new Set(panels.split(",").filter(Boolean));
@@ -60,7 +66,7 @@ export function buildViewHash(s: ViewShareState): string {
   const params = new URLSearchParams();
   if (s.view) params.set("view", s.view);
   if (s.cals !== undefined) params.set("cals", s.cals.join(","));
-  if (s.tag !== undefined) params.set("tag", s.tag ?? "");
+  if (s.tags !== undefined) params.set("tags", s.tags.join(","));
   if (s.panels) {
     const on: string[] = [];
     if (s.panels.daily) on.push("daily");
@@ -76,7 +82,7 @@ export function buildViewHash(s: ViewShareState): string {
 /** Apply the initial hash on mount (once per session). Silently ignored if
  *  the hash is empty or contains an invite token. */
 export function useApplyInitialViewHash(): void {
-  const { calendars, activeCalendarIds, toggleCalendar, setViewMode, setActiveTag, setCurrentDate } = useCalendar();
+  const { calendars, activeCalendarIds, toggleCalendar, setViewMode, setActiveTags, setCurrentDate } = useCalendar();
   const { setShowDaily, setShowLists } = useSettings();
   const applied = useRef(false);
 
@@ -90,7 +96,7 @@ export function useApplyInitialViewHash(): void {
     if (Object.keys(state).length === 0) return;
 
     if (state.view) setViewMode(state.view);
-    if (state.tag !== undefined) setActiveTag(state.tag);
+    if (state.tags !== undefined) setActiveTags(new Set(state.tags));
     if (state.date) {
       const parsed = new Date(`${state.date}T00:00:00`);
       if (!Number.isNaN(parsed.getTime())) setCurrentDate(parsed);
@@ -120,7 +126,7 @@ export function useApplyInitialViewHash(): void {
 
 /** Build a shareable URL for the current view. */
 export function useBuildShareUrl(): (overrides?: Partial<ViewShareState>) => string {
-  const { viewMode, activeCalendarIds, activeTag, calendars, currentDate } = useCalendar();
+  const { viewMode, activeCalendarIds, activeTags, calendars, currentDate } = useCalendar();
   const { showDaily, showLists } = useSettings();
   return useCallback((overrides?: Partial<ViewShareState>) => {
     const pad = (n: number) => n.toString().padStart(2, "0");
@@ -130,7 +136,7 @@ export function useBuildShareUrl(): (overrides?: Partial<ViewShareState>) => str
       cals: calendars
         .filter((c) => activeCalendarIds.has(c.dTag))
         .map((c) => c.dTag),
-      tag: activeTag,
+      tags: [...activeTags],
       panels: { daily: showDaily, lists: showLists },
       date: dateStr,
       ...overrides,
@@ -138,5 +144,5 @@ export function useBuildShareUrl(): (overrides?: Partial<ViewShareState>) => str
     const hash = buildViewHash(state);
     const base = window.location.origin + window.location.pathname + window.location.search;
     return base + hash;
-  }, [viewMode, activeCalendarIds, activeTag, calendars, showDaily, showLists, currentDate]);
+  }, [viewMode, activeCalendarIds, activeTags, calendars, showDaily, showLists, currentDate]);
 }
