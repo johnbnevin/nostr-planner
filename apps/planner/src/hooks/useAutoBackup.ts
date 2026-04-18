@@ -48,8 +48,8 @@ export function useAutoBackup(): {
   backupNow: () => Promise<void>;
 } {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
-  const { events, calendars, eventsLoading, lastRemoteSha, setLastRemoteSha } = useCalendar();
-  const { habits, completions, lists, loading: tasksLoading } = useTasks();
+  const { events, calendars, eventsLoading, lastRemoteSha, setLastRemoteSha, eventTombstones } = useCalendar();
+  const { habits, completions, lists, loading: tasksLoading, habitTombstones, listTombstones } = useTasks();
   const { getSettings, autoBackup } = useSettings();
 
   const [phase, setPhase] = useState<BackupPhase>("idle");
@@ -59,6 +59,10 @@ export function useAutoBackup(): {
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backingUpRef = useRef(false);
+  // A change that arrived while a save was already in flight. When the
+  // in-flight save finishes we fire one more save so the later change
+  // doesn't get silently dropped.
+  const pendingRef = useRef(false);
   const fingerprint = useRef("");
   const initialLoadDone = useRef(false);
 
@@ -67,11 +71,24 @@ export function useAutoBackup(): {
     pubkey, relays, signEvent, publishEvent, signer,
     getSettings, autoBackup, lastRemoteSha, setLastRemoteSha,
     events, calendars, habits, completions, lists,
+    eventTombstones, habitTombstones, listTombstones,
   });
   stateRef.current = {
     pubkey, relays, signEvent, publishEvent, signer,
     getSettings, autoBackup, lastRemoteSha, setLastRemoteSha,
     events, calendars, habits, completions, lists,
+    eventTombstones, habitTombstones, listTombstones,
+  };
+
+  // FNV-1a 32-bit string mixer. Cheap and distributes well enough that
+  // same-length string edits (typo fixes, title tweaks) change the fingerprint.
+  // The previous version hashed only string *lengths* which silently missed
+  // many edits and caused autosaves to never fire.
+  const hashStr = (s: string, h: number): number => {
+    for (let i = 0; i < s.length; i++) {
+      h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+    }
+    return h | 0;
   };
 
   const computeFingerprint = (): string => {
@@ -81,24 +98,48 @@ export function useAutoBackup(): {
       eh = (eh * 31 + e.start.getTime()) | 0;
       eh = (eh * 31 + (e.end?.getTime() ?? 0)) | 0;
       eh = (eh * 31 + e.createdAt) | 0;
-      eh = (eh * 31 + e.content.length) | 0;
-      eh = (eh * 31 + e.title.length) | 0;
+      eh = (eh * 31 + (e.updatedAt ?? 0)) | 0;
+      eh = hashStr(e.title, eh);
+      eh = hashStr(e.content, eh);
+      eh = hashStr(e.location ?? "", eh);
+      eh = hashStr(e.link ?? "", eh);
+      eh = hashStr(e.hashtags.join(","), eh);
+      eh = hashStr(e.calendarRefs.join(","), eh);
+      eh = (eh * 31 + (e.notify === false ? 0 : 1)) | 0;
+      eh = (eh * 31 + (e.deleted ? 1 : 0)) | 0;
     }
     let ch = calendars.length;
     for (const c of calendars) {
       ch = (ch * 31 + c.eventRefs.length) | 0;
-      ch = (ch * 31 + c.title.length) | 0;
+      ch = hashStr(c.title, ch);
+      ch = hashStr(c.color ?? "", ch);
     }
-    const hh = habits.length;
-    const ck = Object.keys(completions).length;
+    let hh = habits.length;
+    for (const h of habits) {
+      hh = hashStr(h.id, hh);
+      hh = hashStr(h.title, hh);
+      hh = (hh * 31 + (h.updatedAt ?? 0)) | 0;
+      hh = (hh * 31 + (h.deleted ? 1 : 0)) | 0;
+    }
     let cc = 0;
-    for (const k in completions) cc += completions[k].length;
+    for (const k in completions) {
+      cc = hashStr(k, cc);
+      cc = hashStr(completions[k].join(","), cc);
+    }
     let lh = lists.length;
     for (const l of lists) {
+      lh = hashStr(l.id, lh);
+      lh = hashStr(l.name, lh);
+      lh = (lh * 31 + (l.updatedAt ?? 0)) | 0;
+      lh = (lh * 31 + (l.deleted ? 1 : 0)) | 0;
       lh = (lh * 31 + l.items.length) | 0;
-      for (const i of l.items) lh = (lh * 31 + (i.done ? 1 : 0)) | 0;
+      for (const i of l.items) {
+        lh = hashStr(i.id, lh);
+        lh = hashStr(i.title, lh);
+        lh = (lh * 31 + (i.done ? 1 : 0)) | 0;
+      }
     }
-    return `${eh}|${ch}|${hh}|${ck}:${cc}|${lh}|${JSON.stringify(getSettings())}`;
+    return `${eh}|${ch}|${hh}|${cc}|${lh}|${JSON.stringify(getSettings())}`;
   };
 
   const scheduleSave = (delayMs: number) => {
@@ -109,7 +150,15 @@ export function useAutoBackup(): {
 
   const doBackup = useCallback(async () => {
     const s = stateRef.current;
-    if (backingUpRef.current || !s.pubkey || !s.signer?.nip44) return;
+    if (!s.pubkey || !s.signer?.nip44) return;
+    if (backingUpRef.current) {
+      // Another save is already uploading. Remember that something new
+      // needs to go out and bail; we'll fire one more save when the
+      // in-flight one finishes. Previously this branch silently returned
+      // and the edit was lost until the next fingerprint change.
+      pendingRef.current = true;
+      return;
+    }
     backingUpRef.current = true;
     setPhase("saving");
     setSaveDueAt(null);
@@ -117,9 +166,12 @@ export function useAutoBackup(): {
       const snapshot = buildSnapshot({
         calendars: s.calendars,
         events: s.events,
+        eventTombstones: s.eventTombstones,
         habits: s.habits,
+        habitTombstones: s.habitTombstones,
         completions: s.completions,
         lists: s.lists,
+        listTombstones: s.listTombstones,
         settings: s.getSettings(),
       });
       const ptr = await saveSnapshot(
@@ -138,6 +190,10 @@ export function useAutoBackup(): {
       scheduleSave(RETRY_AFTER_FAILURE_MS);
     } finally {
       backingUpRef.current = false;
+      if (pendingRef.current) {
+        pendingRef.current = false;
+        void doBackup();
+      }
     }
   }, []);
 

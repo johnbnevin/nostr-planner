@@ -91,6 +91,8 @@ export interface HabitStatsBundle {
 interface TasksContextValue {
   // Daily habits
   habits: DailyHabit[];
+  /** Deleted-habit tombstones kept so cross-device merges respect deletions. */
+  habitTombstones: DailyHabit[];
   completions: Record<string, string[]>;
   addHabit: (title: string) => void;
   removeHabit: (id: string) => void;
@@ -102,6 +104,8 @@ interface TasksContextValue {
   getHabitStats: (habitId: string) => HabitStatsBundle;
   // Lists
   lists: UserList[];
+  /** Deleted-list tombstones kept so cross-device merges respect deletions. */
+  listTombstones: UserList[];
   addList: (name: string) => void;
   removeList: (id: string) => void;
   renameList: (id: string, name: string) => void;
@@ -164,8 +168,10 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   const { shouldEncrypt } = useSettings();
   const { pushUndoEntry } = useCalendar();
   const [habits, setHabits] = useState<DailyHabit[]>([]);
+  const [habitTombstones, setHabitTombstones] = useState<DailyHabit[]>([]);
   const [completions, setCompletions] = useState<Record<string, string[]>>({});
   const [lists, setLists] = useState<UserList[]>([]);
+  const [listTombstones, setListTombstones] = useState<UserList[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Refs that always hold the latest state values so action callbacks don't need
@@ -421,7 +427,15 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   );
   const removeHabitRaw = useCallback(
     (id: string) => {
+      const existing = habitsRef.current.find((h) => h.id === id);
       setHabits(habitsRef.current.filter((h) => h.id !== id));
+      if (existing) {
+        const tombstone: DailyHabit = { ...existing, deleted: true, updatedAt: Date.now() };
+        setHabitTombstones((prev) => [
+          ...prev.filter((t) => t.id !== id),
+          tombstone,
+        ]);
+      }
       scheduleDailyPublish();
     },
     [scheduleDailyPublish]
@@ -639,7 +653,15 @@ export function TasksProvider({ children }: { children: ReactNode }) {
 
   const removeListRaw = useCallback(
     (id: string) => {
+      const existing = listsRef.current.find((l) => l.id === id);
       setLists(listsRef.current.filter((l) => l.id !== id));
+      if (existing) {
+        const tombstone: UserList = { ...existing, deleted: true, updatedAt: Date.now() };
+        setListTombstones((prev) => [
+          ...prev.filter((t) => t.id !== id),
+          tombstone,
+        ]);
+      }
       scheduleListsPublish();
     },
     [scheduleListsPublish]
@@ -786,6 +808,7 @@ export function TasksProvider({ children }: { children: ReactNode }) {
 
   const contextValue = useMemo(() => ({
     habits,
+    habitTombstones,
     completions,
     addHabit,
     removeHabit,
@@ -795,6 +818,7 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     getHabitStats,
     reorderHabits,
     lists,
+    listTombstones,
     addList,
     removeList,
     renameList,
@@ -804,12 +828,33 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     reorderListItems,
     refreshTasks: fetchData,
     applySnapshot: (h: DailyHabit[], c: Record<string, string[]>, l: UserList[]) => {
-      setHabits(h);
+      // Same tombstone split logic as CalendarContext — live items go to
+      // the rendered state, tombstones into their own array so cross-device
+      // merges can respect deletions.
+      const now = Date.now();
+      const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+      const liveH: DailyHabit[] = [];
+      const tombH: DailyHabit[] = [];
+      for (const hab of h) {
+        if (hab.deleted) {
+          if (now - (hab.updatedAt ?? 0) < TOMBSTONE_TTL_MS) tombH.push(hab);
+        } else liveH.push(hab);
+      }
+      const liveL: UserList[] = [];
+      const tombL: UserList[] = [];
+      for (const lst of l) {
+        if (lst.deleted) {
+          if (now - (lst.updatedAt ?? 0) < TOMBSTONE_TTL_MS) tombL.push(lst);
+        } else liveL.push(lst);
+      }
+      setHabits(liveH);
+      setHabitTombstones(tombH);
       setCompletions(c);
-      setLists(l);
+      setLists(liveL);
+      setListTombstones(tombL);
     },
     loading,
-  }), [habits, completions, addHabit, removeHabit, renameHabit, toggleHabitCompletion, isHabitDone, getHabitStats, reorderHabits, lists, addList, removeList, renameList, addListItem, removeListItem, toggleListItem, reorderListItems, fetchData, loading]);
+  }), [habits, habitTombstones, completions, addHabit, removeHabit, renameHabit, toggleHabitCompletion, isHabitDone, getHabitStats, reorderHabits, lists, listTombstones, addList, removeList, renameList, addListItem, removeListItem, toggleListItem, reorderListItems, fetchData, loading]);
 
   return (
     <TasksContext.Provider
