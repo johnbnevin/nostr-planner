@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useSharing } from "../contexts/SharingContext";
@@ -55,6 +55,7 @@ export function CalendarApp() {
   const { alerts, dismiss } = useNotifications();
   const { habits, completions, lists, applySnapshot: applyTasksSnapshot } = useTasks();
   const { phase: backupPhase, countdown: saveCountdown, lastError: backupError, backupNow } = useAutoBackup();
+  const [syncingNow, setSyncingNow] = useState(false);
   useDigest();
   // Apply URL-hash view state once calendars have loaded. Enables the
   // "Add to Home Screen" widget-URL flow — open a pre-filtered view via
@@ -95,26 +96,70 @@ export function CalendarApp() {
   // through a ref that's updated every render.
   const mergeStateRef = useRef({ calendars, events, habits, completions, lists, getSettings });
   mergeStateRef.current = { calendars, events, habits, completions, lists, getSettings };
+
+  // Tracks the event the user currently has open in the edit / detail
+  // modal, so the remote-snapshot merge can detect a cross-device
+  // conflict and show a banner. A ref (not state) keeps the merge
+  // callback identity stable so it doesn't thrash watchPointer.
+  const openEventRef = useRef<{ dTag: string; createdAt: number } | null>(null);
+
+  // Apply a remote snapshot into local state via merge. Shared by the
+  // live watchPointer subscription and the manual "Sync now" button.
+  const applyRemoteSnapshot = useCallback((remote: Snapshot & { _sha256?: string }) => {
+    const s = mergeStateRef.current;
+    const local = buildSnapshot({
+      calendars: s.calendars, events: s.events,
+      habits: s.habits, completions: s.completions, lists: s.lists,
+      settings: s.getSettings(),
+    });
+    const merged = mergeSnapshots(local, remote);
+    applyCalendarSnapshot(merged.events, merged.calendars);
+    applyTasksSnapshot(merged.habits, merged.completions, merged.lists);
+    restoreSettings(merged.settings);
+    if (remote._sha256) setLastRemoteSha(remote._sha256);
+    setSyncedFromOther(true);
+    setTimeout(() => setSyncedFromOther(false), 2500);
+
+    // Conflict check: if the user is currently editing / viewing an
+    // event that just got a newer version from another device, flag
+    // it so they can reload the modal instead of silently clobbering.
+    const open = openEventRef.current;
+    if (open) {
+      const remoteVersion = merged.events.find((e) => e.dTag === open.dTag);
+      if (remoteVersion && remoteVersion.createdAt > open.createdAt) {
+        setOpenEventConflict(remoteVersion);
+      }
+    }
+  }, [applyCalendarSnapshot, applyTasksSnapshot, restoreSettings, setLastRemoteSha]);
+
   useEffect(() => {
     if (!pubkey || !signer?.nip44) return;
-    const close = watchPointer(pubkey, relays, signer.nip44, null, (remote) => {
-      const s = mergeStateRef.current;
-      const local = buildSnapshot({
-        calendars: s.calendars, events: s.events,
-        habits: s.habits, completions: s.completions, lists: s.lists,
-        settings: s.getSettings(),
-      });
-      const merged = mergeSnapshots(local, remote);
-      applyCalendarSnapshot(merged.events, merged.calendars);
-      applyTasksSnapshot(merged.habits, merged.completions, merged.lists);
-      restoreSettings(merged.settings);
-      const remoteSha = (remote as Snapshot & { _sha256?: string })._sha256;
-      if (remoteSha) setLastRemoteSha(remoteSha);
-      setSyncedFromOther(true);
-      setTimeout(() => setSyncedFromOther(false), 2500);
-    });
+    const close = watchPointer(pubkey, relays, signer.nip44, null, applyRemoteSnapshot);
     return close;
-  }, [pubkey, signer, relays, applyCalendarSnapshot, applyTasksSnapshot, restoreSettings, setLastRemoteSha]);
+  }, [pubkey, signer, relays, applyRemoteSnapshot]);
+
+  // Manual "Sync now" action — wired to a header button. Flushes the
+  // local pending save (so the other device sees us) and pulls the
+  // latest remote pointer + merges if different. Useful when the live
+  // subscription is stalled or a user wants instant confirmation after
+  // editing on another device.
+  const syncNow = useCallback(async () => {
+    if (syncingNow) return;
+    setSyncingNow(true);
+    try {
+      if (backupPhase === "dirty" || backupPhase === "error") {
+        try { await backupNow(); } catch { /* non-fatal */ }
+      }
+      if (pubkey && signer?.nip44) {
+        try {
+          const remote = await loadSnapshot(pubkey, relays, signer.nip44);
+          if (remote) applyRemoteSnapshot(remote);
+        } catch { /* non-fatal */ }
+      }
+    } finally {
+      setSyncingNow(false);
+    }
+  }, [syncingNow, backupPhase, backupNow, pubkey, signer, relays, applyRemoteSnapshot]);
   // Guards to prevent re-running one-shot effects across re-renders
   const autoRestoreAttempted = useRef(false);
   // Refs to the scrollable calendar containers so we can reset them to the
@@ -183,6 +228,23 @@ export function CalendarApp() {
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(
     null
   );
+  // Remote-edit conflict banner — populated when an incoming merge would
+  // change the event the user has open in the edit-modal or detail-modal.
+  // Carries the fresh remote copy so "Reload" can swap the open modal to
+  // it without a round-trip.
+  const [openEventConflict, setOpenEventConflict] = useState<CalendarEvent | null>(null);
+  // Keep openEventRef in sync with whichever modal-bound event is active.
+  useEffect(() => {
+    const active = editEvent ?? selectedEvent ?? null;
+    openEventRef.current = active
+      ? { dTag: active.dTag, createdAt: active.createdAt }
+      : null;
+    // Clear the conflict banner when no event is open or the user
+    // switches to a different event.
+    if (!active || (openEventConflict && openEventConflict.dTag !== active.dTag)) {
+      setOpenEventConflict(null);
+    }
+  }, [editEvent, selectedEvent, openEventConflict]);
   const [dayDetailDate, setDayDetailDate] = useState<Date | null>(null);
   const [prefillDate, setPrefillDate] = useState<Date | null>(null);
   // Seed mobileTab from the URL-hash "focus" / "view" param if present —
@@ -409,6 +471,8 @@ export function CalendarApp() {
         saveCountdown={saveCountdown}
         backupError={backupError}
         onBackupNow={backupNow}
+        onSyncNow={syncNow}
+        syncingNow={syncingNow}
         onLogout={logout}
         onNewEvent={() => handleNewEvent()}
         canAddEvent={!eventsLoading && calendars.length > 0}
@@ -501,6 +565,42 @@ export function CalendarApp() {
       {syncedFromOther && (
         <div className="bg-emerald-50 border-b border-emerald-200 px-4 py-1.5 text-xs text-emerald-800 text-center">
           Synced from another device
+        </div>
+      )}
+
+      {/* Remote-edit conflict banner — another device edited the event
+          this user has open in the modal. "Reload" swaps the modal to
+          the remote version; "Keep mine" dismisses so their edits win
+          on save. */}
+      {openEventConflict && (
+        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-center justify-between gap-3">
+          <span className="text-sm text-amber-900 truncate">
+            &#9888; <strong>"{openEventConflict.title}"</strong> was updated on another device. Your changes will win when you save.
+          </span>
+          <div className="flex gap-2 flex-shrink-0">
+            <button
+              onClick={() => {
+                const fresh = openEventConflict;
+                setOpenEventConflict(null);
+                if (editEvent && editEvent.dTag === fresh.dTag) {
+                  // Close and re-open the edit modal with fresh data.
+                  setEditEvent(null);
+                  requestAnimationFrame(() => setEditEvent(fresh));
+                } else if (selectedEvent && selectedEvent.dTag === fresh.dTag) {
+                  setSelectedEvent(fresh);
+                }
+              }}
+              className="px-3 py-1 text-xs bg-amber-600 text-white rounded hover:bg-amber-700"
+            >
+              Reload
+            </button>
+            <button
+              onClick={() => setOpenEventConflict(null)}
+              className="px-3 py-1 text-xs text-amber-700 hover:text-amber-900"
+            >
+              Keep mine
+            </button>
+          </div>
         </div>
       )}
 

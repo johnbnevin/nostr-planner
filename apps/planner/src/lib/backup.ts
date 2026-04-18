@@ -438,7 +438,24 @@ async function raceFetch(sha256: string, servers: string[]): Promise<string | nu
  *
  * The caller is responsible for merging the remote snapshot with its
  * local state and re-applying to the UI.
+ *
+ * Reliability features:
+ * - **Restart on focus/visibility.** Backgrounded tabs have their
+ *   WebSockets silently killed by the OS after a few minutes. When the
+ *   user returns, we tear down + re-create the subscription so fresh
+ *   sockets are established. Without this, Device B stops receiving
+ *   pointers and appears stale forever.
+ * - **Clock-skew tolerance.** The `since` filter is offset by 60 s so
+ *   a phone with a slightly fast clock doesn't cause the relay to
+ *   silently drop pointers whose `created_at` is "in the past".
+ * - **Safety-net poll.** Every POLL_MS (90 s), if nothing has arrived
+ *   via the subscription, we explicitly query for the latest pointer.
+ *   This catches the case where both restart-on-focus and the live
+ *   subscription fail silently.
  */
+const POINTER_POLL_MS = 90_000;
+const POINTER_SINCE_SKEW_SEC = 60;
+
 export function watchPointer(
   pubkey: string,
   relays: string[],
@@ -446,46 +463,100 @@ export function watchPointer(
   initialSha: string | null,
   onNewer: (snapshot: Snapshot) => void
 ): () => void {
-  const pool = new SimplePool();
-  let lastSha = initialSha;
   let closed = false;
-
+  let lastSha = initialSha;
+  let pool: SimplePool | null = null;
+  let sub: { close: () => void } | null = null;
   const urls = relays.length > 0 ? relays.slice(0, 5) : ["wss://relay.damus.io", "wss://nos.lol"];
-  const sub = pool.subscribe(
-    urls,
-    { kinds: [KIND_APP_DATA], authors: [pubkey], "#d": [DTAG_BACKUP], since: Math.floor(Date.now() / 1000) },
-    {
-      onevent: async (event) => {
-        if (closed) return;
-        const sha = event.tags.find((t) => t[0] === "x")?.[1];
-        if (!sha || sha === lastSha) return;
-        if (ownPublishedShas.has(sha)) { lastSha = sha; return; }
-        // Race-fetch the new blob and decrypt.
-        const servers = event.tags.filter((t) => t[0] === "server").map((t) => t[1]);
-        const allServers = [...new Set([...servers, ...BLOSSOM_SERVERS])];
-        const body = await raceFetch(sha, allServers);
-        if (!body || closed) return;
-        try {
-          const env: Envelope = JSON.parse(body);
-          const plaintext = await unwrapEnvelope(env, pubkey, nip44);
-          const snap = JSON.parse(plaintext) as Snapshot;
-          if (snap.version !== 1) return;
-          for (const e of snap.events) {
-            e.start = new Date(e.start as unknown as string);
-            if (e.end) e.end = new Date(e.end as unknown as string);
-          }
-          lastSha = sha;
-          onNewer({ ...snap, _sha256: sha } as Snapshot & { _sha256: string });
-        } catch (err) {
-          log.warn("watchPointer: remote snapshot decrypt failed:", err);
-        }
-      },
+
+  // Shared pointer-processing logic used by both the live subscription
+  // and the periodic safety-net poll.
+  const processPointer = async (sha: string, servers: string[]) => {
+    if (closed) return;
+    if (sha === lastSha) return;
+    if (ownPublishedShas.has(sha)) { lastSha = sha; return; }
+    log.debug(`watchPointer: new pointer ${sha.slice(0, 8)}, fetching`);
+    const allServers = [...new Set([...servers, ...BLOSSOM_SERVERS])];
+    const body = await raceFetch(sha, allServers);
+    if (!body || closed) return;
+    try {
+      const env: Envelope = JSON.parse(body);
+      const plaintext = await unwrapEnvelope(env, pubkey, nip44);
+      const snap = JSON.parse(plaintext) as Snapshot;
+      if (snap.version !== 1) return;
+      for (const e of snap.events) {
+        e.start = new Date(e.start as unknown as string);
+        if (e.end) e.end = new Date(e.end as unknown as string);
+      }
+      lastSha = sha;
+      log.info(`watchPointer: merged ${sha.slice(0, 8)} (${snap.events.length} events)`);
+      onNewer({ ...snap, _sha256: sha } as Snapshot & { _sha256: string });
+    } catch (err) {
+      log.warn("watchPointer: remote snapshot decrypt failed:", err);
     }
-  );
+  };
+
+  const openSubscription = () => {
+    if (closed) return;
+    // Close prior pool before replacing — this is what fixes stale
+    // WebSockets after the tab has been backgrounded.
+    try { sub?.close(); pool?.close(urls); } catch { /* ignore */ }
+    pool = new SimplePool();
+    sub = pool.subscribe(
+      urls,
+      {
+        kinds: [KIND_APP_DATA],
+        authors: [pubkey],
+        "#d": [DTAG_BACKUP],
+        // Skew the since filter back 60s so ±1 min of clock drift
+        // doesn't cause the relay to silently drop our pointers.
+        since: Math.floor(Date.now() / 1000) - POINTER_SINCE_SKEW_SEC,
+      },
+      {
+        onevent: async (event) => {
+          const sha = event.tags.find((t) => t[0] === "x")?.[1];
+          if (!sha) return;
+          const servers = event.tags.filter((t) => t[0] === "server").map((t) => t[1]);
+          await processPointer(sha, servers);
+        },
+      }
+    );
+    log.debug("watchPointer: subscription opened on", urls.length, "relays");
+  };
+
+  // Periodic safety-net: if the subscription dies silently (common on
+  // mobile PWAs after backgrounding), this poll still catches new
+  // pointers by querying the relays directly.
+  const pollOnce = async () => {
+    if (closed) return;
+    try {
+      const ptr = await findPointer(pubkey, relays);
+      if (ptr) await processPointer(ptr.sha256, ptr.servers);
+    } catch (err) {
+      log.debug("watchPointer: poll failed (not fatal):", err);
+    }
+  };
+
+  const onVisibilityChange = () => {
+    if (document.visibilityState !== "visible") return;
+    // Tab regained focus. Rebuild the sub with a fresh WebSocket, then
+    // do a one-shot poll to catch anything we missed while backgrounded.
+    log.debug("watchPointer: tab visible, refreshing subscription");
+    openSubscription();
+    void pollOnce();
+  };
+
+  openSubscription();
+  const pollTimer = setInterval(() => { void pollOnce(); }, POINTER_POLL_MS);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  window.addEventListener("focus", onVisibilityChange);
 
   return () => {
     closed = true;
-    try { sub.close(); pool.close(urls); } catch { /* ignore */ }
+    clearInterval(pollTimer);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    window.removeEventListener("focus", onVisibilityChange);
+    try { sub?.close(); pool?.close(urls); } catch { /* ignore */ }
   };
 }
 

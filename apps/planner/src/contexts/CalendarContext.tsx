@@ -33,11 +33,13 @@ import {
 import { useNostr } from "./NostrContext";
 import { useSettings } from "./SettingsContext";
 import { useSharing } from "./SharingContext";
+import { SimplePool } from "nostr-tools/pool";
 import {
   KIND_DATE_EVENT,
   KIND_TIME_EVENT,
   KIND_CALENDAR,
   KIND_APP_DATA,
+  DEFAULT_RELAYS,
   generateDTag,
   buildDateEventTags,
   buildTimeEventTags,
@@ -1734,6 +1736,67 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
 
     doRefreshRef.current().finally(() => clearTimeout(safetyTimer));
   }, [pubkey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Live subscription to calendar event kinds so shared + public calendar
+  // edits from another device appear within seconds instead of waiting for
+  // the next manual refresh. Private events propagate via the Blossom
+  // blob (watchPointer) so this doesn't help them — but the 3 s autosave
+  // debounce already covers that case.
+  //
+  // When a matching event arrives, we kick refreshEvents() which runs the
+  // full incremental decrypt pipeline and merges into state. refreshEvents
+  // is already debounced 500 ms so bursts coalesce. We also restart the
+  // subscription on focus/visibility to survive backgrounded-tab socket
+  // drops — same pattern as watchPointer.
+  useEffect(() => {
+    if (!pubkey) return;
+    const authorList = [pubkey, ...loadSharedCalOwners(pubkey).values()];
+    const distinctAuthors = [...new Set(authorList)];
+    const urls = relays.length > 0 ? relays.slice(0, 5) : DEFAULT_RELAYS;
+
+    let pool: SimplePool | null = null;
+    let sub: { close: () => void } | null = null;
+    let closed = false;
+
+    const open = () => {
+      if (closed) return;
+      try { sub?.close(); pool?.close(urls); } catch { /* ignore */ }
+      pool = new SimplePool();
+      sub = pool.subscribe(
+        urls,
+        {
+          kinds: [KIND_DATE_EVENT, KIND_TIME_EVENT, KIND_CALENDAR, KIND_APP_DATA],
+          authors: distinctAuthors,
+          since: Math.floor(Date.now() / 1000) - 60,
+        },
+        {
+          onevent: () => {
+            if (closed) return;
+            // refreshEvents is debounced; rapid bursts collapse into one
+            // decrypt + merge pass.
+            void refreshEvents().catch(() => {});
+          },
+        }
+      );
+      log.debug("live event subscription opened,", distinctAuthors.length, "authors");
+    };
+
+    const onVisible = () => {
+      if (document.visibilityState === "visible") open();
+    };
+
+    open();
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+
+    return () => {
+      closed = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+      try { sub?.close(); pool?.close(urls); } catch { /* ignore */ }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshEvents captured intentionally via latest closure at effect re-run
+  }, [pubkey, relays]);
 
   const contextValue = useMemo(() => ({
     events,
