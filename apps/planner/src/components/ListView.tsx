@@ -1,4 +1,4 @@
-import { useState, useRef, type DragEvent } from "react";
+import { useState, type DragEvent } from "react";
 import { useTasks } from "../contexts/TasksContext";
 import { Plus, X, ChevronLeft, ChevronRight, Check, GripVertical } from "lucide-react";
 
@@ -24,7 +24,6 @@ export function ListsView() {
   const [renameValue, setRenameValue] = useState("");
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
-  const dragNodeRef = useRef<HTMLDivElement | null>(null);
 
   // Keep index in bounds when lists change
   const safeIndex = lists.length === 0 ? 0 : Math.min(listIndex, lists.length - 1);
@@ -91,22 +90,18 @@ export function ListsView() {
     }
   };
 
-  // Drag-and-drop
+  // Drag-and-drop. Dragging + drop-target visuals are now driven by the
+  // dragIndex / dragOverIndex state (handled in the row styles) so we no
+  // longer need an imperative opacity hack on dragNodeRef.
   const handleDragStart = (e: DragEvent<HTMLDivElement>, index: number) => {
     setDragIndex(index);
-    dragNodeRef.current = e.currentTarget;
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", String(index));
-    requestAnimationFrame(() => {
-      if (dragNodeRef.current) dragNodeRef.current.style.opacity = "0.4";
-    });
   };
 
   const handleDragEnd = () => {
-    if (dragNodeRef.current) dragNodeRef.current.style.opacity = "1";
     setDragIndex(null);
     setDragOverIndex(null);
-    dragNodeRef.current = null;
   };
 
   const handleDragOver = (e: DragEvent<HTMLDivElement>, index: number) => {
@@ -242,20 +237,35 @@ export function ListsView() {
               )}
               {currentList.items.map((item, index) => {
                 const isOver = dragOverIndex === index && dragIndex !== index;
+                const isDragging = dragIndex === index;
                 return (
                   <div
                     key={item.id}
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, index)}
-                    onDragEnd={handleDragEnd}
                     onDragOver={(e) => handleDragOver(e, index)}
                     onDrop={(e) => handleDrop(e, index)}
-                    className={`flex items-center gap-2 px-4 py-3 hover:bg-gray-50 transition-colors group ${
-                      isOver ? "border-t-2 border-primary-400" : ""
+                    className={`relative flex items-center gap-2 px-2 py-3 transition-colors group ${
+                      isDragging ? "bg-violet-50/40 opacity-50" : "hover:bg-gray-50"
                     }`}
                   >
-                    <div className="cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 flex-shrink-0">
-                      <GripVertical className="w-4 h-4" />
+                    {/* Prominent drop-target bar — a thick violet line with a
+                        dot so it's obvious where the item will land. */}
+                    {isOver && (
+                      <div className="pointer-events-none absolute -top-0.5 left-0 right-0 h-1 bg-violet-500 shadow-md shadow-violet-300/50">
+                        <div className="absolute -left-1 -top-0.5 w-2 h-2 rounded-full bg-violet-500" />
+                        <div className="absolute -right-1 -top-0.5 w-2 h-2 rounded-full bg-violet-500" />
+                      </div>
+                    )}
+                    {/* Grip handle — ONLY this is draggable so accidentally
+                        dragging when clicking a row doesn't happen. Larger tap
+                        target (w-8 h-8) for mobile. */}
+                    <div
+                      draggable
+                      onDragStart={(e) => handleDragStart(e, index)}
+                      onDragEnd={handleDragEnd}
+                      className="w-8 h-8 flex items-center justify-center cursor-grab active:cursor-grabbing text-gray-300 hover:text-violet-500 hover:bg-violet-50 rounded flex-shrink-0 touch-none"
+                      title="Drag to reorder"
+                    >
+                      <GripVertical className="w-5 h-5" />
                     </div>
                     <button
                       onClick={() => toggleListItem(currentList.id, item.id)}

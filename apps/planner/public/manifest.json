@@ -12,5 +12,28 @@
       "sizes": "any",
       "type": "image/svg+xml"
     }
+  ],
+  "shortcuts": [
+    {
+      "name": "Today",
+      "short_name": "Today",
+      "description": "Jump to today's schedule",
+      "url": "./#view=day",
+      "icons": [{ "src": "calendar.svg", "sizes": "any", "type": "image/svg+xml" }]
+    },
+    {
+      "name": "Daily habits",
+      "short_name": "Habits",
+      "description": "Daily habits tracker",
+      "url": "./#focus=daily&panels=daily",
+      "icons": [{ "src": "calendar.svg", "sizes": "any", "type": "image/svg+xml" }]
+    },
+    {
+      "name": "To-do lists",
+      "short_name": "Lists",
+      "description": "To-do lists",
+      "url": "./#focus=lists&panels=lists",
+      "icons": [{ "src": "calendar.svg", "sizes": "any", "type": "image/svg+xml" }]
+    }
   ]
 }

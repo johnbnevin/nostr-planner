@@ -1,4 +1,4 @@
-import { Component, type ReactNode } from "react";
+import { Component, useState, type ReactNode } from "react";
 import { NostrProvider } from "./contexts/NostrContext";
 import { SettingsProvider } from "./contexts/SettingsContext";
 import { SharingProvider } from "./contexts/SharingContext";
@@ -6,6 +6,7 @@ import { CalendarProvider } from "./contexts/CalendarContext";
 import { TasksProvider } from "./contexts/TasksContext";
 import { LoginScreen } from "./components/LoginScreen";
 import { CalendarApp } from "./components/CalendarApp";
+import { ReconnectScreen } from "./components/ReconnectScreen";
 import { useNostr } from "./contexts/NostrContext";
 
 /**
@@ -53,9 +54,24 @@ class ErrorBoundary extends Component<
 }
 
 function AppContent() {
-  const { pubkey } = useNostr();
+  const { pubkey, hasSavedSession, autoLoginState } = useNostr();
+  // When the user explicitly taps "Use a different login method" on the
+  // reconnect screen, we want to show the full LoginScreen until they either
+  // log in successfully or the session finishes reconnecting on its own.
+  const [forceLoginScreen, setForceLoginScreen] = useState(false);
 
   if (!pubkey) {
+    // Returning user whose auto-login is still running or has just failed —
+    // show the reconnect splash so they don't see the full login screen as
+    // if they had been kicked out. Only the "sign out" button or a manual
+    // "use a different login method" tap falls back to the login screen.
+    const showReconnect =
+      !forceLoginScreen &&
+      hasSavedSession &&
+      (autoLoginState === "attempting" || autoLoginState === "failed");
+    if (showReconnect) {
+      return <ReconnectScreen onSwitchAccount={() => setForceLoginScreen(true)} />;
+    }
     return <LoginScreen />;
   }
 
