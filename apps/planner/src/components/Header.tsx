@@ -388,14 +388,14 @@ export function Header({
 
         {/* ===== MOBILE LAYOUT (< sm) ===== */}
 
-        {/* Row 1: Top menu — title + version + global actions */}
-        <div className="flex items-center justify-between py-2 lg:hidden">
-          <div className="flex items-center gap-1.5">
+        {/* Row 1: Top menu — title + global actions. Version suffix dropped
+            on mobile so the right-hand button row (calendars, undo/redo,
+            refresh, backup, autosave, share, settings, logout) fits on
+            narrow phones without clipping. */}
+        <div className="flex items-center justify-between py-2 lg:hidden gap-1">
+          <div className="flex items-center gap-1 shrink-0 min-w-0">
             <CalendarDays className="w-5 h-5 text-primary-600 shrink-0" />
-            <h1 className="text-base font-bold text-primary-700">
-              Planner
-              <span className="text-[10px] font-normal text-gray-400 ml-1">{`v${__APP_VERSION__}b`}</span>
-            </h1>
+            <h1 className="text-base font-bold text-primary-700">Planner</h1>
           </div>
           <div className="flex items-center gap-0.5">
             <button
@@ -492,18 +492,14 @@ export function Header({
               <img
                 src={profile.picture}
                 alt=""
-                className="w-5 h-5 rounded-full object-cover"
+                className="w-5 h-5 rounded-full object-cover shrink-0"
                 referrerPolicy="no-referrer"
+                title={profile.name || npubShort}
               />
-            ) : null}
-            {profile?.name ? (
-              <span className="text-[11px] text-gray-500 max-w-[80px] truncate">
-                {profile.name}
-              </span>
             ) : null}
             <button
               onClick={onLogout}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
+              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors shrink-0"
               title="Logout"
             >
               <LogOut className="w-4 h-4 text-gray-500" />
