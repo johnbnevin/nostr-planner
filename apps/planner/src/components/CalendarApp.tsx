@@ -50,11 +50,11 @@ import type { ParsedIcalEvent } from "../lib/ical";
  */
 export function CalendarApp() {
   const { pubkey, profile, logout, signer, relays } = useNostr();
-  const { viewMode, setViewMode, eventsLoading, calendars, events, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot, lastRemoteSha, setLastRemoteSha, undoDepth, redoDepth, undo, redo } = useCalendar();
+  const { viewMode, setViewMode, eventsLoading, calendars, events, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot, lastRemoteSha, setLastRemoteSha, eventTombstones, undoDepth, redoDepth, undo, redo } = useCalendar();
   const { acceptInviteLink } = useSharing();
   const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, getSettings, restoreSettings } = useSettings();
   const { alerts, dismiss } = useNotifications();
-  const { habits, completions, lists, applySnapshot: applyTasksSnapshot } = useTasks();
+  const { habits, completions, lists, applySnapshot: applyTasksSnapshot, habitTombstones, listTombstones } = useTasks();
   const { phase: backupPhase, countdown: saveCountdown, lastError: backupError, backupNow } = useAutoBackup();
   const [syncingNow, setSyncingNow] = useState(false);
   useDigest();
@@ -96,8 +96,8 @@ export function CalendarApp() {
   // The watchPointer callback must read CURRENT state each time it fires,
   // not snapshots taken when the subscription opened — so we thread state
   // through a ref that's updated every render.
-  const mergeStateRef = useRef({ calendars, events, habits, completions, lists, getSettings });
-  mergeStateRef.current = { calendars, events, habits, completions, lists, getSettings };
+  const mergeStateRef = useRef({ calendars, events, habits, completions, lists, getSettings, eventTombstones, habitTombstones, listTombstones });
+  mergeStateRef.current = { calendars, events, habits, completions, lists, getSettings, eventTombstones, habitTombstones, listTombstones };
 
   // Tracks the event the user currently has open in the edit / detail
   // modal, so the remote-snapshot merge can detect a cross-device
@@ -116,7 +116,9 @@ export function CalendarApp() {
     const s = mergeStateRef.current;
     const local = buildSnapshot({
       calendars: s.calendars, events: s.events,
+      eventTombstones: s.eventTombstones,
       habits: s.habits, completions: s.completions, lists: s.lists,
+      habitTombstones: s.habitTombstones, listTombstones: s.listTombstones,
       settings: s.getSettings(),
     });
     const merged = mergeSnapshots(local, remote);

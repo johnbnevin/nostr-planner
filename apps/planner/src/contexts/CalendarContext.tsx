@@ -164,7 +164,13 @@ interface CalendarContextValue {
   leaveSharedCalendarAndCleanup: (calDTag: string) => Promise<void>;
   /** Add an event to state immediately (before relay confirmation). */
   addEventOptimistic: (event: CalendarEvent) => void;
-  /** Replace in-memory calendar state wholesale. Called on snapshot restore. */
+  /** Tombstones for events deleted locally or on another device. Kept in
+   *  state so they survive cross-device merges — without them, a delete
+   *  can be silently resurrected when another device's snapshot still
+   *  contains the event. Filtered from UI by default. */
+  eventTombstones: CalendarEvent[];
+  /** Replace in-memory calendar state wholesale. Called on snapshot restore.
+   *  Tombstones in the input array are split off into eventTombstones. */
   applySnapshot: (events: CalendarEvent[], calendars: CalendarCollection[]) => void;
   /** sha256 of the Blossom snapshot this tab last loaded or saved. Consumed
    *  by useAutoBackup to detect concurrent writes from other devices. */
@@ -328,6 +334,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
   const { shouldEncrypt, canPublish } = useSettings();
   const [events, setEvents] = useState<CalendarEvent[]>([]);
+  const [eventTombstones, setEventTombstones] = useState<CalendarEvent[]>([]);
   const [calendars, setCalendars] = useState<CalendarCollection[]>([]);
   const [activeCalendarIds, setActiveCalendarIds] = useState<Set<string>>(
     new Set()
@@ -798,6 +805,14 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     async (event: CalendarEvent) => {
       persistDeletion(event.dTag);
       setEvents((prev) => prev.filter((e) => e.dTag !== event.dTag));
+      // Record a tombstone so cross-device merges respect the deletion.
+      // Without this, if another device still has this event in its last
+      // published snapshot, the next merge will resurrect it.
+      const tombstone: CalendarEvent = { ...event, deleted: true, updatedAt: Date.now() };
+      setEventTombstones((prev) => [
+        ...prev.filter((t) => t.dTag !== event.dTag),
+        tombstone,
+      ]);
       const sharedKey = getSharedKeyForCalendars(event.calendarRefs);
       const isPrivate = !sharedKey && shouldEncrypt(event.calendarRefs);
       if (isPrivate) return;
@@ -850,6 +865,15 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       for (const sib of siblings) persistDeletion(sib.dTag);
       const siblingTagSet = new Set(siblings.map((s) => s.dTag));
       setEvents((prev) => prev.filter((e) => !siblingTagSet.has(e.dTag)));
+      // Tombstone each sibling so the deletion survives cross-device merges.
+      const now = Date.now();
+      const newTombstones: CalendarEvent[] = siblings.map((s) => ({
+        ...s, deleted: true, updatedAt: now,
+      }));
+      setEventTombstones((prev) => [
+        ...prev.filter((t) => !siblingTagSet.has(t.dTag)),
+        ...newTombstones,
+      ]);
 
       // 2. Relay-visible deletions. Private events (Blossom-only) don't need
       //    a kind-5; auto-backup picks up the new state on its debounce.
@@ -1125,7 +1149,37 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const applySnapshot = useCallback((evs: CalendarEvent[], cals: CalendarCollection[]) => {
-    setEvents(evs);
+    // Split tombstones out of the live events list. Tombstones originate
+    // either from local deletes (recorded by deleteEventInternal) or from
+    // remote snapshots that include another device's deletions. Keeping
+    // them in a separate array lets the UI render only live events while
+    // the merge sees the full picture on the next save.
+    const now = Date.now();
+    const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+    const live: CalendarEvent[] = [];
+    const tombs: CalendarEvent[] = [];
+    const tombDTags = new Set<string>();
+    for (const e of evs) {
+      if (e.deleted) {
+        if (now - (e.updatedAt ?? 0) < TOMBSTONE_TTL_MS) {
+          tombs.push(e);
+          tombDTags.add(e.dTag);
+        }
+      } else {
+        live.push(e);
+      }
+    }
+    setEvents(live);
+    setEventTombstones(tombs);
+    // Mirror remote tombstones into deletedDTags so a subsequent relay
+    // refresh doesn't pull the deleted event back in.
+    if (tombDTags.size > 0) {
+      setDeletedDTags((prev) => {
+        const next = new Set(prev);
+        for (const d of tombDTags) next.add(d);
+        return next;
+      });
+    }
     setCalendars(cals);
     setActiveCalendarIds(new Set(cals.map((c) => c.dTag)));
     setEventsLoading(false);
@@ -1837,6 +1891,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     convertToShared,
     leaveSharedCalendarAndCleanup,
     addEventOptimistic,
+    eventTombstones,
     applySnapshot,
     lastRemoteSha,
     setLastRemoteSha,
@@ -1851,7 +1906,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     undo,
     redo,
     pushUndoEntry: pushUndo,
-  }), [events, filteredEvents, calendars, activeCalendarIds, allTags, tagsByUsage, locationsByUsage, activeTags, setActiveTags, toggleActiveTag, clearActiveTags, eventsLoading, currentDate, viewMode, toggleCalendar, createCalendar, createSharedCalendar, updateCalendarEvents, getSeriesEvents, renameCalendar, recolorCalendar, deleteCalendar, reorderCalendars, refreshEvents, forceFullRefresh, deleteEvent, deleteSeries, renameTag, deleteTag, renameLocation, deleteLocation, moveEvent, removeMember, convertToShared, leaveSharedCalendarAndCleanup, addEventOptimistic, applySnapshot, lastRemoteSha, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, undoStack, redoStack, undo, redo, pushUndo]);
+  }), [events, filteredEvents, calendars, activeCalendarIds, allTags, tagsByUsage, locationsByUsage, activeTags, setActiveTags, toggleActiveTag, clearActiveTags, eventsLoading, currentDate, viewMode, toggleCalendar, createCalendar, createSharedCalendar, updateCalendarEvents, getSeriesEvents, renameCalendar, recolorCalendar, deleteCalendar, reorderCalendars, refreshEvents, forceFullRefresh, deleteEvent, deleteSeries, renameTag, deleteTag, renameLocation, deleteLocation, moveEvent, removeMember, convertToShared, leaveSharedCalendarAndCleanup, addEventOptimistic, eventTombstones, applySnapshot, lastRemoteSha, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, undoStack, redoStack, undo, redo, pushUndo]);
 
   return (
     <CalendarContext.Provider

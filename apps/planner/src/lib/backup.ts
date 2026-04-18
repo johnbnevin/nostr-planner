@@ -589,19 +589,31 @@ export async function clearSnapshotPointer(
 export function buildSnapshot(opts: {
   calendars: CalendarCollection[];
   events: CalendarEvent[];
+  /** Deleted-event tombstones to include in the snapshot so cross-device
+   *  merges preserve the deletion rather than resurrecting the event from
+   *  another device's older state. */
+  eventTombstones?: CalendarEvent[];
   habits: DailyHabit[];
+  habitTombstones?: DailyHabit[];
   completions: Record<string, string[]>;
   lists: UserList[];
+  listTombstones?: UserList[];
   settings: PersistedSettings;
 }): Snapshot {
   return {
     version: 1,
     savedAt: new Date().toISOString(),
     calendars: opts.calendars,
-    events: opts.events,
-    habits: opts.habits,
+    events: opts.eventTombstones && opts.eventTombstones.length > 0
+      ? [...opts.events, ...opts.eventTombstones]
+      : opts.events,
+    habits: opts.habitTombstones && opts.habitTombstones.length > 0
+      ? [...opts.habits, ...opts.habitTombstones]
+      : opts.habits,
     completions: opts.completions,
-    lists: opts.lists,
+    lists: opts.listTombstones && opts.listTombstones.length > 0
+      ? [...opts.lists, ...opts.listTombstones]
+      : opts.lists,
     settings: opts.settings,
   };
 }

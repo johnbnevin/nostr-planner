@@ -26,8 +26,8 @@ interface BackupPanelProps { onClose: () => void; }
 
 export function BackupPanel({ onClose }: BackupPanelProps) {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
-  const { events, calendars, applySnapshot: applyCalendarSnapshot } = useCalendar();
-  const { habits, completions, lists, applySnapshot: applyTasksSnapshot } = useTasks();
+  const { events, calendars, applySnapshot: applyCalendarSnapshot, eventTombstones } = useCalendar();
+  const { habits, completions, lists, applySnapshot: applyTasksSnapshot, habitTombstones, listTombstones } = useTasks();
   const { getSettings, restoreSettings } = useSettings();
 
   const [status, setStatus] = useState<string>("");
@@ -43,7 +43,9 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
     setStatus("Encrypting and uploading snapshot…");
     try {
       const snap = buildSnapshot({
-        calendars, events, habits, completions, lists,
+        calendars, events, eventTombstones,
+        habits, habitTombstones,
+        completions, lists, listTombstones,
         settings: getSettings(),
       });
       const ptr = await saveSnapshot(pubkey, snap, signEvent, publishEvent, signer.nip44);
@@ -103,7 +105,9 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
     setStatus("Encrypting and exporting…");
     try {
       const snap = buildSnapshot({
-        calendars, events, habits, completions, lists,
+        calendars, events, eventTombstones,
+        habits, habitTombstones,
+        completions, lists, listTombstones,
         settings: getSettings(),
       });
       // Reuse the snapshot encryption path by running through saveSnapshot's
