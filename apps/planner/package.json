@@ -9,7 +9,7 @@
     "build": "tsc -b && vite build",
     "build:web": "tsc -b && vite build",
     "preview": "vite preview",
-    "deploy": "npm run build && nsite-cli deploy ./dist",
+    "deploy": "npm run build && nsite-cli deploy ../../dist",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
