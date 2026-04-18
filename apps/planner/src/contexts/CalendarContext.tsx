@@ -489,7 +489,13 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
         // may exist but we couldn't read them (e.g. remote signer timeout).
         setNeedsCalendarSetup(true);
       }
-      setDecryptionErrors(decryptResult.decryptErrors);
+      // Only surface the "failed to decrypt" banner when NO event decrypted.
+      // A working signer that can decrypt some events but hits one permanently
+      // corrupt event (seen on nos2x for specific NIP-44 payloads that Amber
+      // handles fine) would otherwise trip the banner forever.
+      setDecryptionErrors(
+        decryptResult.decryptSuccesses > 0 ? 0 : decryptResult.decryptErrors,
+      );
       setEvents(decryptResult.events);
       setEventsLoading(false);
 
