@@ -7,7 +7,6 @@ import {
   Plus,
   LogOut,
   RefreshCw,
-  Archive,
   Settings,
   CalendarCheck,
   CalendarDays,
@@ -19,7 +18,6 @@ import {
   Layers,
   Undo2,
   Redo2,
-  Share2,
   RotateCw,
 } from "lucide-react";
 import { format, addMonths, subMonths } from "date-fns";
@@ -45,9 +43,7 @@ interface HeaderProps {
   onLogout: () => void;
   onNewEvent: () => void;
   canAddEvent: boolean;
-  onBackup: () => void;
   onSettings: () => void;
-  onShareView: () => void;
   showDaily: boolean;
   showLists: boolean;
   onToggleDaily: () => void;
@@ -62,8 +58,9 @@ interface HeaderProps {
  *
  * **Desktop (sm+):** Single row with app title, date navigation (back/forward/
  * today), view-mode selector (month/week/day), panel toggles (daily habits,
- * to-do lists), action buttons (new event, refresh, backup, auto-backup,
- * settings), and user profile/logout.
+ * to-do lists), action buttons (new event, refresh, auto-backup, settings),
+ * and user profile/logout. Backup/restore and share live inside the settings
+ * modal on every platform.
  *
  * **Mobile (<sm):** Three compact rows — (1) app title + global actions,
  * (2) date navigation + new-event button, (3) tab bar for switching views.
@@ -86,9 +83,7 @@ export function Header({
   onLogout,
   onNewEvent,
   canAddEvent,
-  onBackup,
   onSettings,
-  onShareView,
   showDaily,
   showLists,
   onToggleDaily,
@@ -307,14 +302,6 @@ export function Header({
             </button>
 
             <button
-              onClick={onBackup}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
-              title="Backup / Restore"
-            >
-              <Archive className="w-4 h-4 text-gray-500" />
-            </button>
-
-            <button
               onClick={() => {
                 const next = !autoBackup;
                 setAutoBackup(next);
@@ -352,14 +339,6 @@ export function Header({
                   {saveCountdown}
                 </span>
               )}
-            </button>
-
-            <button
-              onClick={onShareView}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
-              title="Share this view / add to home screen"
-            >
-              <Share2 className="w-4 h-4 text-gray-500" />
             </button>
 
             <button
@@ -446,13 +425,6 @@ export function Header({
               />
             </button>
             <button
-              onClick={onBackup}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
-              title="Backup"
-            >
-              <Archive className="w-4 h-4 text-gray-500" />
-            </button>
-            <button
               onClick={() => {
                 const next = !autoBackup;
                 setAutoBackup(next);
@@ -490,13 +462,6 @@ export function Header({
                   {saveCountdown}
                 </span>
               )}
-            </button>
-            <button
-              onClick={onShareView}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
-              title="Share this view"
-            >
-              <Share2 className="w-4 h-4 text-gray-500" />
             </button>
             <button
               onClick={onSettings}
