@@ -59,6 +59,13 @@ export default defineConfig({
   },
   // Optimize Tauri bundle size
   build: {
+    // Web builds land at the monorepo-root `dist/` so the user can point
+    // whatever uploader they use at one obvious path. Tauri keeps its own
+    // `apps/planner/dist/` because tauri.conf.json's frontendDist is
+    // "../dist" (relative to src-tauri) and changing that cascades into
+    // the bundler/icon paths.
+    outDir: inTauri ? "dist" : "../../dist",
+    emptyOutDir: true,
     target: inTauri ? ["es2021", "chrome105", "safari15"] : "modules",
     minify: !process.env.TAURI_ENV_DEBUG,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
