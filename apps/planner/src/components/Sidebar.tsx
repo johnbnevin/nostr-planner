@@ -68,8 +68,9 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
     recolorCalendar,
     eventsLoading,
     tagsByUsage,
-    activeTag,
-    setActiveTag,
+    activeTags,
+    toggleActiveTag,
+    clearActiveTags,
   } = useCalendar();
   const { isSharedCalendar } = useSharing();
 
@@ -106,8 +107,9 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
               isSharedCalendar={isSharedCalendar}
               eventsLoading={eventsLoading}
               tagsByUsage={tagsByUsage}
-              activeTag={activeTag}
-              setActiveTag={setActiveTag}
+              activeTags={activeTags}
+              toggleActiveTag={toggleActiveTag}
+              clearActiveTags={clearActiveTags}
             />
           </div>
         </div>
@@ -136,8 +138,9 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
         isSharedCalendar={isSharedCalendar}
         eventsLoading={eventsLoading}
         tagsByUsage={tagsByUsage}
-        activeTag={activeTag}
-        setActiveTag={setActiveTag}
+        activeTags={activeTags}
+        toggleActiveTag={toggleActiveTag}
+        clearActiveTags={clearActiveTags}
       />
     </aside>
   );
@@ -163,8 +166,9 @@ interface SidebarContentProps {
   isSharedCalendar: ReturnType<typeof useSharing>["isSharedCalendar"];
   eventsLoading: ReturnType<typeof useCalendar>["eventsLoading"];
   tagsByUsage: ReturnType<typeof useCalendar>["tagsByUsage"];
-  activeTag: ReturnType<typeof useCalendar>["activeTag"];
-  setActiveTag: ReturnType<typeof useCalendar>["setActiveTag"];
+  activeTags: ReturnType<typeof useCalendar>["activeTags"];
+  toggleActiveTag: ReturnType<typeof useCalendar>["toggleActiveTag"];
+  clearActiveTags: ReturnType<typeof useCalendar>["clearActiveTags"];
 }
 
 function SidebarContent({
@@ -185,8 +189,9 @@ function SidebarContent({
   isSharedCalendar,
   eventsLoading,
   tagsByUsage,
-  activeTag,
-  setActiveTag,
+  activeTags,
+  toggleActiveTag,
+  clearActiveTags,
 }: SidebarContentProps) {
   const [hashtagsExpanded, setHashtagsExpanded] = useState(true);
   const [showTagManager, setShowTagManager] = useState(false);
@@ -556,9 +561,10 @@ function SidebarContent({
         )}
       </div>
 
-      {/* Hashtags — filter events by a single hashtag. Click a tag to filter,
-          click again (or "All") to clear. The gear icon opens a global
-          rename/delete manager so users can tidy up stale tags in bulk. */}
+      {/* Hashtags — filter events by one or more hashtags (OR logic: event
+          appears if it carries any of the active tags). Click a tag to toggle
+          it in/out of the filter; "All" clears the filter entirely. The gear
+          icon opens a global rename/delete manager. */}
       {tagsByUsage.length > 0 && (
         <div className="mb-6">
           <div className="flex items-center justify-between mb-2">
@@ -573,6 +579,11 @@ function SidebarContent({
               )}
               <Tag className="w-3.5 h-3.5" />
               Hashtags
+              {activeTags.size > 0 && (
+                <span className="ml-1 text-[10px] font-medium text-primary-600 bg-primary-50 px-1.5 py-0.5 rounded-full">
+                  {activeTags.size} on
+                </span>
+              )}
             </button>
             <button
               onClick={() => setShowTagManager(true)}
@@ -585,28 +596,31 @@ function SidebarContent({
           {hashtagsExpanded && (
             <div className="flex flex-wrap gap-1.5 pl-1">
               <button
-                onClick={() => setActiveTag(null)}
+                onClick={clearActiveTags}
                 className={`px-2 py-0.5 rounded-full text-xs border transition-colors ${
-                  activeTag === null
+                  activeTags.size === 0
                     ? "bg-primary-600 border-primary-600 text-white"
                     : "border-gray-300 text-gray-600 hover:bg-gray-50"
                 }`}
               >
                 All
               </button>
-              {tagsByUsage.map((tag) => (
-                <button
-                  key={tag}
-                  onClick={() => setActiveTag(activeTag === tag ? null : tag)}
-                  className={`px-2 py-0.5 rounded-full text-xs border transition-colors ${
-                    activeTag === tag
-                      ? "bg-primary-600 border-primary-600 text-white"
-                      : "border-gray-200 text-gray-600 hover:bg-primary-50 hover:border-primary-300 hover:text-primary-700"
-                  }`}
-                >
-                  #{tag}
-                </button>
-              ))}
+              {tagsByUsage.map((tag) => {
+                const on = activeTags.has(tag);
+                return (
+                  <button
+                    key={tag}
+                    onClick={() => toggleActiveTag(tag)}
+                    className={`px-2 py-0.5 rounded-full text-xs border transition-colors ${
+                      on
+                        ? "bg-primary-600 border-primary-600 text-white"
+                        : "border-gray-200 text-gray-600 hover:bg-primary-50 hover:border-primary-300 hover:text-primary-700"
+                    }`}
+                  >
+                    #{tag}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>

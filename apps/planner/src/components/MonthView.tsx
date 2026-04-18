@@ -305,38 +305,41 @@ export function MonthView({ onEventClick, onDateClick, onDayDetail, onEventCopy,
               );
             })}
 
-            {/* Day number headers. The wrapper is pointer-events-none so
-                clicks fall through to the cell bg (new-event) below, but the
-                number button inside re-enables pointer-events so tapping it
-                opens the day-detail modal. */}
+            {/* Day number headers. The entire top bar of each day column
+                is now a click target for the day-detail modal — previously
+                only the small date circle triggered it, which was a fiddly
+                tap target on mobile. pointer-events-auto on the button
+                re-enables clicks that would otherwise fall through to the
+                cell bg underneath (which handles new-event creation). */}
             {week.days.map((day, col) => {
               const key = format(day, "yyyy-MM-dd");
               const inMonth = isSameMonth(day, currentDate);
               const today = isToday(day);
               return (
-                <div
+                <button
                   key={`num-${key}`}
-                  className="flex items-center justify-center py-1 pointer-events-none"
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (onDayDetail) onDayDetail(day);
+                  }}
+                  className="pointer-events-auto flex items-center justify-center py-1 hover:bg-primary-50 transition-colors cursor-pointer"
                   style={{ gridColumn: col + 1, gridRow: 1 }}
+                  title="Open day details"
+                  aria-label={`Open details for ${format(day, "EEEE MMMM d")}`}
                 >
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (onDayDetail) onDayDetail(day);
-                    }}
-                    className={`pointer-events-auto text-sm w-7 h-7 flex items-center justify-center rounded-full cursor-pointer transition-transform hover:scale-110 ${
+                  <span
+                    className={`text-sm w-7 h-7 flex items-center justify-center rounded-full ${
                       today
                         ? "bg-primary-600 text-white font-bold ring-2 ring-primary-200"
                         : inMonth
-                          ? "text-gray-900 hover:bg-primary-50"
-                          : "text-gray-400 hover:bg-gray-100"
+                          ? "text-gray-900"
+                          : "text-gray-400"
                     }`}
-                    title="Open day details"
                   >
                     {format(day, "d")}
-                  </button>
-                </div>
+                  </span>
+                </button>
               );
             })}
 

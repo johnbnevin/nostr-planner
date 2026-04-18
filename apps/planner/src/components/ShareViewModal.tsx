@@ -17,7 +17,7 @@ interface ShareViewModalProps {
  */
 export function ShareViewModal({ onClose }: ShareViewModalProps) {
   const build = useBuildShareUrl();
-  const { calendars, activeCalendarIds, activeTag, viewMode } = useCalendar();
+  const { calendars, activeCalendarIds, activeTags, viewMode } = useCalendar();
   const { showDaily, showLists } = useSettings();
 
   const url = useMemo(() => build(), [build]);
@@ -87,9 +87,10 @@ export function ShareViewModal({ onClose }: ShareViewModalProps) {
                   ? "all"
                   : activeCalNames.join(", ")}
             </p>
-            {activeTag && (
+            {activeTags.size > 0 && (
               <p className="text-sm text-gray-800">
-                <span className="text-gray-500">Tag filter:</span> #{activeTag}
+                <span className="text-gray-500">Tag filter:</span>{" "}
+                {[...activeTags].map((t) => `#${t}`).join(", ")}
               </p>
             )}
             <p className="text-sm text-gray-800">
