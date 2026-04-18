@@ -22,11 +22,11 @@ import { useSettings } from "../contexts/SettingsContext";
  */
 
 export interface ViewShareState {
-  view?: "month" | "week" | "day";
+  view?: "upcoming" | "month";
   cals?: string[];
   tag?: string | null;
   panels?: { daily: boolean; lists: boolean };
-  focus?: "daily" | "lists" | "calendar";
+  focus?: "daily" | "lists" | "calendar" | "upcoming";
   date?: string;
 }
 
@@ -37,7 +37,9 @@ export function parseViewHash(hash: string): ViewShareState {
   const params = new URLSearchParams(hash.slice(1));
   const out: ViewShareState = {};
   const view = params.get("view");
-  if (view === "month" || view === "week" || view === "day") out.view = view;
+  // Migrate pre-v1.12 values (week/day → month).
+  if (view === "upcoming" || view === "month") out.view = view;
+  else if (view === "week" || view === "day") out.view = "month";
   const cals = params.get("cals");
   if (cals !== null) out.cals = cals ? cals.split(",").filter(Boolean) : [];
   const tag = params.get("tag");
@@ -48,7 +50,7 @@ export function parseViewHash(hash: string): ViewShareState {
     out.panels = { daily: set.has("daily"), lists: set.has("lists") };
   }
   const focus = params.get("focus");
-  if (focus === "daily" || focus === "lists" || focus === "calendar") out.focus = focus;
+  if (focus === "daily" || focus === "lists" || focus === "calendar" || focus === "upcoming") out.focus = focus;
   const date = params.get("date");
   if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) out.date = date;
   return out;

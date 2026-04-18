@@ -10,12 +10,12 @@ import { Header } from "./Header";
 import type { MobileTab } from "./Header";
 import { Sidebar } from "./Sidebar";
 import { MonthView } from "./MonthView";
-import { WeekView } from "./WeekView";
-import { DayView } from "./DayView";
+import { UpcomingView } from "./UpcomingView";
 import { DailyHabitsView } from "./DailyView";
 import { ListsView } from "./ListView";
 import { EventModal } from "./EventModal";
 import { EventDetailModal } from "./EventDetailModal";
+import { DayDetailModal } from "./DayDetailModal";
 import { BackupPanel } from "./BackupPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import { ImportReviewModal } from "./ImportReviewModal";
@@ -183,16 +183,20 @@ export function CalendarApp() {
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(
     null
   );
+  const [dayDetailDate, setDayDetailDate] = useState<Date | null>(null);
   const [prefillDate, setPrefillDate] = useState<Date | null>(null);
-  // Seed mobileTab from the URL-hash "focus" param if present — the manifest
-  // shortcuts (Today / Daily habits / To-do lists) rely on this to open at
-  // the right view on mobile.
+  // Seed mobileTab from the URL-hash "focus" / "view" param if present —
+  // the manifest shortcuts (Upcoming / Calendar / Daily / Lists) rely on
+  // this to open at the right view on mobile.
   const [mobileTab, setMobileTab] = useState<MobileTab>(() => {
     const parsed = parseViewHash(window.location.hash);
     if (parsed.focus === "daily") return "daily";
     if (parsed.focus === "lists") return "todos";
-    if (parsed.view) return parsed.view;
-    return viewMode;
+    if (parsed.focus === "upcoming") return "upcoming";
+    if (parsed.focus === "calendar") return "calendar";
+    if (parsed.view === "upcoming") return "upcoming";
+    if (parsed.view === "month") return "calendar";
+    return viewMode === "upcoming" ? "upcoming" : "calendar";
   });
   const [publishError, setPublishError] = useState<string | null>(null);
 
@@ -236,15 +240,14 @@ export function CalendarApp() {
   useEffect(() => {
     setMobileTab((prev) => {
       if (prev === "daily" || prev === "todos") return prev;
-      return viewMode;
+      return viewMode === "upcoming" ? "upcoming" : "calendar";
     });
   }, [viewMode]);
 
   const handleMobileTabChange = (tab: MobileTab) => {
     setMobileTab(tab);
-    if (tab === "month" || tab === "week" || tab === "day") {
-      setViewMode(tab);
-    }
+    if (tab === "upcoming") setViewMode("upcoming");
+    else if (tab === "calendar") setViewMode("month");
   };
 
   const [extendSeries, setExtendSeries] = useState<{
@@ -526,30 +529,23 @@ export function CalendarApp() {
             Loading events…
           </div>
         )}
-        {mobileTab === "month" && (
+        {mobileTab === "upcoming" && (
+          <main className="p-3">
+            <UpcomingView
+              onEventClick={handleEventClick}
+              onNewEvent={() => handleNewEvent()}
+            />
+          </main>
+        )}
+        {mobileTab === "calendar" && (
           <main className="p-3">
             <MonthView
               onEventClick={handleEventClick}
               onDateClick={handleNewEvent}
+              onDayDetail={(d) => setDayDetailDate(d)}
               onEventCopy={setCopiedEvent}
               onDayPaste={(d) => copiedEvent && handleDuplicateEvent(copiedEvent, d)}
               hasCopied={!!copiedEvent}
-            />
-          </main>
-        )}
-        {mobileTab === "week" && (
-          <main className="p-3">
-            <WeekView
-              onEventClick={handleEventClick}
-              onDateClick={handleNewEvent}
-            />
-          </main>
-        )}
-        {mobileTab === "day" && (
-          <main className="p-3">
-            <DayView
-              onEventClick={handleEventClick}
-              onTimeClick={handleNewEvent}
             />
           </main>
         )}
@@ -589,22 +585,20 @@ export function CalendarApp() {
                 Loading events…
               </div>
             )}
+            {viewMode === "upcoming" && (
+              <UpcomingView
+                onEventClick={handleEventClick}
+                onNewEvent={() => handleNewEvent()}
+              />
+            )}
             {viewMode === "month" && (
               <MonthView
                 onEventClick={handleEventClick}
                 onDateClick={handleNewEvent}
-              />
-            )}
-            {viewMode === "week" && (
-              <WeekView
-                onEventClick={handleEventClick}
-                onDateClick={handleNewEvent}
-              />
-            )}
-            {viewMode === "day" && (
-              <DayView
-                onEventClick={handleEventClick}
-                onTimeClick={handleNewEvent}
+                onDayDetail={(d) => setDayDetailDate(d)}
+                onEventCopy={setCopiedEvent}
+                onDayPaste={(d) => copiedEvent && handleDuplicateEvent(copiedEvent, d)}
+                hasCopied={!!copiedEvent}
               />
             )}
           </main>
@@ -645,6 +639,21 @@ export function CalendarApp() {
           onEdit={handleEditEvent}
           onExtendSeries={handleExtendSeries}
           onDuplicate={handleDuplicateEvent}
+        />
+      )}
+
+      {dayDetailDate && (
+        <DayDetailModal
+          date={dayDetailDate}
+          onClose={() => setDayDetailDate(null)}
+          onEventClick={(e) => {
+            setDayDetailDate(null);
+            setSelectedEvent(e);
+          }}
+          onNewEvent={(d) => {
+            setDayDetailDate(null);
+            handleNewEvent(d);
+          }}
         />
       )}
 

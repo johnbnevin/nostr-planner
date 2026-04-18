@@ -21,19 +21,12 @@ import {
   Redo2,
   Share2,
 } from "lucide-react";
-import {
-  format,
-  addMonths,
-  subMonths,
-  addWeeks,
-  subWeeks,
-  addDays,
-  subDays,
-} from "date-fns";
+import { format, addMonths, subMonths } from "date-fns";
 
-/** All possible bottom-tab identifiers on mobile. Calendar views (month/week/day)
- *  map directly to the CalendarContext viewMode; daily and todos are app-specific panels. */
-export type MobileTab = "month" | "week" | "day" | "daily" | "todos";
+/** All possible bottom-tab identifiers on mobile. "upcoming" and "calendar"
+ *  map to the CalendarContext viewMode ("upcoming" and "month"); "daily" /
+ *  "todos" are app-specific panels with no calendar-view equivalent. */
+export type MobileTab = "upcoming" | "calendar" | "daily" | "todos";
 
 /** @see {@link Header} */
 interface HeaderProps {
@@ -114,55 +107,40 @@ export function Header({
 
   const npubShort = `${pubkey.slice(0, 8)}...${pubkey.slice(-4)}`;
 
-  // Navigation step size adapts to the current view: month/week/day
+  // Navigation only makes sense in the month grid. The upcoming list is
+  // always anchored to "now" — nav arrows are hidden in that mode.
   const navigateBack = () => {
     if (viewMode === "month") setCurrentDate(subMonths(currentDate, 1));
-    else if (viewMode === "week") setCurrentDate(subWeeks(currentDate, 1));
-    else setCurrentDate(subDays(currentDate, 1));
   };
-
   const navigateForward = () => {
     if (viewMode === "month") setCurrentDate(addMonths(currentDate, 1));
-    else if (viewMode === "week") setCurrentDate(addWeeks(currentDate, 1));
-    else setCurrentDate(addDays(currentDate, 1));
   };
-
   const mobileNavigateBack = () => {
-    if (mobileTab === "month") setCurrentDate(subMonths(currentDate, 1));
-    else if (mobileTab === "week") setCurrentDate(subWeeks(currentDate, 1));
-    else setCurrentDate(subDays(currentDate, 1));
+    if (mobileTab === "calendar") setCurrentDate(subMonths(currentDate, 1));
   };
-
   const mobileNavigateForward = () => {
-    if (mobileTab === "month") setCurrentDate(addMonths(currentDate, 1));
-    else if (mobileTab === "week") setCurrentDate(addWeeks(currentDate, 1));
-    else setCurrentDate(addDays(currentDate, 1));
+    if (mobileTab === "calendar") setCurrentDate(addMonths(currentDate, 1));
   };
 
   const goToday = () => setCurrentDate(new Date());
 
   const titleText = () => {
-    if (viewMode === "month") return format(currentDate, "MMMM yyyy");
-    if (viewMode === "week") {
-      return `Week of ${format(currentDate, "MMM d, yyyy")}`;
-    }
-    return format(currentDate, "EEEE, MMMM d, yyyy");
+    if (viewMode === "upcoming") return "Upcoming";
+    return format(currentDate, "MMMM yyyy");
   };
 
   const mobileTitleText = () => {
     if (mobileTab === "todos") return "To Do Lists";
     if (mobileTab === "daily") return format(currentDate, "EEE, MMM d");
-    if (mobileTab === "month") return format(currentDate, "MMM yyyy");
-    if (mobileTab === "week") return `Wk ${format(currentDate, "MMM d")}`;
-    return format(currentDate, "EEE, MMM d");
+    if (mobileTab === "upcoming") return "Upcoming";
+    return format(currentDate, "MMM yyyy");
   };
 
   const mobileTabs: { id: MobileTab; label: string }[] = [
-    { id: "month", label: "Month" },
-    { id: "week", label: "Week" },
-    { id: "day", label: "Day" },
+    { id: "upcoming", label: "Upcoming" },
+    { id: "calendar", label: "Calendar" },
     { id: "daily", label: "Daily" },
-    { id: "todos", label: "To Do Lists" },
+    { id: "todos", label: "Lists" },
   ];
 
   return (
@@ -189,31 +167,38 @@ export function Header({
             </h1>
           </div>
 
-          {/* Right: navigation + date label + view mode + actions */}
+          {/* Right: navigation + date label + view mode + actions. The
+              date-nav chunk only shows in the calendar (month) view — the
+              upcoming list is chronological from "now" and has no anchor
+              date to step through. */}
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={goToday}
-              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors shrink-0"
-            >
-              Today
-            </button>
+            {viewMode === "month" && (
+              <>
+                <button
+                  onClick={goToday}
+                  className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors shrink-0"
+                >
+                  Today
+                </button>
 
-            <div className="flex items-center gap-0.5 shrink-0">
-              <button
-                onClick={navigateBack}
-                className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
-                aria-label="Navigate back"
-              >
-                <ChevronLeft className="w-5 h-5" />
-              </button>
-              <button
-                onClick={navigateForward}
-                className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
-                aria-label="Navigate forward"
-              >
-                <ChevronRight className="w-5 h-5" />
-              </button>
-            </div>
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <button
+                    onClick={navigateBack}
+                    className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
+                    aria-label="Navigate back"
+                  >
+                    <ChevronLeft className="w-5 h-5" />
+                  </button>
+                  <button
+                    onClick={navigateForward}
+                    className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
+                    aria-label="Navigate forward"
+                  >
+                    <ChevronRight className="w-5 h-5" />
+                  </button>
+                </div>
+              </>
+            )}
 
             <h2 className="text-lg font-semibold text-gray-800 truncate mr-1">
               {titleText()}
@@ -221,17 +206,20 @@ export function Header({
 
             {/* View mode selector */}
             <div className="flex border border-gray-300 rounded-lg overflow-hidden">
-              {(["month", "week", "day"] as const).map((mode) => (
+              {([
+                { id: "upcoming", label: "Upcoming" },
+                { id: "month", label: "Calendar" },
+              ] as const).map(({ id, label }) => (
                 <button
-                  key={mode}
-                  onClick={() => setViewMode(mode)}
+                  key={id}
+                  onClick={() => setViewMode(id)}
                   className={`px-3 py-1.5 text-sm transition-colors ${
-                    viewMode === mode
+                    viewMode === id
                       ? "bg-primary-600 text-white"
                       : "hover:bg-gray-50"
                   }`}
                 >
-                  {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                  {label}
                 </button>
               ))}
             </div>
@@ -507,16 +495,20 @@ export function Header({
           </div>
         </div>
 
-        {/* Row 2: Submenu — date navigation + new event */}
+        {/* Row 2: Submenu — date navigation + new event. Only the calendar
+            tab needs Today + prev/next; upcoming/daily/todos don't have an
+            anchor date to navigate. */}
         <div className="flex items-center justify-between pb-1.5 lg:hidden">
           <div className="flex items-center gap-1">
-            <button
-              onClick={goToday}
-              className="px-2 py-1 text-xs border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              Today
-            </button>
-            {mobileTab !== "todos" && (
+            {mobileTab === "calendar" && (
+              <button
+                onClick={goToday}
+                className="px-2 py-1 text-xs border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Today
+              </button>
+            )}
+            {mobileTab === "calendar" && (
               <>
                 <button
                   onClick={mobileNavigateBack}

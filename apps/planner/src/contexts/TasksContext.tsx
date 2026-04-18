@@ -26,6 +26,7 @@ import {
 } from "react";
 import { useNostr } from "./NostrContext";
 import { useSettings } from "./SettingsContext";
+import { useCalendar } from "./CalendarContext";
 import { isNip44Available, encryptEvent, decryptEvent, isEncryptedEvent } from "../lib/crypto";
 import { generateDTag, KIND_APP_DATA, DTAG_DAILY, DTAG_LISTS, DTAG_LISTS_OLD } from "../lib/nostr";
 import { queryEvents } from "../lib/relay";
@@ -161,6 +162,7 @@ function pruneCompletions(completions: Record<string, string[]>): Record<string,
 export function TasksProvider({ children }: { children: ReactNode }) {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
   const { shouldEncrypt } = useSettings();
+  const { pushUndoEntry } = useCalendar();
   const [habits, setHabits] = useState<DailyHabit[]>([]);
   const [completions, setCompletions] = useState<Record<string, string[]>>({});
   const [lists, setLists] = useState<UserList[]>([]);
@@ -407,6 +409,31 @@ export function TasksProvider({ children }: { children: ReactNode }) {
 
   // ── Daily habit actions ──────────────────────────────────────────
 
+  // Raw setters that do not push undo entries — used for both the initial
+  // action and the undo/redo replay.
+  const addHabitRaw = useCallback(
+    (habit: DailyHabit) => {
+      if (habitsRef.current.some((h) => h.id === habit.id)) return;
+      setHabits([...habitsRef.current, habit]);
+      scheduleDailyPublish();
+    },
+    [scheduleDailyPublish]
+  );
+  const removeHabitRaw = useCallback(
+    (id: string) => {
+      setHabits(habitsRef.current.filter((h) => h.id !== id));
+      scheduleDailyPublish();
+    },
+    [scheduleDailyPublish]
+  );
+  const renameHabitRaw = useCallback(
+    (id: string, title: string) => {
+      setHabits(habitsRef.current.map((h) => (h.id === id ? { ...h, title } : h)));
+      scheduleDailyPublish();
+    },
+    [scheduleDailyPublish]
+  );
+
   const addHabit = useCallback(
     (title: string) => {
       const habit: DailyHabit = {
@@ -414,26 +441,55 @@ export function TasksProvider({ children }: { children: ReactNode }) {
         title,
         createdAt: Math.floor(Date.now() / 1000),
       };
-      const next = [...habitsRef.current, habit];
-      setHabits(next);
-      scheduleDailyPublish();
+      addHabitRaw(habit);
+      pushUndoEntry({
+        description: `Add habit "${title}"`,
+        undo: async () => removeHabitRaw(habit.id),
+        redo: async () => addHabitRaw(habit),
+      });
     },
-    [scheduleDailyPublish]
+    [addHabitRaw, removeHabitRaw, pushUndoEntry]
   );
 
   const removeHabit = useCallback(
     (id: string) => {
-      const next = habitsRef.current.filter((h) => h.id !== id);
-      setHabits(next);
-      scheduleDailyPublish();
+      const snapshot = habitsRef.current.find((h) => h.id === id);
+      if (!snapshot) return;
+      removeHabitRaw(id);
+      pushUndoEntry({
+        description: `Remove habit "${snapshot.title}"`,
+        undo: async () => addHabitRaw(snapshot),
+        redo: async () => removeHabitRaw(id),
+      });
     },
-    [scheduleDailyPublish]
+    [addHabitRaw, removeHabitRaw, pushUndoEntry]
   );
 
   const renameHabit = useCallback(
     (id: string, title: string) => {
-      const next = habitsRef.current.map((h) => (h.id === id ? { ...h, title } : h));
-      setHabits(next);
+      const snapshot = habitsRef.current.find((h) => h.id === id);
+      if (!snapshot || snapshot.title === title) return;
+      const priorTitle = snapshot.title;
+      renameHabitRaw(id, title);
+      pushUndoEntry({
+        description: `Rename habit "${priorTitle}" → "${title}"`,
+        undo: async () => renameHabitRaw(id, priorTitle),
+        redo: async () => renameHabitRaw(id, title),
+      });
+    },
+    [renameHabitRaw, pushUndoEntry]
+  );
+
+  const setHabitCompletionRaw = useCallback(
+    (habitId: string, date: string, done: boolean) => {
+      const curCompletions = completionsRef.current;
+      const dayCompletions = curCompletions[date] || [];
+      const has = dayCompletions.includes(habitId);
+      if (done === has) return;
+      const nextDay = done
+        ? [...dayCompletions, habitId]
+        : dayCompletions.filter((id) => id !== habitId);
+      setCompletions({ ...curCompletions, [date]: nextDay });
       scheduleDailyPublish();
     },
     [scheduleDailyPublish]
@@ -442,15 +498,16 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   const toggleHabitCompletion = useCallback(
     (habitId: string, date: string) => {
       const curCompletions = completionsRef.current;
-      const dayCompletions = curCompletions[date] || [];
-      const nextDay = dayCompletions.includes(habitId)
-        ? dayCompletions.filter((id) => id !== habitId)
-        : [...dayCompletions, habitId];
-      const next = { ...curCompletions, [date]: nextDay };
-      setCompletions(next);
-      scheduleDailyPublish();
+      const wasDone = (curCompletions[date] || []).includes(habitId);
+      const habitTitle = habitsRef.current.find((h) => h.id === habitId)?.title || "habit";
+      setHabitCompletionRaw(habitId, date, !wasDone);
+      pushUndoEntry({
+        description: wasDone ? `Uncomplete "${habitTitle}"` : `Complete "${habitTitle}"`,
+        undo: async () => setHabitCompletionRaw(habitId, date, wasDone),
+        redo: async () => setHabitCompletionRaw(habitId, date, !wasDone),
+      });
     },
-    [scheduleDailyPublish]
+    [setHabitCompletionRaw, pushUndoEntry]
   );
 
   const isHabitDone = useCallback(
@@ -560,8 +617,37 @@ export function TasksProvider({ children }: { children: ReactNode }) {
         items: [],
         createdAt: Math.floor(Date.now() / 1000),
       };
-      const next = [...listsRef.current, list];
-      setLists(next);
+      addListRaw(list);
+      pushUndoEntry({
+        description: `Add list "${name}"`,
+        undo: async () => removeListRaw(list.id),
+        redo: async () => addListRaw(list),
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Raw helpers defined below
+    [pushUndoEntry]
+  );
+
+  const addListRaw = useCallback(
+    (list: UserList) => {
+      if (listsRef.current.some((l) => l.id === list.id)) return;
+      setLists([...listsRef.current, list]);
+      scheduleListsPublish();
+    },
+    [scheduleListsPublish]
+  );
+
+  const removeListRaw = useCallback(
+    (id: string) => {
+      setLists(listsRef.current.filter((l) => l.id !== id));
+      scheduleListsPublish();
+    },
+    [scheduleListsPublish]
+  );
+
+  const renameListRaw = useCallback(
+    (id: string, name: string) => {
+      setLists(listsRef.current.map((l) => (l.id === id ? { ...l, name } : l)));
       scheduleListsPublish();
     },
     [scheduleListsPublish]
@@ -569,16 +655,51 @@ export function TasksProvider({ children }: { children: ReactNode }) {
 
   const removeList = useCallback(
     (id: string) => {
-      const next = listsRef.current.filter((l) => l.id !== id);
+      const snapshot = listsRef.current.find((l) => l.id === id);
+      if (!snapshot) return;
+      removeListRaw(id);
+      pushUndoEntry({
+        description: `Remove list "${snapshot.name}"`,
+        undo: async () => addListRaw(snapshot),
+        redo: async () => removeListRaw(id),
+      });
+    },
+    [addListRaw, removeListRaw, pushUndoEntry]
+  );
+
+  const renameList = useCallback(
+    (id: string, name: string) => {
+      const snapshot = listsRef.current.find((l) => l.id === id);
+      if (!snapshot || snapshot.name === name) return;
+      const priorName = snapshot.name;
+      renameListRaw(id, name);
+      pushUndoEntry({
+        description: `Rename list "${priorName}" → "${name}"`,
+        undo: async () => renameListRaw(id, priorName),
+        redo: async () => renameListRaw(id, name),
+      });
+    },
+    [renameListRaw, pushUndoEntry]
+  );
+
+  const addListItemRaw = useCallback(
+    (listId: string, item: ListItem) => {
+      const next = listsRef.current.map((l) =>
+        l.id === listId && !l.items.some((i) => i.id === item.id)
+          ? { ...l, items: [...l.items, item] }
+          : l
+      );
       setLists(next);
       scheduleListsPublish();
     },
     [scheduleListsPublish]
   );
 
-  const renameList = useCallback(
-    (id: string, name: string) => {
-      const next = listsRef.current.map((l) => (l.id === id ? { ...l, name } : l));
+  const removeListItemRaw = useCallback(
+    (listId: string, itemId: string) => {
+      const next = listsRef.current.map((l) =>
+        l.id === listId ? { ...l, items: l.items.filter((i) => i.id !== itemId) } : l
+      );
       setLists(next);
       scheduleListsPublish();
     },
@@ -593,19 +714,37 @@ export function TasksProvider({ children }: { children: ReactNode }) {
         done: false,
         createdAt: Math.floor(Date.now() / 1000),
       };
-      const next = listsRef.current.map((l) =>
-        l.id === listId ? { ...l, items: [...l.items, item] } : l
-      );
-      setLists(next);
-      scheduleListsPublish();
+      addListItemRaw(listId, item);
+      pushUndoEntry({
+        description: `Add "${title}"`,
+        undo: async () => removeListItemRaw(listId, item.id),
+        redo: async () => addListItemRaw(listId, item),
+      });
     },
-    [scheduleListsPublish]
+    [addListItemRaw, removeListItemRaw, pushUndoEntry]
   );
 
   const removeListItem = useCallback(
     (listId: string, itemId: string) => {
+      const list = listsRef.current.find((l) => l.id === listId);
+      const snapshot = list?.items.find((i) => i.id === itemId);
+      if (!snapshot) return;
+      removeListItemRaw(listId, itemId);
+      pushUndoEntry({
+        description: `Remove "${snapshot.title}"`,
+        undo: async () => addListItemRaw(listId, snapshot),
+        redo: async () => removeListItemRaw(listId, itemId),
+      });
+    },
+    [addListItemRaw, removeListItemRaw, pushUndoEntry]
+  );
+
+  const setListItemDoneRaw = useCallback(
+    (listId: string, itemId: string, done: boolean) => {
       const next = listsRef.current.map((l) =>
-        l.id === listId ? { ...l, items: l.items.filter((i) => i.id !== itemId) } : l
+        l.id === listId
+          ? { ...l, items: l.items.map((i) => (i.id === itemId ? { ...i, done } : i)) }
+          : l
       );
       setLists(next);
       scheduleListsPublish();
@@ -615,15 +754,19 @@ export function TasksProvider({ children }: { children: ReactNode }) {
 
   const toggleListItem = useCallback(
     (listId: string, itemId: string) => {
-      const next = listsRef.current.map((l) =>
-        l.id === listId
-          ? { ...l, items: l.items.map((i) => (i.id === itemId ? { ...i, done: !i.done } : i)) }
-          : l
-      );
-      setLists(next);
-      scheduleListsPublish();
+      const list = listsRef.current.find((l) => l.id === listId);
+      const item = list?.items.find((i) => i.id === itemId);
+      if (!item) return;
+      const wasDone = item.done;
+      const itemTitle = item.title || "item";
+      setListItemDoneRaw(listId, itemId, !wasDone);
+      pushUndoEntry({
+        description: wasDone ? `Uncheck "${itemTitle}"` : `Check "${itemTitle}"`,
+        undo: async () => setListItemDoneRaw(listId, itemId, wasDone),
+        redo: async () => setListItemDoneRaw(listId, itemId, !wasDone),
+      });
     },
-    [scheduleListsPublish]
+    [setListItemDoneRaw, pushUndoEntry]
   );
 
   const reorderListItems = useCallback(

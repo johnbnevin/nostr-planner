@@ -15,10 +15,17 @@
   ],
   "shortcuts": [
     {
-      "name": "Today",
-      "short_name": "Today",
-      "description": "Jump to today's schedule",
-      "url": "./#view=day",
+      "name": "Upcoming",
+      "short_name": "Upcoming",
+      "description": "Upcoming events list",
+      "url": "./#view=upcoming&focus=upcoming",
+      "icons": [{ "src": "calendar.svg", "sizes": "any", "type": "image/svg+xml" }]
+    },
+    {
+      "name": "Calendar",
+      "short_name": "Calendar",
+      "description": "Month calendar view",
+      "url": "./#view=month&focus=calendar",
       "icons": [{ "src": "calendar.svg", "sizes": "any", "type": "image/svg+xml" }]
     },
     {
