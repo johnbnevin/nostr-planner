@@ -27,7 +27,12 @@ import { lsSet } from "../lib/storage";
 
 const log = logger("auto-backup");
 
-const DEBOUNCE_MS = 15_000;
+// 3 s: short enough that cross-device propagation feels instant, long
+// enough to coalesce bursts of typing / tag-picking / checkbox toggles
+// into a single upload. Was 15 s back when the encrypt step was slow;
+// the current AES-GCM + NIP-44 path is ~100 ms on a phone so there's no
+// benefit to waiting longer.
+const DEBOUNCE_MS = 3_000;
 const RETRY_AFTER_FAILURE_MS = 30_000;
 const LAST_BACKUP_KEY = "nostr-planner-last-autobackup";
 
