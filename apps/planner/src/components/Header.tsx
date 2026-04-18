@@ -17,6 +17,9 @@ import {
   CloudAlert,
   Loader,
   Layers,
+  Undo2,
+  Redo2,
+  Share2,
 } from "lucide-react";
 import {
   format,
@@ -45,6 +48,7 @@ interface HeaderProps {
   canAddEvent: boolean;
   onBackup: () => void;
   onSettings: () => void;
+  onShareView: () => void;
   showDaily: boolean;
   showLists: boolean;
   onToggleDaily: () => void;
@@ -83,6 +87,7 @@ export function Header({
   canAddEvent,
   onBackup,
   onSettings,
+  onShareView,
   showDaily,
   showLists,
   onToggleDaily,
@@ -91,8 +96,20 @@ export function Header({
   onMobileTabChange,
   onCalendars,
 }: HeaderProps) {
-  const { currentDate, setCurrentDate, viewMode, setViewMode, refreshEvents, decryptionErrors } =
-    useCalendar();
+  const {
+    currentDate,
+    setCurrentDate,
+    viewMode,
+    setViewMode,
+    refreshEvents,
+    decryptionErrors,
+    undo,
+    redo,
+    undoDepth,
+    redoDepth,
+    undoPreview,
+    redoPreview,
+  } = useCalendar();
   const { autoBackup, setAutoBackup } = useSettings();
 
   const npubShort = `${pubkey.slice(0, 8)}...${pubkey.slice(-4)}`;
@@ -258,6 +275,23 @@ export function Header({
             </button>
 
             <button
+              onClick={() => void undo()}
+              disabled={undoDepth === 0}
+              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title={undoDepth > 0 ? `Undo: ${undoPreview} (Ctrl+Z)` : "Nothing to undo"}
+            >
+              <Undo2 className="w-4 h-4 text-gray-500" />
+            </button>
+            <button
+              onClick={() => void redo()}
+              disabled={redoDepth === 0}
+              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title={redoDepth > 0 ? `Redo: ${redoPreview} (Ctrl+Shift+Z)` : "Nothing to redo"}
+            >
+              <Redo2 className="w-4 h-4 text-gray-500" />
+            </button>
+
+            <button
               onClick={refreshEvents}
               className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
               title="Refresh"
@@ -314,6 +348,14 @@ export function Header({
             </button>
 
             <button
+              onClick={onShareView}
+              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
+              title="Share this view / add to home screen"
+            >
+              <Share2 className="w-4 h-4 text-gray-500" />
+            </button>
+
+            <button
               onClick={onSettings}
               className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
               title="Settings"
@@ -362,6 +404,22 @@ export function Header({
               title="Calendars"
             >
               <Layers className="w-4 h-4 text-gray-500" />
+            </button>
+            <button
+              onClick={() => void undo()}
+              disabled={undoDepth === 0}
+              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title={undoDepth > 0 ? `Undo: ${undoPreview}` : "Nothing to undo"}
+            >
+              <Undo2 className="w-4 h-4 text-gray-500" />
+            </button>
+            <button
+              onClick={() => void redo()}
+              disabled={redoDepth === 0}
+              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title={redoDepth > 0 ? `Redo: ${redoPreview}` : "Nothing to redo"}
+            >
+              <Redo2 className="w-4 h-4 text-gray-500" />
             </button>
             <button
               onClick={refreshEvents}
@@ -415,6 +473,13 @@ export function Header({
                   {saveCountdown}
                 </span>
               )}
+            </button>
+            <button
+              onClick={onShareView}
+              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
+              title="Share this view"
+            >
+              <Share2 className="w-4 h-4 text-gray-500" />
             </button>
             <button
               onClick={onSettings}

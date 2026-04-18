@@ -20,7 +20,7 @@ import { useNostr } from "../contexts/NostrContext";
 import { LocalSigner } from "../lib/localSigner";
 import { connectNostrSigner, connectBunkerUri } from "../lib/nip46Signer";
 import { DEFAULT_RELAYS } from "../lib/nostr";
-import { isTauri } from "../lib/platform";
+import { isTauri, isStandalonePWA } from "../lib/platform";
 import { queryEvents } from "../lib/relay";
 import { lsSet } from "../lib/storage";
 import { nip19 } from "nostr-tools";
@@ -172,6 +172,7 @@ type LoginView = "main" | "nsec" | "mnemonic" | "signer" | "unlock";
 export function LoginScreen() {
   const { loginWithExtension, loginWithSigner, signEvent, publishEvent } = useNostr();
   const inTauri = isTauri();
+  const inPWA = !inTauri && isStandalonePWA();
 
   // Signup flow state
   const [step, setStep] = useState<Step>("main");
@@ -434,6 +435,36 @@ export function LoginScreen() {
     }
   };
 
+  /* ── Amber deep-link login ────────────────────────────────────────
+   *  Amber (Android) registers for the nostrconnect:// scheme, so
+   *  opening such a URL launches Amber directly with the connection
+   *  request pre-filled. On desktop the browser will just ignore the
+   *  scheme and the user can fall back to the QR flow.
+   */
+  const loginWithAmber = useCallback(async () => {
+    connectAbortRef.current?.abort();
+    const controller = new AbortController();
+    connectAbortRef.current = controller;
+    setConnectError(null);
+    setConnectWaiting(true);
+    try {
+      const { signer } = await connectNostrSigner(controller.signal, (uri) => {
+        // Open the scheme — on Android, this pops Amber; on desktop it
+        // becomes a no-op and the user needs the QR flow instead.
+        window.location.href = uri;
+      });
+      if (!inTauri) lsSet("nostr-planner-login-type", "bunker");
+      connectAbortRef.current = null;
+      await loginWithSigner(signer);
+    } catch (e: unknown) {
+      if (controller.signal.aborted) return;
+      const msg = (e as Error).message || "Connection failed";
+      if (!msg.includes("abort")) setConnectError(msg);
+    } finally {
+      if (!controller.signal.aborted) setConnectWaiting(false);
+    }
+  }, [loginWithSigner, inTauri]);
+
   /* ── NIP-46 QR code login ──────────────────────────────────────── */
 
   const generateConnectQR = useCallback(async () => {
@@ -477,7 +508,12 @@ export function LoginScreen() {
     setBunkerError(null);
     try {
       const { signer } = await connectBunkerUri(trimmed, 120_000);
-      if (!inTauri) lsSet("nostr-planner-login-type", "bunker");
+      if (!inTauri) {
+        lsSet("nostr-planner-login-type", "bunker");
+        // Save the URL so the next page load can try to re-connect without
+        // making the user paste it again.
+        lsSet("nostr-planner-bunker-url", trimmed);
+      }
       await loginWithSigner(signer);
     } catch (e: unknown) {
       const errMsg = (e as Error).message || "Bunker login failed";
@@ -846,6 +882,20 @@ export function LoginScreen() {
           </div>
         )}
 
+        {/* Home-screen PWA tip — browser extensions aren't available in
+            installed-app mode, so users who logged in via NIP-07 in their
+            regular browser will see the login screen here. Point them at
+            methods that do work: Amber, bunker, nsec, or seed phrase. */}
+        {loginView === "main" && inPWA && (
+          <div className="p-3 bg-amber-50 rounded-xl border border-amber-200">
+            <p className="text-xs text-amber-900">
+              <span className="font-semibold">Installed app mode:</span>{" "}
+              browser extensions don't work here. Log in with Amber, a bunker/QR
+              signer, or your 12-word seed phrase instead.
+            </p>
+          </div>
+        )}
+
         {/* ── Main view: signup + login links ────────────────────── */}
         {loginView === "main" && (
           <>
@@ -885,6 +935,15 @@ export function LoginScreen() {
                   {extensionLoading ? "Connecting..." : "Log in with browser extension"}
                 </button>
               )}
+              <button
+                type="button"
+                onClick={loginWithAmber}
+                disabled={connectWaiting}
+                className="w-full flex items-center justify-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 py-2 disabled:opacity-50"
+              >
+                <ShieldCheck className="w-3 h-3" />
+                {connectWaiting ? "Connecting…" : "Log in with Amber"}
+              </button>
               <button
                 type="button"
                 onClick={() => { switchLoginView("signer"); generateConnectQR(); }}

@@ -95,8 +95,9 @@ export const DEFAULT_RELAYS = [
   "wss://relay.ditto.pub",
 ];
 
-/** Supported recurrence frequencies, matching iCal RRULE FREQ values. */
-export type RecurrenceFreq = "daily" | "weekly" | "monthly" | "yearly";
+/** Supported recurrence frequencies. `bi-weekly` is stored as iCal
+ *  `FREQ=WEEKLY;INTERVAL=2` for interop; all others map 1:1 to FREQ. */
+export type RecurrenceFreq = "daily" | "weekly" | "bi-weekly" | "monthly" | "yearly";
 
 /**
  * A simplified recurrence rule for calendar events.
@@ -115,6 +116,7 @@ export interface RecurrenceRule {
 const FREQ_TO_RRULE: Record<RecurrenceFreq, string> = {
   daily: "DAILY",
   weekly: "WEEKLY",
+  "bi-weekly": "WEEKLY",
   monthly: "MONTHLY",
   yearly: "YEARLY",
 };
@@ -129,12 +131,12 @@ const RRULE_TO_FREQ: Record<string, RecurrenceFreq> = {
 /**
  * Convert a {@link RecurrenceRule} to an iCal RRULE string for interop.
  *
- * The output format is `FREQ=<DAILY|WEEKLY|MONTHLY|YEARLY>;COUNT=<n>`,
- * which can be stored in the `rrule` tag of a NIP-52 event and parsed
- * by any iCal-aware client.
+ * Bi-weekly emits `FREQ=WEEKLY;INTERVAL=2`; all other frequencies map 1:1.
  */
 export function toRRule(rule: RecurrenceRule): string {
-  return `FREQ=${FREQ_TO_RRULE[rule.freq]};COUNT=${rule.count}`;
+  const freqStr = FREQ_TO_RRULE[rule.freq];
+  const interval = rule.freq === "bi-weekly" ? ";INTERVAL=2" : "";
+  return `FREQ=${freqStr}${interval};COUNT=${rule.count}`;
 }
 
 /**
@@ -153,8 +155,10 @@ export function fromRRule(rrule: string): RecurrenceRule | null {
     const [k, v] = part.split("=");
     if (k && v) parts[k.toUpperCase()] = v.toUpperCase();
   }
-  const freq = parts.FREQ ? RRULE_TO_FREQ[parts.FREQ] : undefined;
+  let freq = parts.FREQ ? RRULE_TO_FREQ[parts.FREQ] : undefined;
   if (!freq) return null;
+  // INTERVAL=2 on a weekly rule means bi-weekly.
+  if (freq === "weekly" && parts.INTERVAL === "2") freq = "bi-weekly";
   const MAX_RECURRENCE = 365;
 
   let count: number;
@@ -171,7 +175,7 @@ export function fromRRule(rrule: string): RecurrenceRule | null {
     if (!isNaN(untilDate.getTime())) {
       // Use a generous default: enough recurrences to cover ~2 years of the
       // given frequency, capped by MAX_RECURRENCE.
-      const freqDefaults: Record<RecurrenceFreq, number> = { daily: 365, weekly: 104, monthly: 24, yearly: 5 };
+      const freqDefaults: Record<RecurrenceFreq, number> = { daily: 365, weekly: 104, "bi-weekly": 52, monthly: 24, yearly: 5 };
       count = Math.min(freqDefaults[freq], MAX_RECURRENCE);
     } else {
       count = 52;
@@ -571,6 +575,7 @@ export function advanceDate(base: Date, freq: RecurrenceFreq, count: number): Da
   switch (freq) {
     case "daily": return addDays(base, count);
     case "weekly": return addWeeks(base, count);
+    case "bi-weekly": return addWeeks(base, count * 2);
     case "monthly": return addMonths(base, count);
     case "yearly": return addYears(base, count);
   }
@@ -619,14 +624,28 @@ export function expandRecurringEvent(event: CalendarEvent): CalendarEvent[] {
 }
 
 /** Default palette of calendar collection colors, cycled through when the
- *  user creates a new calendar without choosing a specific color. */
+ *  user creates a new calendar without choosing a specific color.
+ *  Ordered to put visually distinct colors adjacent so auto-assigned calendars
+ *  are easy to tell apart. */
 export const CALENDAR_COLORS = [
   "#4c6ef5", // blue
-  "#12b886", // teal
-  "#f59f00", // yellow
   "#fa5252", // red
-  "#be4bdb", // purple
+  "#12b886", // teal
   "#fd7e14", // orange
+  "#be4bdb", // purple
+  "#fab005", // amber
   "#20c997", // cyan
   "#e64980", // pink
+  "#7048e8", // violet
+  "#40c057", // green
+  "#845ef7", // lavender
+  "#e8590c", // deep orange
+  "#1098ad", // deep cyan
+  "#c2255c", // magenta
+  "#5c940d", // lime
+  "#5f3dc4", // indigo
+  "#0ca678", // mint
+  "#a61e4d", // crimson
+  "#495057", // slate
+  "#8c5a2b", // brown
 ];

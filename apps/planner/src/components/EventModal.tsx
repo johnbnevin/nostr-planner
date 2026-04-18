@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { X, Link as LinkIcon, Tag, Repeat, Calendar, ShieldAlert, Bell, BellOff } from "lucide-react";
+import { X, Link as LinkIcon, Tag, Repeat, Calendar, ShieldAlert, Bell, BellOff, ChevronDown, Settings2, MapPin } from "lucide-react";
+import { LocationManagerModal } from "./LocationManagerModal";
 import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useSharing } from "../contexts/SharingContext";
@@ -31,6 +32,8 @@ interface EventModalProps {
   event: CalendarEvent | null;
   /** Pre-fill the start date when creating from a date click on the calendar. */
   prefillDate: Date | null;
+  /** Pre-fill the form from an existing event BUT save as a new event (duplicate flow). */
+  prefillEvent?: CalendarEvent;
   /** When set, we're extending an existing recurrence series from this start date. */
   extendSeries?: {
     seriesId: string;
@@ -61,18 +64,20 @@ interface EventModalProps {
  * All saves use optimistic UI — events appear immediately in the calendar view
  * before relay confirmation, with a background sync afterward.
  */
-export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSettings }: EventModalProps) {
+export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onClose, onOpenSettings }: EventModalProps) {
   const { pubkey, signEvent, publishEvent } = useNostr();
-  const { refreshEvents, allTags, tagsByUsage, calendars, addEventOptimistic } = useCalendar();
+  const { refreshEvents, allTags, tagsByUsage, locationsByUsage, calendars, addEventOptimistic, getSeriesEvents } = useCalendar();
   const { getSharedKeyForCalendars } = useSharing();
   const { shouldEncrypt, canPublish, notification } = useSettings();
   const notificationsEnabled = notification.enabled;
 
   const isExtend = !!extendSeries;
+  const isDuplicate = !event && !!prefillEvent;
   const templateEvent = extendSeries?.templateEvent;
-  const sourceEvent = event || templateEvent;
+  // Priority: explicit edit target > extend template > duplicate prefill.
+  const sourceEvent = event || templateEvent || prefillEvent;
 
-  const now = extendSeries?.fromDate || prefillDate || new Date();
+  const now = prefillEvent?.start || extendSeries?.fromDate || prefillDate || new Date();
   const isEdit = !!event && !isExtend;
 
   const [title, setTitle] = useState(sourceEvent?.title || "");
@@ -116,6 +121,8 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
   const [tagInput, setTagInput] = useState("");
   const [showTagSuggestions, setShowTagSuggestions] = useState(false);
   const [showAllTags, setShowAllTags] = useState(false);
+  const [showLocationDropdown, setShowLocationDropdown] = useState(false);
+  const [showLocationManager, setShowLocationManager] = useState(false);
 
   // Recurrence
   const [recurring, setRecurring] = useState(
@@ -135,6 +142,12 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
 
   // Notification opt-in — defaults to true (follows global setting), user can opt out per event
   const [notify, setNotify] = useState<boolean>(sourceEvent?.notify !== false);
+
+  // When editing an event that's part of a series, user can opt to propagate
+  // shared fields (title/tags/location/etc.) to every sibling instance.
+  // Per-instance fields (start/end dates) are preserved on each sibling.
+  const isSeriesEdit = !!event?.seriesId && !isExtend;
+  const [applyToSeries, setApplyToSeries] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [saveProgress, setSaveProgress] = useState({ current: 0, total: 0 });
@@ -241,7 +254,78 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
         content = description;
       }
 
-      if (recurring) {
+      if (isSeriesEdit && applyToSeries) {
+        // Propagate shared fields (title, location, link, hashtags, calendars,
+        // notify, description) to every instance. Each instance keeps its own
+        // start/end dates and its own d-tag so sync/deletions still line up.
+        const siblings = getSeriesEvents(event!.seriesId!);
+        setSaveProgress({ current: 0, total: siblings.length });
+        const BATCH_SIZE = 5;
+        const updated: Array<{
+          unsigned: { kind: number; created_at: number; tags: string[][]; content: string };
+          optimistic: CalendarEvent;
+        }> = [];
+
+        for (const sib of siblings) {
+          let kind: number;
+          let tags: string[][];
+          if (sib.allDay) {
+            kind = KIND_DATE_EVENT;
+            tags = buildDateEventTags({
+              dTag: sib.dTag,
+              title: title.trim(),
+              startDate: format(sib.start, "yyyy-MM-dd"),
+              endDate: sib.end ? format(sib.end, "yyyy-MM-dd") : undefined,
+              location: location || undefined,
+              link: safeLink || undefined,
+              hashtags: hashtags.length > 0 ? hashtags : undefined,
+              calendarRefs: selectedCalendars.length > 0 ? selectedCalendars : undefined,
+              seriesId: sib.seriesId,
+              notify,
+            });
+          } else {
+            kind = KIND_TIME_EVENT;
+            const startUnix = Math.floor(sib.start.getTime() / 1000);
+            const endUnix = sib.end ? Math.floor(sib.end.getTime() / 1000) : undefined;
+            tags = buildTimeEventTags({
+              dTag: sib.dTag,
+              title: title.trim(),
+              startUnix,
+              endUnix,
+              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              location: location || undefined,
+              link: safeLink || undefined,
+              hashtags: hashtags.length > 0 ? hashtags : undefined,
+              calendarRefs: selectedCalendars.length > 0 ? selectedCalendars : undefined,
+              seriesId: sib.seriesId,
+              notify,
+            });
+          }
+
+          updated.push({
+            unsigned: { kind, created_at: Math.floor(Date.now() / 1000), tags, content: description },
+            optimistic: {
+              ...sib,
+              title: title.trim(),
+              content: description,
+              location: location || undefined,
+              link: safeLink || undefined,
+              hashtags,
+              calendarRefs: selectedCalendars,
+              notify,
+              tags,
+              createdAt: Math.floor(Date.now() / 1000),
+            },
+          });
+        }
+
+        for (const u of updated) addEventOptimistic(u.optimistic);
+        for (let b = 0; b < updated.length; b += BATCH_SIZE) {
+          const batch = updated.slice(b, b + BATCH_SIZE);
+          await Promise.all(batch.map((u) => publishOne(u.unsigned)));
+          setSaveProgress({ current: Math.min(b + BATCH_SIZE, updated.length), total: updated.length });
+        }
+      } else if (recurring) {
         // Use existing seriesId when extending, or create a new one
         const seriesId = extendSeries?.seriesId || generateDTag();
 
@@ -447,7 +531,7 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
       <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold">
-            {isExtend ? "Extend Series" : isEdit ? "Edit Event" : "New Event"}
+            {isExtend ? "Extend Series" : isEdit ? "Edit Event" : isDuplicate ? "Duplicate Event" : "New Event"}
           </h2>
           <button
             onClick={onClose}
@@ -468,16 +552,18 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
             autoFocus
           />
 
-          {/* All-day toggle */}
-          <label className="flex items-center gap-2 cursor-pointer">
+          {/* All-day toggle — intentionally not a <label>: the user wants
+              the toggle to fire ONLY when the checkbox itself is clicked,
+              not the surrounding "All day" text. */}
+          <div className="flex items-center gap-2">
             <input
               type="checkbox"
               checked={allDay}
               onChange={(e) => setAllDay(e.target.checked)}
-              className="w-4 h-4 text-primary-600 rounded"
+              className="w-4 h-4 text-primary-600 rounded cursor-pointer"
             />
             <span className="text-sm text-gray-700">All day</span>
-          </label>
+          </div>
 
           {/* Start date/time */}
           <div className="grid grid-cols-2 gap-3">
@@ -552,18 +638,79 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
             />
           </div>
 
-          {/* Location */}
+          {/* Location — combined text input + dropdown of known locations.
+              "Manage" link opens a modal to rename/delete locations globally.
+              Known locations are derived from every event's location field
+              so they persist automatically via the snapshot. */}
           <div>
-            <label className="block text-xs text-gray-500 mb-1">
-              Location (optional)
+            <label className="text-xs text-gray-500 mb-1 flex items-center gap-1">
+              <MapPin className="w-3 h-3" /> Location (optional)
+              {locationsByUsage.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowLocationManager(true)}
+                  className="ml-auto flex items-center gap-1 text-gray-400 hover:text-primary-600"
+                  title="Manage locations"
+                >
+                  <Settings2 className="w-3 h-3" />
+                  Manage
+                </button>
+              )}
             </label>
-            <input
-              type="text"
-              placeholder="Add location"
-              value={location}
-              onChange={(e) => setLocation(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
-            />
+            <div className="relative">
+              <input
+                type="text"
+                placeholder="Type or pick a saved location"
+                value={location}
+                onChange={(e) => {
+                  setLocation(e.target.value);
+                  setShowLocationDropdown(true);
+                }}
+                onFocus={() => setShowLocationDropdown(true)}
+                onBlur={() => setTimeout(() => setShowLocationDropdown(false), 150)}
+                className="w-full px-3 py-2 pr-9 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+              {locationsByUsage.length > 0 && (
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setShowLocationDropdown((v) => !v)}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 text-gray-400 hover:text-gray-600 rounded"
+                  title="Show saved locations"
+                >
+                  <ChevronDown className={`w-4 h-4 transition-transform ${showLocationDropdown ? "rotate-180" : ""}`} />
+                </button>
+              )}
+              {(() => {
+                if (!showLocationDropdown) return null;
+                const q = location.trim().toLowerCase();
+                const matches = locationsByUsage
+                  .filter((loc) => loc.toLowerCase() !== q)
+                  .filter((loc) => q === "" || loc.toLowerCase().includes(q));
+                if (matches.length === 0) return null;
+                return (
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-56 overflow-y-auto">
+                    {matches.map((loc) => (
+                      <button
+                        key={loc}
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          setLocation(loc);
+                          setShowLocationDropdown(false);
+                        }}
+                        className="w-full text-left px-3 py-1.5 text-sm hover:bg-primary-50 transition-colors truncate"
+                      >
+                        {loc}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
+            </div>
+            {showLocationManager && (
+              <LocationManagerModal onClose={() => setShowLocationManager(false)} />
+            )}
           </div>
 
           {/* Tags */}
@@ -571,19 +718,21 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
             <label className="text-xs text-gray-500 mb-1 flex items-center gap-1">
               <Tag className="w-3 h-3" /> Tags
             </label>
-            {/* Selected tags */}
+            {/* Selected tags — X button enlarged for an easy mobile tap target. */}
             <div className="flex flex-wrap gap-1.5 mb-2">
               {hashtags.map((tag) => (
                 <span
                   key={tag}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-primary-100 text-primary-800"
+                  className="inline-flex items-center gap-1 pl-2.5 pr-1 py-0.5 rounded-full text-xs bg-primary-100 text-primary-800"
                 >
                   #{tag}
                   <button
                     onClick={() => removeTag(tag)}
-                    className="hover:text-primary-600"
+                    className="ml-0.5 w-5 h-5 flex items-center justify-center rounded-full hover:bg-primary-200 active:bg-primary-300 text-primary-700"
+                    aria-label={`Remove tag ${tag}`}
+                    title="Remove tag"
                   >
-                    <X className="w-3 h-3" />
+                    <X className="w-3.5 h-3.5" />
                   </button>
                 </span>
               ))}
@@ -687,6 +836,7 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
                 >
                   <option value="daily">Daily</option>
                   <option value="weekly">Weekly</option>
+                  <option value="bi-weekly">Bi-weekly</option>
                   <option value="monthly">Monthly</option>
                   <option value="yearly">Yearly</option>
                 </select>
@@ -736,6 +886,11 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
                   </button>
                 ))}
               </div>
+              {selectedCalendars.length === 0 && (
+                <p className="mt-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                  Pick a calendar, or this event will land in your default calendar only.
+                </p>
+              )}
             </div>
           )}
 
@@ -791,6 +946,25 @@ export function EventModal({ event, prefillDate, extendSeries, onClose, onOpenSe
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
             />
           </div>
+
+          {/* Apply-to-series checkbox — only shown when editing an event that
+              belongs to a recurring series. Lives at the bottom so it's the
+              last choice the user makes before hitting Save. */}
+          {isSeriesEdit && (
+            <div className="flex items-center gap-2 p-2 bg-primary-50 border border-primary-200 rounded-lg">
+              <input
+                id="apply-to-series"
+                type="checkbox"
+                checked={applyToSeries}
+                onChange={(e) => setApplyToSeries(e.target.checked)}
+                className="w-4 h-4 text-primary-600 rounded cursor-pointer"
+              />
+              <label htmlFor="apply-to-series" className="text-sm text-primary-800 cursor-pointer flex-1">
+                Apply these changes to all {getSeriesEvents(event!.seriesId!).length} events in the series
+                <p className="text-xs text-primary-700/80">Dates stay the same on each instance; title, tags, location, calendars, etc. all update.</p>
+              </label>
+            </div>
+          )}
         </div>
 
         {/* Publishing gate: if the signer lacks NIP-44 and plaintext mode is off,

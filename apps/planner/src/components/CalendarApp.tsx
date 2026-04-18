@@ -20,6 +20,8 @@ import { BackupPanel } from "./BackupPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import { ImportReviewModal } from "./ImportReviewModal";
 import { SharingModal } from "./SharingModal";
+import { ShareViewModal } from "./ShareViewModal";
+import { useApplyInitialViewHash, parseViewHash } from "../hooks/useViewShare";
 import { useNotifications } from "../hooks/useNotifications";
 import { useAutoBackup } from "../hooks/useAutoBackup";
 import { useDigest } from "../hooks/useDigest";
@@ -47,13 +49,17 @@ import type { ParsedIcalEvent } from "../lib/ical";
  */
 export function CalendarApp() {
   const { pubkey, profile, logout, signer, relays } = useNostr();
-  const { viewMode, setViewMode, eventsLoading, calendars, events, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot, setLastRemoteSha } = useCalendar();
+  const { viewMode, setViewMode, eventsLoading, calendars, events, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot, setLastRemoteSha, undoDepth, redoDepth, undo, redo } = useCalendar();
   const { acceptInviteLink } = useSharing();
   const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, getSettings, restoreSettings } = useSettings();
   const { alerts, dismiss } = useNotifications();
   const { habits, completions, lists, applySnapshot: applyTasksSnapshot } = useTasks();
   const { phase: backupPhase, countdown: saveCountdown, lastError: backupError, backupNow } = useAutoBackup();
   useDigest();
+  // Apply URL-hash view state once calendars have loaded. Enables the
+  // "Add to Home Screen" widget-URL flow — open a pre-filtered view via
+  // a bookmarked link.
+  useApplyInitialViewHash();
 
   // ── Restore the Blossom snapshot on login ──────────────────────────
   // Single entry point for "login → restore" — applies calendar, tasks
@@ -117,14 +123,20 @@ export function CalendarApp() {
   const mobileScrollRef = useRef<HTMLDivElement | null>(null);
   const desktopScrollRef = useRef<HTMLDivElement | null>(null);
 
+  // Reset the view's scroll position to the top on login AND when event
+  // loading transitions — we've seen the scroll container land at the
+  // bottom on phone/web after login, which hid the "Loading events…"
+  // banner. Scroll again once events have loaded since the view may
+  // have grown in the meantime.
   useEffect(() => {
     if (!pubkey) return;
-    // Next frame — let views mount first, then override their scroll.
-    requestAnimationFrame(() => {
+    const reset = () => {
       mobileScrollRef.current?.scrollTo(0, 0);
       desktopScrollRef.current?.scrollTo(0, 0);
-    });
-  }, [pubkey]);
+    };
+    requestAnimationFrame(reset);
+    requestAnimationFrame(() => requestAnimationFrame(reset));
+  }, [pubkey, eventsLoading]);
   const [autoRestoreComplete, setAutoRestoreComplete] = useState(false);
   const viewModeInitialized = useRef(false);
 
@@ -156,6 +168,7 @@ export function CalendarApp() {
   const [showEventModal, setShowEventModal] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showShareView, setShowShareView] = useState(false);
   const [sharingCalDTag, setSharingCalDTag] = useState<string | null>(null);
   const [setupName, setSetupName] = useState("");
   const [setupSubmitting, setSetupSubmitting] = useState(false);
@@ -171,7 +184,16 @@ export function CalendarApp() {
     null
   );
   const [prefillDate, setPrefillDate] = useState<Date | null>(null);
-  const [mobileTab, setMobileTab] = useState<MobileTab>(viewMode);
+  // Seed mobileTab from the URL-hash "focus" param if present — the manifest
+  // shortcuts (Today / Daily habits / To-do lists) rely on this to open at
+  // the right view on mobile.
+  const [mobileTab, setMobileTab] = useState<MobileTab>(() => {
+    const parsed = parseViewHash(window.location.hash);
+    if (parsed.focus === "daily") return "daily";
+    if (parsed.focus === "lists") return "todos";
+    if (parsed.view) return parsed.view;
+    return viewMode;
+  });
   const [publishError, setPublishError] = useState<string | null>(null);
 
   // Subscribe to relay publish failures for user-facing feedback
@@ -183,6 +205,31 @@ export function CalendarApp() {
     });
     return unsub;
   }, []);
+
+  // Global Ctrl/Cmd+Z (undo) and Ctrl/Cmd+Shift+Z / Ctrl+Y (redo) keybindings.
+  // Skips when focus is in a text input or textarea so users can still
+  // undo their typing natively.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      const ctrl = e.ctrlKey || e.metaKey;
+      if (!ctrl) return;
+      const key = e.key.toLowerCase();
+      const isUndo = key === "z" && !e.shiftKey;
+      const isRedo = (key === "z" && e.shiftKey) || key === "y";
+      if (isUndo && undoDepth > 0) {
+        e.preventDefault();
+        void undo();
+      } else if (isRedo && redoDepth > 0) {
+        e.preventDefault();
+        void redo();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [undo, undoDepth, redo, redoDepth]);
 
   // Sync mobileTab when viewMode changes from desktop controls, but preserve
   // mobile-only tabs (daily/todos) that don't map to a calendar viewMode.
@@ -267,6 +314,40 @@ export function CalendarApp() {
     setShowEventModal(true);
   };
 
+  // Right-click clipboard: copy an event then paste onto any date to create
+  // a brand-new duplicate. Stored in React state so context menus, the
+  // EventDetailModal, and the paste handler all see the same source.
+  const [copiedEvent, setCopiedEvent] = useState<CalendarEvent | null>(null);
+  const [prefillEvent, setPrefillEvent] = useState<CalendarEvent | null>(null);
+
+  const handleDuplicateEvent = (source: CalendarEvent, targetDate?: Date) => {
+    if (eventsLoading || calendars.length === 0) return;
+    const shiftedStart = targetDate
+      ? source.allDay
+        ? new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate())
+        : new Date(
+            targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(),
+            source.start.getHours(), source.start.getMinutes()
+          )
+      : source.start;
+    const shiftedEnd = source.end
+      ? new Date(shiftedStart.getTime() + (source.end.getTime() - source.start.getTime()))
+      : undefined;
+    setSelectedEvent(null);
+    setEditEvent(null);
+    setExtendSeries(null);
+    setPrefillDate(null);
+    setPrefillEvent({
+      ...source,
+      id: "",
+      dTag: "",
+      seriesId: undefined,
+      start: shiftedStart,
+      end: shiftedEnd,
+    });
+    setShowEventModal(true);
+  };
+
   /** Extend a recurring series by generating more instances after the last one.
    *  Infers frequency from recurrence metadata or from the gap between events. */
   const handleExtendSeries = (event: CalendarEvent) => {
@@ -330,6 +411,7 @@ export function CalendarApp() {
         canAddEvent={!eventsLoading && calendars.length > 0}
         onBackup={() => setShowBackup(true)}
         onSettings={() => setShowSettings(true)}
+        onShareView={() => setShowShareView(true)}
         showDaily={showDaily}
         showLists={showLists}
         onToggleDaily={() => setShowDaily(!showDaily)}
@@ -425,6 +507,17 @@ export function CalendarApp() {
         </div>
       )}
 
+      {/* Copy/paste status bar — visible while a copied event is held.
+          Right-click a day cell in month view to paste it. */}
+      {copiedEvent && (
+        <div className="bg-primary-50 border-b border-primary-200 px-4 py-1.5 text-xs text-primary-800 flex items-center justify-between">
+          <span>Copied "{copiedEvent.title}" — right-click a day to paste.</span>
+          <button onClick={() => setCopiedEvent(null)} className="text-primary-700 hover:text-primary-900 font-medium">
+            Clear
+          </button>
+        </div>
+      )}
+
       {/* ===== MOBILE LAYOUT (< sm): single focused tab ===== */}
       <div className="lg:hidden flex-1 overflow-y-auto" ref={mobileScrollRef}>
         {eventsLoading && (
@@ -438,6 +531,9 @@ export function CalendarApp() {
             <MonthView
               onEventClick={handleEventClick}
               onDateClick={handleNewEvent}
+              onEventCopy={setCopiedEvent}
+              onDayPaste={(d) => copiedEvent && handleDuplicateEvent(copiedEvent, d)}
+              hasCopied={!!copiedEvent}
             />
           </main>
         )}
@@ -526,11 +622,13 @@ export function CalendarApp() {
         <EventModal
           event={editEvent}
           prefillDate={prefillDate}
+          prefillEvent={prefillEvent || undefined}
           extendSeries={extendSeries || undefined}
           onClose={() => {
             setShowEventModal(false);
             setEditEvent(null);
             setPrefillDate(null);
+            setPrefillEvent(null);
             setExtendSeries(null);
           }}
           onOpenSettings={() => {
@@ -546,6 +644,7 @@ export function CalendarApp() {
           onClose={() => setSelectedEvent(null)}
           onEdit={handleEditEvent}
           onExtendSeries={handleExtendSeries}
+          onDuplicate={handleDuplicateEvent}
         />
       )}
 
@@ -575,6 +674,7 @@ export function CalendarApp() {
         />
       )}
 
+      {showShareView && <ShareViewModal onClose={() => setShowShareView(false)} />}
       {showBackup && <BackupPanel onClose={() => setShowBackup(false)} />}
       {showSettings && <SettingsPanel onClose={() => {
         setShowSettings(false);

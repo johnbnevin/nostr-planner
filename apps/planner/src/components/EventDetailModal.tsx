@@ -9,6 +9,7 @@ import {
   Link as LinkIcon,
   Tag,
   Repeat,
+  Copy,
 } from "lucide-react";
 import { useCalendar } from "../contexts/CalendarContext";
 import { format } from "date-fns";
@@ -19,6 +20,7 @@ interface EventDetailModalProps {
   onClose: () => void;
   onEdit: (event: CalendarEvent) => void;
   onExtendSeries?: (event: CalendarEvent) => void;
+  onDuplicate?: (event: CalendarEvent) => void;
 }
 
 export function EventDetailModal({
@@ -26,12 +28,21 @@ export function EventDetailModal({
   onClose,
   onEdit,
   onExtendSeries,
+  onDuplicate,
 }: EventDetailModalProps) {
-  const { deleteEvent, calendars, getSeriesEvents } = useCalendar();
+  const { deleteEvent, deleteSeries, calendars, getSeriesEvents } = useCalendar();
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [confirmingSeries, setConfirmingSeries] = useState(false);
+
+  const seriesCount = event.seriesId ? getSeriesEvents(event.seriesId).length : 0;
 
   const handleDelete = async () => {
+    // Recurring: open the two-option confirm instead of the browser prompt.
+    if (event.seriesId && seriesCount > 1) {
+      setConfirmingSeries(true);
+      return;
+    }
     if (!confirm("Delete this event?")) return;
     setDeleting(true);
     setDeleteError("");
@@ -40,6 +51,35 @@ export function EventDetailModal({
       onClose();
     } catch (err) {
       setDeleteError(`Failed to delete: ${err}`);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const confirmDeleteOne = async () => {
+    setConfirmingSeries(false);
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await deleteEvent(event);
+      onClose();
+    } catch (err) {
+      setDeleteError(`Failed to delete: ${err}`);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const confirmDeleteSeries = async () => {
+    if (!event.seriesId) return;
+    setConfirmingSeries(false);
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await deleteSeries(event.seriesId);
+      onClose();
+    } catch (err) {
+      setDeleteError(`Failed to delete series: ${err}`);
     } finally {
       setDeleting(false);
     }
@@ -74,6 +114,15 @@ export function EventDetailModal({
                 title={`Extend series (${getSeriesEvents(event.seriesId).length} events)`}
               >
                 <Repeat className="w-4 h-4 text-primary-500" />
+              </button>
+            )}
+            {onDuplicate && (
+              <button
+                onClick={() => onDuplicate(event)}
+                className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
+                title="Duplicate"
+              >
+                <Copy className="w-4 h-4 text-gray-500" />
               </button>
             )}
             <button
@@ -131,11 +180,21 @@ export function EventDetailModal({
             </div>
           </div>
 
-          {/* Location */}
+          {/* Location — tap to open in Maps. Uses the universal Google Maps
+              search URL, which iOS/Android deep-link to their native Maps app
+              when installed, and falls back to the web map otherwise. */}
           {event.location && (
             <div className="flex items-start gap-3">
               <MapPin className="w-5 h-5 text-gray-400 mt-0.5" />
-              <span className="text-sm text-gray-700">{event.location}</span>
+              <a
+                href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(event.location)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm text-primary-600 hover:text-primary-700 underline break-all"
+                title="Open in Maps"
+              >
+                {event.location}
+              </a>
             </div>
           )}
 
@@ -220,6 +279,43 @@ export function EventDetailModal({
             Close
           </button>
         </div>
+
+        {/* Series delete confirmation — only appears for recurring events.
+            The browser prompt can't express two destructive choices cleanly,
+            so we render our own modal on top of the detail view. */}
+        {confirmingSeries && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60] p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-5 space-y-3">
+              <h3 className="text-base font-semibold text-gray-900">Delete recurring event</h3>
+              <p className="text-sm text-gray-600">
+                This event is part of a series of {seriesCount}. What would you like to delete?
+              </p>
+              <div className="flex flex-col gap-2 pt-1">
+                <button
+                  onClick={confirmDeleteOne}
+                  disabled={deleting}
+                  className="w-full px-4 py-2 text-sm bg-red-50 hover:bg-red-100 text-red-700 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  Just this event
+                </button>
+                <button
+                  onClick={confirmDeleteSeries}
+                  disabled={deleting}
+                  className="w-full px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors disabled:opacity-50"
+                >
+                  All {seriesCount} events in the series
+                </button>
+                <button
+                  onClick={() => setConfirmingSeries(false)}
+                  disabled={deleting}
+                  className="w-full px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

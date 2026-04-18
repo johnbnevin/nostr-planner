@@ -34,7 +34,8 @@ import type { NostrEvent } from "../lib/relay";
 import type { NostrSigner, UnsignedEvent } from "../lib/signer";
 import { Nip07Signer } from "../lib/signer";
 import { LocalSigner } from "../lib/localSigner";
-import { isTauri } from "../lib/platform";
+import { connectBunkerUri } from "../lib/nip46Signer";
+import { isTauri, isStandalonePWA } from "../lib/platform";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
 import { clearCalendarCache } from "../lib/eventCache";
@@ -63,6 +64,14 @@ interface NostrContextValue {
   profile: NostrProfile | null;
   /** The active signer implementation, or `null` when no session is active. */
   signer: NostrSigner | null;
+  /** True while localStorage still holds a pubkey from a prior session. Used
+   *  to distinguish "never logged in" from "returning user whose auto-login
+   *  hasn't finished yet" so we can show a reconnect splash. */
+  hasSavedSession: boolean;
+  /** Stage of the session-restore pipeline on this tab. */
+  autoLoginState: "idle" | "attempting" | "done" | "failed";
+  /** Re-run the auto-login routine manually (e.g. from a retry button). */
+  retryAutoLogin: () => void;
   /** Login with NIP-07 browser extension (web only). */
   loginWithExtension: () => Promise<void>;
   /** Login with any pre-constructed signer (LocalSigner, Nip46Signer). */
@@ -100,6 +109,16 @@ export function NostrProvider({ children }: { children: ReactNode }) {
   const [relays, setRelays] = useState<string[]>(DEFAULT_RELAYS);
   const [profile, setProfile] = useState<NostrProfile | null>(null);
   const [signer, setSigner] = useState<NostrSigner | null>(null);
+  // Stages: "idle" before any attempt, "attempting" during auto-login,
+  // "done" after success, "failed" if no viable signer was available.
+  // The reconnect-splash screen uses this to decide whether to keep waiting
+  // or offer the user a retry / fallback login method.
+  const [autoLoginState, setAutoLoginState] = useState<"idle" | "attempting" | "done" | "failed">("idle");
+  const [autoLoginTrigger, setAutoLoginTrigger] = useState(0);
+  const retryAutoLogin = useCallback(() => setAutoLoginTrigger((n) => n + 1), []);
+  const [hasSavedSession, setHasSavedSession] = useState<boolean>(() => {
+    try { return !!localStorage.getItem("nostr-planner-pubkey"); } catch { return false; }
+  });
 
   /** Fetch the user's NIP-65 relay list (kind 10002) and merge with defaults. */
   const fetchRelayList = useCallback(
@@ -192,6 +211,8 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       log.info("login finalized for", pk.slice(0, 8));
       setSigner(s);
       setPubkey(pk);
+      setAutoLoginState("done");
+      setHasSavedSession(true);
       lsSet("nostr-planner-pubkey", pk);
       // Fire-and-forget: failures are non-fatal (defaults work fine).
       void fetchRelayList(pk, DEFAULT_RELAYS).catch(err =>
@@ -254,11 +275,14 @@ export function NostrProvider({ children }: { children: ReactNode }) {
     setPubkey(null);
     setRelays(DEFAULT_RELAYS);
     setProfile(null);
+    setHasSavedSession(false);
+    setAutoLoginState("idle");
     // Clear settings (may contain email address for digest)
     if (savedPk) localStorage.removeItem(`nostr-planner-settings-${savedPk}`);
     localStorage.removeItem("nostr-planner-pubkey");
     localStorage.removeItem("nostr-planner-nsec");
     localStorage.removeItem("nostr-planner-login-type");
+    localStorage.removeItem("nostr-planner-bunker-url");
     if (isTauri()) {
       log.debug("clearing Tauri secure store");
       LocalSigner.clearStore().catch(() => {});
@@ -304,12 +328,18 @@ export function NostrProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     const saved = localStorage.getItem("nostr-planner-pubkey");
-    if (!saved) return;
+    if (!saved) {
+      setAutoLoginState((prev) => (prev === "idle" ? "idle" : "idle"));
+      return;
+    }
 
     log.debug("found saved pubkey", saved.slice(0, 8), "— attempting auto-login");
+    setHasSavedSession(true);
+    setAutoLoginState("attempting");
 
     if (isTauri()) {
       log.debug("Tauri environment — skipping auto-login (password required)");
+      setAutoLoginState("failed");
       return;
     }
 
@@ -318,6 +348,35 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       log.warn("found legacy nsec in localStorage — clearing for security");
       localStorage.removeItem("nostr-planner-nsec");
       localStorage.removeItem("nostr-planner-login-type");
+    }
+
+    const loginType = localStorage.getItem("nostr-planner-login-type");
+    const bunkerUrl = localStorage.getItem("nostr-planner-bunker-url");
+
+    // Bunker session restore: if the user's last login was via NIP-46 and we
+    // have a saved bunker URL, silently reconnect. Amber/nsec.app will show
+    // their approval prompt but the user doesn't have to re-paste anything.
+    // Skipped on Tauri because Tauri uses the local keychain flow instead.
+    if (!isTauri() && loginType === "bunker" && bunkerUrl) {
+      log.debug("restoring bunker session from saved URL");
+      connectBunkerUri(bunkerUrl, 60_000)
+        .then(async ({ signer: s, pubkey: pk }) => {
+          if (cancelled) { await s.destroy?.(); return; }
+          if (pk !== saved) {
+            log.warn("bunker pubkey mismatch; not restoring session");
+            await s.destroy?.();
+            setAutoLoginState("failed");
+            return;
+          }
+          await finalizeLogin(pk, s);
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            log.warn("bunker auto-reconnect failed", err);
+            setAutoLoginState("failed");
+          }
+        });
+      return () => { cancelled = true; };
     }
 
     if (window.nostr) {
@@ -333,17 +392,53 @@ export function NostrProvider({ children }: { children: ReactNode }) {
             await finalizeLogin(pk, s);
           } else {
             log.debug("NIP-07 pubkey mismatch — not auto-logging in");
+            setAutoLoginState("failed");
           }
         })
         .catch(() => {
-          if (!cancelled) log.debug("NIP-07 auto-login check failed");
+          if (!cancelled) {
+            log.debug("NIP-07 auto-login check failed");
+            setAutoLoginState("failed");
+          }
         });
+    } else if (loginType === "extension" && isStandalonePWA()) {
+      // Installed-PWA edge case: the user logged in via a browser extension
+      // in their normal browser, then launched from the homescreen where no
+      // extension exists. The saved pubkey can't be re-verified, so surface
+      // a login screen immediately rather than leaving the UI hung. Keep the
+      // saved pubkey around — returning to the regular browser will still
+      // auto-login there.
+      log.info("standalone PWA without NIP-07 — user must re-login with bunker/nsec");
+      setAutoLoginState("failed");
     } else {
       log.debug("no auto-login method available");
+      setAutoLoginState("failed");
     }
 
     return () => { cancelled = true; };
-  }, [finalizeLogin]);
+  }, [finalizeLogin, autoLoginTrigger]);
+
+  // When the user brings the app back to the foreground, try to restore the
+  // session if it's sitting in a failed state — PWAs can be suspended for
+  // hours and bunker subscriptions drop silently. Re-attempting on visibility
+  // is cheap and usually succeeds without user intervention.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      const saved = localStorage.getItem("nostr-planner-pubkey");
+      if (!saved) return;
+      // If we already have a signer and pubkey, nothing to restore.
+      if (pubkey && signer) return;
+      // Nudge the auto-login effect by bumping its trigger dependency.
+      setAutoLoginTrigger((n) => n + 1);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [pubkey, signer]);
 
   return (
     <NostrContext.Provider
@@ -352,6 +447,9 @@ export function NostrProvider({ children }: { children: ReactNode }) {
         relays,
         profile,
         signer,
+        hasSavedSession,
+        autoLoginState,
+        retryAutoLogin,
         loginWithExtension,
         loginWithSigner,
         login,

@@ -12,6 +12,8 @@ import {
   Users,
   X,
   Loader2,
+  Tag,
+  Settings2,
 } from "lucide-react";
 import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
@@ -21,6 +23,7 @@ import { CALENDAR_COLORS } from "../lib/nostr";
 import { isNip44Available } from "../lib/crypto";
 import { downloadIcalFile, parseIcalFile } from "../lib/ical";
 import type { ParsedIcalEvent } from "../lib/ical";
+import { HashtagManagerModal } from "./HashtagManagerModal";
 
 /** @see {@link Sidebar} */
 interface SidebarProps {
@@ -64,6 +67,9 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
     reorderCalendars,
     recolorCalendar,
     eventsLoading,
+    tagsByUsage,
+    activeTag,
+    setActiveTag,
   } = useCalendar();
   const { isSharedCalendar } = useSharing();
 
@@ -99,6 +105,9 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
               recolorCalendar={recolorCalendar}
               isSharedCalendar={isSharedCalendar}
               eventsLoading={eventsLoading}
+              tagsByUsage={tagsByUsage}
+              activeTag={activeTag}
+              setActiveTag={setActiveTag}
             />
           </div>
         </div>
@@ -126,6 +135,9 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
         recolorCalendar={recolorCalendar}
         isSharedCalendar={isSharedCalendar}
         eventsLoading={eventsLoading}
+        tagsByUsage={tagsByUsage}
+        activeTag={activeTag}
+        setActiveTag={setActiveTag}
       />
     </aside>
   );
@@ -150,6 +162,9 @@ interface SidebarContentProps {
   recolorCalendar: ReturnType<typeof useCalendar>["recolorCalendar"];
   isSharedCalendar: ReturnType<typeof useSharing>["isSharedCalendar"];
   eventsLoading: ReturnType<typeof useCalendar>["eventsLoading"];
+  tagsByUsage: ReturnType<typeof useCalendar>["tagsByUsage"];
+  activeTag: ReturnType<typeof useCalendar>["activeTag"];
+  setActiveTag: ReturnType<typeof useCalendar>["setActiveTag"];
 }
 
 function SidebarContent({
@@ -169,12 +184,31 @@ function SidebarContent({
   recolorCalendar,
   isSharedCalendar,
   eventsLoading,
+  tagsByUsage,
+  activeTag,
+  setActiveTag,
 }: SidebarContentProps) {
+  const [hashtagsExpanded, setHashtagsExpanded] = useState(true);
+  const [showTagManager, setShowTagManager] = useState(false);
   const [showNewCalendar, setShowNewCalendar] = useState(false);
   const [newCalShared, setNewCalShared] = useState(false);
   const [newCalName, setNewCalName] = useState("");
   const [newCalColor, setNewCalColor] = useState(CALENDAR_COLORS[0]);
   const [colorPickerDTag, setColorPickerDTag] = useState<string | null>(null);
+  const paletteCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const schedulePaletteClose = () => {
+    if (paletteCloseTimer.current) clearTimeout(paletteCloseTimer.current);
+    paletteCloseTimer.current = setTimeout(() => {
+      setColorPickerDTag(null);
+      paletteCloseTimer.current = null;
+    }, 1000);
+  };
+  const cancelPaletteClose = () => {
+    if (paletteCloseTimer.current) {
+      clearTimeout(paletteCloseTimer.current);
+      paletteCloseTimer.current = null;
+    }
+  };
   const [calendarsExpanded, setCalendarsExpanded] = useState(true);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState("");
@@ -420,12 +454,17 @@ function SidebarContent({
                 </div>
 
                 {colorPickerDTag === cal.dTag && (
-                  <div className="absolute left-8 mt-1 top-full z-10 bg-white border border-gray-200 rounded-lg shadow-lg p-2 flex flex-wrap gap-1.5 w-40">
+                  <div
+                    className="absolute left-8 mt-1 top-full z-10 bg-white border border-gray-200 rounded-lg shadow-lg p-2 flex flex-wrap gap-1.5 w-40"
+                    onMouseEnter={cancelPaletteClose}
+                    onMouseLeave={schedulePaletteClose}
+                  >
                     {CALENDAR_COLORS.map((c) => (
                       <button
                         key={c}
                         onClick={() => {
                           recolorCalendar(cal.dTag, c);
+                          cancelPaletteClose();
                           setColorPickerDTag(null);
                         }}
                         className={`w-6 h-6 rounded-full transition-all hover:scale-110 ${
@@ -516,6 +555,63 @@ function SidebarContent({
           </div>
         )}
       </div>
+
+      {/* Hashtags — filter events by a single hashtag. Click a tag to filter,
+          click again (or "All") to clear. The gear icon opens a global
+          rename/delete manager so users can tidy up stale tags in bulk. */}
+      {tagsByUsage.length > 0 && (
+        <div className="mb-6">
+          <div className="flex items-center justify-between mb-2">
+            <button
+              onClick={() => setHashtagsExpanded(!hashtagsExpanded)}
+              className="flex items-center gap-1 text-sm font-semibold text-gray-700 hover:text-gray-900"
+            >
+              {hashtagsExpanded ? (
+                <ChevronDown className="w-4 h-4" />
+              ) : (
+                <ChevronRight className="w-4 h-4" />
+              )}
+              <Tag className="w-3.5 h-3.5" />
+              Hashtags
+            </button>
+            <button
+              onClick={() => setShowTagManager(true)}
+              className="p-1 text-gray-400 hover:text-primary-600 rounded"
+              title="Manage hashtags"
+            >
+              <Settings2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          {hashtagsExpanded && (
+            <div className="flex flex-wrap gap-1.5 pl-1">
+              <button
+                onClick={() => setActiveTag(null)}
+                className={`px-2 py-0.5 rounded-full text-xs border transition-colors ${
+                  activeTag === null
+                    ? "bg-primary-600 border-primary-600 text-white"
+                    : "border-gray-300 text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                All
+              </button>
+              {tagsByUsage.map((tag) => (
+                <button
+                  key={tag}
+                  onClick={() => setActiveTag(activeTag === tag ? null : tag)}
+                  className={`px-2 py-0.5 rounded-full text-xs border transition-colors ${
+                    activeTag === tag
+                      ? "bg-primary-600 border-primary-600 text-white"
+                      : "border-gray-200 text-gray-600 hover:bg-primary-50 hover:border-primary-300 hover:text-primary-700"
+                  }`}
+                >
+                  #{tag}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {showTagManager && <HashtagManagerModal onClose={() => setShowTagManager(false)} />}
 
       {/* Import / Export */}
       <div className="border-t border-gray-200 pt-4">

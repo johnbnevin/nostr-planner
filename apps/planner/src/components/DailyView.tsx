@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo, type DragEvent } from "react";
+import { useState, useMemo, type DragEvent } from "react";
 import { useTasks } from "../contexts/TasksContext";
 import type { HabitStatsBundle } from "../contexts/TasksContext";
 import { useCalendar } from "../contexts/CalendarContext";
@@ -15,7 +15,6 @@ export function DailyHabitsView() {
   const [renameValue, setRenameValue] = useState("");
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
-  const dragNodeRef = useRef<HTMLDivElement | null>(null);
   const [showStats, setShowStats] = useState(false);
   const [statsWindow, setStatsWindow] = useState<"last7" | "last30" | "last365" | "allTime">("last7");
 
@@ -47,25 +46,17 @@ export function DailyHabitsView() {
     setRenamingId(null);
   };
 
+  // Dragging + drop-target visuals are driven by state (handled in row
+  // styles) so we no longer need imperative opacity manipulation.
   const handleDragStart = (e: DragEvent<HTMLDivElement>, index: number) => {
     setDragIndex(index);
-    dragNodeRef.current = e.currentTarget;
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", String(index));
-    requestAnimationFrame(() => {
-      if (dragNodeRef.current) {
-        dragNodeRef.current.style.opacity = "0.4";
-      }
-    });
   };
 
   const handleDragEnd = () => {
-    if (dragNodeRef.current) {
-      dragNodeRef.current.style.opacity = "1";
-    }
     setDragIndex(null);
     setDragOverIndex(null);
-    dragNodeRef.current = null;
   };
 
   const handleDragOver = (e: DragEvent<HTMLDivElement>, index: number) => {
@@ -145,20 +136,35 @@ export function DailyHabitsView() {
           {habits.map((habit, index) => {
             const done = isHabitDone(habit.id, dateStr);
             const isOver = dragOverIndex === index && dragIndex !== index;
+            const isDragging = dragIndex === index;
             return (
               <div
                 key={habit.id}
-                draggable
-                onDragStart={(e) => handleDragStart(e, index)}
-                onDragEnd={handleDragEnd}
                 onDragOver={(e) => handleDragOver(e, index)}
                 onDrop={(e) => handleDrop(e, index)}
-                className={`flex items-center gap-2 px-4 py-3 hover:bg-gray-50 transition-colors group ${
-                  isOver ? "border-t-2 border-primary-400" : ""
+                className={`relative flex items-center gap-2 px-2 py-3 transition-colors group ${
+                  isDragging ? "bg-emerald-50/40 opacity-50" : "hover:bg-gray-50"
                 }`}
               >
-                <div className="cursor-grab active:cursor-grabbing text-gray-300 hover:text-gray-500 flex-shrink-0">
-                  <GripVertical className="w-4 h-4" />
+                {/* Prominent drop-target bar — thick emerald line with end
+                    dots so the landing spot is unmistakable. */}
+                {isOver && (
+                  <div className="pointer-events-none absolute -top-0.5 left-0 right-0 h-1 bg-emerald-500 shadow-md shadow-emerald-300/50">
+                    <div className="absolute -left-1 -top-0.5 w-2 h-2 rounded-full bg-emerald-500" />
+                    <div className="absolute -right-1 -top-0.5 w-2 h-2 rounded-full bg-emerald-500" />
+                  </div>
+                )}
+                {/* Grip handle — ONLY this is draggable so accidentally
+                    dragging when trying to tap the checkbox doesn't happen.
+                    Larger tap target (w-8 h-8) for mobile. */}
+                <div
+                  draggable
+                  onDragStart={(e) => handleDragStart(e, index)}
+                  onDragEnd={handleDragEnd}
+                  className="w-8 h-8 flex items-center justify-center cursor-grab active:cursor-grabbing text-gray-300 hover:text-emerald-500 hover:bg-emerald-50 rounded flex-shrink-0 touch-none"
+                  title="Drag to reorder"
+                >
+                  <GripVertical className="w-5 h-5" />
                 </div>
                 <button
                   onClick={() => toggleHabitCompletion(habit.id, dateStr)}
