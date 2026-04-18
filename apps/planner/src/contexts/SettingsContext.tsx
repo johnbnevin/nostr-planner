@@ -82,8 +82,8 @@ interface SettingsContextValue {
   setShowTodo: (v: boolean) => void;
   setShowLists: (v: boolean) => void;
   /** Persisted view mode preference */
-  savedViewMode: "month" | "week" | "day";
-  setSavedViewMode: (v: "month" | "week" | "day") => void;
+  savedViewMode: "upcoming" | "month";
+  setSavedViewMode: (v: "upcoming" | "month") => void;
   /** Notification settings */
   notification: NotificationSettings;
   setNotification: (v: Partial<NotificationSettings>) => void;
@@ -122,7 +122,7 @@ export interface PersistedSettings {
   showDaily?: boolean;
   showTodo?: boolean;
   showLists?: boolean;
-  viewMode?: "month" | "week" | "day";
+  viewMode?: "upcoming" | "month";
   autoBackup?: boolean;
   notification?: NotificationSettings;
   [key: string]: unknown; // forward-compat: restore won't break on future fields
@@ -143,7 +143,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [showDaily, setShowDailyState] = useState(false);
   const [showTodo, setShowTodoState] = useState(false);
   const [showLists, setShowListsState] = useState(false);
-  const [savedViewMode, setSavedViewModeState] = useState<"month" | "week" | "day">("month");
+  const [savedViewMode, setSavedViewModeState] = useState<"upcoming" | "month">("month");
   const [autoBackup, setAutoBackupState] = useState(true);
   const [notification, setNotificationState] = useState<NotificationSettings>(DEFAULT_NOTIFY);
 
@@ -191,7 +191,15 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setShowDailyState(parsed.showDaily ?? false);
         setShowTodoState(parsed.showTodo ?? false);
         setShowListsState(parsed.showLists ?? false);
-        if (parsed.viewMode) setSavedViewModeState(parsed.viewMode);
+        // Migrate removed views from pre-v1.12: "week" and "day" collapse to
+        // "month" (the closest analog), everything else preserved.
+        if (parsed.viewMode) {
+          const v = parsed.viewMode as string;
+          const migrated = v === "week" || v === "day" ? "month" : v;
+          if (migrated === "upcoming" || migrated === "month") {
+            setSavedViewModeState(migrated);
+          }
+        }
         setAutoBackupState(parsed.autoBackup ?? true);
         if (parsed.notification) setNotificationState({ ...DEFAULT_NOTIFY, ...parsed.notification });
       } else {
@@ -277,7 +285,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   );
 
   const setSavedViewMode = useCallback(
-    (v: "month" | "week" | "day") => {
+    (v: "upcoming" | "month") => {
       setSavedViewModeState(v);
       persist({ viewMode: v });
     },

@@ -19,6 +19,8 @@ import type { CalendarEvent } from "../lib/nostr";
 interface MonthViewProps {
   onEventClick: (event: CalendarEvent) => void;
   onDateClick: (date: Date) => void;
+  /** Tap on a day number — opens the day-detail modal listing every event. */
+  onDayDetail?: (date: Date) => void;
   /** Right-click an event to copy it to the paste clipboard. */
   onEventCopy?: (event: CalendarEvent) => void;
   /** Right-click a day cell to paste the last-copied event as a duplicate. */
@@ -50,7 +52,7 @@ interface WeekRow {
   numLanes: number;
 }
 
-export function MonthView({ onEventClick, onDateClick, onEventCopy, onDayPaste, hasCopied }: MonthViewProps) {
+export function MonthView({ onEventClick, onDateClick, onDayDetail, onEventCopy, onDayPaste, hasCopied }: MonthViewProps) {
   const { currentDate, filteredEvents: events, calendars, moveEvent } = useCalendar();
   const [dragOverDate, setDragOverDate] = useState<string | null>(null);
   const [draggingEvent, setDraggingEvent] = useState<CalendarEvent | null>(null);
@@ -303,8 +305,10 @@ export function MonthView({ onEventClick, onDateClick, onEventCopy, onDayPaste, 
               );
             })}
 
-            {/* Day number headers. pointer-events-none so clicks fall through
-                to the cell bg below. */}
+            {/* Day number headers. The wrapper is pointer-events-none so
+                clicks fall through to the cell bg (new-event) below, but the
+                number button inside re-enables pointer-events so tapping it
+                opens the day-detail modal. */}
             {week.days.map((day, col) => {
               const key = format(day, "yyyy-MM-dd");
               const inMonth = isSameMonth(day, currentDate);
@@ -315,17 +319,23 @@ export function MonthView({ onEventClick, onDateClick, onEventCopy, onDayPaste, 
                   className="flex items-center justify-center py-1 pointer-events-none"
                   style={{ gridColumn: col + 1, gridRow: 1 }}
                 >
-                  <span
-                    className={`text-sm w-7 h-7 flex items-center justify-center rounded-full ${
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (onDayDetail) onDayDetail(day);
+                    }}
+                    className={`pointer-events-auto text-sm w-7 h-7 flex items-center justify-center rounded-full cursor-pointer transition-transform hover:scale-110 ${
                       today
-                        ? "bg-primary-600 text-white font-bold"
+                        ? "bg-primary-600 text-white font-bold ring-2 ring-primary-200"
                         : inMonth
-                          ? "text-gray-900"
-                          : "text-gray-400"
+                          ? "text-gray-900 hover:bg-primary-50"
+                          : "text-gray-400 hover:bg-gray-100"
                     }`}
+                    title="Open day details"
                   >
                     {format(day, "d")}
-                  </span>
+                  </button>
                 </div>
               );
             })}

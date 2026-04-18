@@ -76,7 +76,11 @@ import { cacheCalendarData } from "../lib/eventCache";
 
 const log = logger("calendar");
 
-type ViewMode = "month" | "week" | "day";
+/** UI view mode. "upcoming" = chronological list of future events,
+ *  "month" = the Google-Calendar-style grid (labeled "Calendar" in the UI).
+ *  Week and day views were removed in v1.12 in favor of the day-detail modal
+ *  for deep-dives and the upcoming view for chronological browsing. */
+type ViewMode = "upcoming" | "month";
 
 interface CalendarContextValue {
   /** All decrypted calendar events for the current user (personal + shared). */
@@ -178,6 +182,9 @@ interface CalendarContextValue {
   undo: () => Promise<void>;
   /** Pop and replay the most recent redoable operation. */
   redo: () => Promise<void>;
+  /** Manually queue an undoable operation (for callers that own their own
+   *  save paths, e.g. EventModal for event create/edit). */
+  pushUndoEntry: (op: { description: string; undo: () => Promise<void>; redo: () => Promise<void> }) => void;
 }
 
 /** One reversible operation — deletion, move, tag mutation, etc. */
@@ -321,7 +328,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
   const [lastRemoteSha, setLastRemoteSha] = useState<string | null>(null);
   const [deletedDTags, setDeletedDTags] = useState<Set<string>>(new Set());
   const [currentDate, setCurrentDate] = useState(new Date());
-  const [viewMode, setViewMode] = useState<ViewMode>("month");
+  const [viewMode, setViewMode] = useState<ViewMode>("upcoming");
   const [needsCalendarSetup, setNeedsCalendarSetup] = useState(false);
   const [decryptionErrors, setDecryptionErrors] = useState(0);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -845,34 +852,25 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     [signEvent, publishEvent, persistDeletion, shouldEncrypt, getSharedKeyForCalendars, restoreEvent, pushUndo, deleteEventInternal]
   );
 
-  // ── Global hashtag operations ─────────────────────────────────────
+  // ── Bulk event updates (shared by tag/location mutations) ─────────
 
-  /** Shared core for rename/delete: maps over every event carrying the tag,
-   *  applies `transform` to its hashtag list, updates in-memory state,
-   *  and re-publishes non-private events. Private events flush via autobackup. */
-  const applyTagMutation = useCallback(
-    async (tag: string, transform: (hashtags: string[]) => string[]) => {
-      if (!pubkey) return;
-      const affected = eventsRef.current.filter((e) => e.hashtags.includes(tag));
-      if (affected.length === 0) return;
-
-      const updated = affected.map((e) => {
-        const next = transform(e.hashtags).filter((t, i, arr) => !!t && arr.indexOf(t) === i);
-        return { ...e, hashtags: next };
-      });
-      const byDTag = new Map(updated.map((u) => [u.dTag, u]));
-
-      // 1. Optimistic UI update for every event, private or not.
+  /** Apply a list of {original → updated} event pairs. Updates in-memory
+   *  state for every pair, and re-publishes non-private events so relays +
+   *  other devices pick up the change. Private events rely on the next
+   *  auto-backup snapshot to propagate. Symmetric: call with swapped
+   *  from/to pairs to undo. */
+  const applyEventUpdates = useCallback(
+    async (updates: CalendarEvent[]) => {
+      if (!pubkey || updates.length === 0) return;
+      const byDTag = new Map(updates.map((u) => [u.dTag, u]));
       setEvents((prev) =>
         prev.map((e) => {
           const u = byDTag.get(e.dTag);
-          return u ? { ...e, hashtags: u.hashtags } : e;
+          return u ? { ...u } : e;
         })
       );
 
-      // 2. Publish the non-private ones. Sign sequentially (NIP-07 UX) then
-      //    publish in parallel batches.
-      const toSign = updated.filter((e) => {
+      const toSign = updates.filter((e) => {
         const sharedKey = getSharedKeyForCalendars(e.calendarRefs);
         const isPrivate = !sharedKey && shouldEncrypt(e.calendarRefs);
         return !isPrivate;
@@ -887,7 +885,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
             signEvent, signer, sharedKeyInfo?.key, sharedKeyInfo?.calDTag
           ));
         } catch (err) {
-          log.warn("tag mutation: sign failed for", e.dTag, err);
+          log.warn("event update: sign failed for", e.dTag, err);
         }
       }
       const BATCH = 10;
@@ -899,12 +897,40 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     [pubkey, signEvent, publishEvent, signer, shouldEncrypt, getSharedKeyForCalendars]
   );
 
+  // ── Global hashtag operations ─────────────────────────────────────
+
+  /** Snapshot affected events + apply a transform + push an undo entry.
+   *  The undo restores each affected event to its original hashtags list;
+   *  redo re-applies the transform via stored `updated` copies. */
+  const applyTagMutation = useCallback(
+    async (tag: string, transform: (hashtags: string[]) => string[], description: string) => {
+      if (!pubkey) return;
+      const affected = eventsRef.current.filter((e) => e.hashtags.includes(tag));
+      if (affected.length === 0) return;
+
+      const originals = affected.map((e) => ({ ...e }));
+      const updated = affected.map((e) => ({
+        ...e,
+        hashtags: transform(e.hashtags).filter((t, i, arr) => !!t && arr.indexOf(t) === i),
+      }));
+      await applyEventUpdates(updated);
+      pushUndo({
+        description,
+        undo: () => applyEventUpdates(originals),
+        redo: () => applyEventUpdates(updated),
+      });
+    },
+    [pubkey, applyEventUpdates, pushUndo]
+  );
+
   const renameTag = useCallback(
     async (oldTag: string, newTag: string) => {
       const cleaned = newTag.trim().toLowerCase().replace(/^#/, "");
       if (!cleaned || cleaned === oldTag) return;
-      await applyTagMutation(oldTag, (hashtags) =>
-        hashtags.map((t) => (t === oldTag ? cleaned : t))
+      await applyTagMutation(
+        oldTag,
+        (hashtags) => hashtags.map((t) => (t === oldTag ? cleaned : t)),
+        `Rename #${oldTag} → #${cleaned}`
       );
     },
     [applyTagMutation]
@@ -912,19 +938,20 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
 
   const deleteTag = useCallback(
     async (tag: string) => {
-      await applyTagMutation(tag, (hashtags) => hashtags.filter((t) => t !== tag));
+      await applyTagMutation(
+        tag,
+        (hashtags) => hashtags.filter((t) => t !== tag),
+        `Delete #${tag}`
+      );
       // Clear filter if the tag being deleted is currently the active one.
       setActiveTag((prev) => (prev === tag ? null : prev));
     },
     [applyTagMutation]
   );
 
-  /** Shared core for rename/delete of a location string. Matches any event
-   *  whose trimmed location equals `loc` (case-insensitive), then applies
-   *  `transform` to produce the new value. Same publish semantics as the
-   *  tag equivalents. */
+  /** Same pattern as tag mutation but for the single-value location field. */
   const applyLocationMutation = useCallback(
-    async (loc: string, transform: (current: string) => string) => {
+    async (loc: string, transform: (current: string) => string, description: string) => {
       if (!pubkey) return;
       const target = loc.trim().toLowerCase();
       const affected = eventsRef.current.filter(
@@ -932,58 +959,37 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       );
       if (affected.length === 0) return;
 
+      const originals = affected.map((e) => ({ ...e }));
       const updated = affected.map((e) => {
         const next = transform(e.location || "").trim();
         return { ...e, location: next || undefined };
       });
-      const byDTag = new Map(updated.map((u) => [u.dTag, u]));
-
-      setEvents((prev) =>
-        prev.map((e) => {
-          const u = byDTag.get(e.dTag);
-          return u ? { ...e, location: u.location } : e;
-        })
-      );
-
-      const toSign = updated.filter((e) => {
-        const sharedKey = getSharedKeyForCalendars(e.calendarRefs);
-        const isPrivate = !sharedKey && shouldEncrypt(e.calendarRefs);
-        return !isPrivate;
+      await applyEventUpdates(updated);
+      pushUndo({
+        description,
+        undo: () => applyEventUpdates(originals),
+        redo: () => applyEventUpdates(updated),
       });
-      const signed: SignedNostrEvent[] = [];
-      for (const e of toSign) {
-        try {
-          const sharedKeyInfo = getSharedKeyForCalendars(e.calendarRefs);
-          const tags = buildEventTags(e);
-          signed.push(await prepareSignedEvent(
-            pubkey, e.kind, tags, e.content, false,
-            signEvent, signer, sharedKeyInfo?.key, sharedKeyInfo?.calDTag
-          ));
-        } catch (err) {
-          log.warn("location mutation: sign failed for", e.dTag, err);
-        }
-      }
-      const BATCH = 10;
-      for (let i = 0; i < signed.length; i += BATCH) {
-        const batch = signed.slice(i, i + BATCH);
-        await Promise.allSettled(batch.map((s) => publishEvent(s)));
-      }
     },
-    [pubkey, signEvent, publishEvent, signer, shouldEncrypt, getSharedKeyForCalendars]
+    [pubkey, applyEventUpdates, pushUndo]
   );
 
   const renameLocation = useCallback(
     async (oldLoc: string, newLoc: string) => {
       const cleaned = newLoc.trim();
       if (!cleaned || cleaned.toLowerCase() === oldLoc.trim().toLowerCase()) return;
-      await applyLocationMutation(oldLoc, () => cleaned);
+      await applyLocationMutation(
+        oldLoc,
+        () => cleaned,
+        `Rename location "${oldLoc}" → "${cleaned}"`
+      );
     },
     [applyLocationMutation]
   );
 
   const deleteLocation = useCallback(
     async (loc: string) => {
-      await applyLocationMutation(loc, () => "");
+      await applyLocationMutation(loc, () => "", `Clear location "${loc}"`);
     },
     [applyLocationMutation]
   );
@@ -1392,70 +1398,86 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
 
   // ── Rename calendar ────────────────────────────────────────────────
 
-  const renameCalendar = useCallback(
-    async (dTag: string, newTitle: string) => {
-      const cal = calendars.find((c) => c.dTag === dTag);
-      if (!cal) return;
-
-      setCalendars((prev) =>
-        prev.map((c) => (c.dTag === dTag ? { ...c, title: newTitle } : c))
-      );
-
-      const tags: string[][] = [["d", dTag], ["title", newTitle]];
+  // Core "publish a calendar collection" used by rename/recolor/etc. Captures
+  // the boilerplate of building tags + choosing the right encryption path so
+  // undo/redo can invoke it with swapped title/color. Does NOT update
+  // `calendars` state (callers do that so undo can snapshot prior state).
+  const publishCalendarCollection = useCallback(
+    async (cal: CalendarCollection) => {
+      if (!pubkey) return;
+      const tags: string[][] = [["d", cal.dTag], ["title", cal.title]];
       if (cal.color) tags.push(["color", cal.color]);
       for (const ref of cal.eventRefs) tags.push(["a", ref]);
-
-      const sharedKey = sharedKeys.get(dTag);
+      const sharedKey = sharedKeys.get(cal.dTag);
       await signAndPublish(
-        pubkey!,
+        pubkey,
         KIND_CALENDAR,
         tags,
         "",
-        !sharedKey && shouldEncrypt([dTag]),
+        !sharedKey && shouldEncrypt([cal.dTag]),
         signEvent,
         publishEvent,
         signer,
         sharedKey,
-        sharedKey ? dTag : undefined
+        sharedKey ? cal.dTag : undefined
       );
     },
-    [pubkey, signEvent, publishEvent, calendars, shouldEncrypt, sharedKeys, signer]
+    [pubkey, signEvent, publishEvent, shouldEncrypt, sharedKeys, signer]
+  );
+
+  const renameCalendar = useCallback(
+    async (dTag: string, newTitle: string) => {
+      const cal = calendarsRef.current.find((c) => c.dTag === dTag);
+      if (!cal || cal.title === newTitle) return;
+      const priorTitle = cal.title;
+      const updated: CalendarCollection = { ...cal, title: newTitle };
+      setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? updated : c)));
+      await publishCalendarCollection(updated);
+      pushUndo({
+        description: `Rename calendar "${priorTitle}" → "${newTitle}"`,
+        undo: async () => {
+          const reverted = { ...updated, title: priorTitle };
+          setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? reverted : c)));
+          await publishCalendarCollection(reverted);
+        },
+        redo: async () => {
+          setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? updated : c)));
+          await publishCalendarCollection(updated);
+        },
+      });
+    },
+    [publishCalendarCollection, pushUndo]
   );
 
   // ── Recolor calendar ───────────────────────────────────────────────
 
   const recolorCalendar = useCallback(
     async (dTag: string, newColor: string) => {
-      const cal = calendars.find((c) => c.dTag === dTag);
-      if (!cal) return;
-
-      setCalendars((prev) =>
-        prev.map((c) => (c.dTag === dTag ? { ...c, color: newColor } : c))
-      );
-
-      const tags: string[][] = [["d", dTag], ["title", cal.title], ["color", newColor]];
-      for (const ref of cal.eventRefs) tags.push(["a", ref]);
-
-      const sharedKey = sharedKeys.get(dTag);
-      await signAndPublish(
-        pubkey!,
-        KIND_CALENDAR,
-        tags,
-        "",
-        !sharedKey && shouldEncrypt([dTag]),
-        signEvent,
-        publishEvent,
-        signer,
-        sharedKey,
-        sharedKey ? dTag : undefined
-      );
+      const cal = calendarsRef.current.find((c) => c.dTag === dTag);
+      if (!cal || cal.color === newColor) return;
+      const priorColor = cal.color;
+      const updated: CalendarCollection = { ...cal, color: newColor };
+      setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? updated : c)));
+      await publishCalendarCollection(updated);
+      pushUndo({
+        description: `Recolor "${cal.title}"`,
+        undo: async () => {
+          const reverted = { ...updated, color: priorColor };
+          setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? reverted : c)));
+          await publishCalendarCollection(reverted);
+        },
+        redo: async () => {
+          setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? updated : c)));
+          await publishCalendarCollection(updated);
+        },
+      });
     },
-    [pubkey, signEvent, publishEvent, calendars, shouldEncrypt, sharedKeys, signer]
+    [publishCalendarCollection, pushUndo]
   );
 
   // ── Delete calendar ────────────────────────────────────────────────
 
-  const deleteCalendar = useCallback(
+  const deleteCalendarInternal = useCallback(
     async (dTag: string) => {
       persistDeletion(dTag);
       setCalendars((prev) => prev.filter((c) => c.dTag !== dTag));
@@ -1476,8 +1498,6 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       }
 
       if (!pubkey) return;
-      // Encrypted/shared calendars are published as kind 30078 — delete both
-      // the published kind and the original kind to cover all relay states.
       const isEncrypted = shouldEncrypt([dTag]) || sharedKeys.has(dTag);
       const publishedKind = isEncrypted ? KIND_APP_DATA : KIND_CALENDAR;
       const tags: string[][] = [["a", `${publishedKind}:${pubkey}:${dTag}`]];
@@ -1492,8 +1512,46 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       });
       await publishEvent(signed);
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- setSharedKeys is a stable setter from useSharing
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setSharedKeys is stable
     [pubkey, signEvent, publishEvent, persistDeletion, sharedKeys, shouldEncrypt]
+  );
+
+  const deleteCalendar = useCallback(
+    async (dTag: string) => {
+      const snapshot = calendarsRef.current.find((c) => c.dTag === dTag);
+      const wasActive = activeCalendarIds.has(dTag);
+      const wasShared = sharedKeys.has(dTag);
+      await deleteCalendarInternal(dTag);
+      // Shared calendars pull key material + member lists into the mix —
+      // too tricky to reliably undo. Regular calendars are straightforward.
+      if (!snapshot || wasShared) return;
+      pushUndo({
+        description: `Delete calendar "${snapshot.title}"`,
+        undo: async () => {
+          // Remove from deletion set + re-add to in-memory state, then
+          // re-publish so other devices see the restored collection.
+          setDeletedDTags((prev) => {
+            const next = new Set(prev);
+            next.delete(dTag);
+            if (pubkey) {
+              try { sessionStorage.setItem(`nostr-planner-deleted-${pubkey}`, JSON.stringify([...next])); } catch { /* ignore */ }
+            }
+            return next;
+          });
+          setCalendars((prev) => {
+            if (prev.some((c) => c.dTag === dTag)) return prev;
+            return [...prev, snapshot];
+          });
+          if (wasActive) {
+            setActiveCalendarIds((prev) => new Set([...prev, dTag]));
+          }
+          await publishCalendarCollection(snapshot);
+        },
+        redo: () => deleteCalendarInternal(dTag),
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refs/setters stable
+    [deleteCalendarInternal, activeCalendarIds, sharedKeys, pubkey, pushUndo, publishCalendarCollection]
   );
 
   // ── Leave shared calendar (wraps SharingContext + UI cleanup) ───────
@@ -1652,7 +1710,8 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     redoPreview: redoStack.length > 0 ? redoStack[redoStack.length - 1].description : null,
     undo,
     redo,
-  }), [events, filteredEvents, calendars, activeCalendarIds, allTags, tagsByUsage, locationsByUsage, activeTag, eventsLoading, currentDate, viewMode, toggleCalendar, createCalendar, createSharedCalendar, updateCalendarEvents, getSeriesEvents, renameCalendar, recolorCalendar, deleteCalendar, reorderCalendars, refreshEvents, forceFullRefresh, deleteEvent, deleteSeries, renameTag, deleteTag, renameLocation, deleteLocation, moveEvent, removeMember, convertToShared, leaveSharedCalendarAndCleanup, addEventOptimistic, applySnapshot, lastRemoteSha, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, undoStack, redoStack, undo, redo]);
+    pushUndoEntry: pushUndo,
+  }), [events, filteredEvents, calendars, activeCalendarIds, allTags, tagsByUsage, locationsByUsage, activeTag, eventsLoading, currentDate, viewMode, toggleCalendar, createCalendar, createSharedCalendar, updateCalendarEvents, getSeriesEvents, renameCalendar, recolorCalendar, deleteCalendar, reorderCalendars, refreshEvents, forceFullRefresh, deleteEvent, deleteSeries, renameTag, deleteTag, renameLocation, deleteLocation, moveEvent, removeMember, convertToShared, leaveSharedCalendarAndCleanup, addEventOptimistic, applySnapshot, lastRemoteSha, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, undoStack, redoStack, undo, redo, pushUndo]);
 
   return (
     <CalendarContext.Provider

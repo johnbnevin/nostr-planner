@@ -66,7 +66,7 @@ interface EventModalProps {
  */
 export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onClose, onOpenSettings }: EventModalProps) {
   const { pubkey, signEvent, publishEvent } = useNostr();
-  const { refreshEvents, allTags, tagsByUsage, locationsByUsage, calendars, addEventOptimistic, getSeriesEvents } = useCalendar();
+  const { refreshEvents, allTags, tagsByUsage, locationsByUsage, calendars, addEventOptimistic, deleteEvent, getSeriesEvents, pushUndoEntry } = useCalendar();
   const { getSharedKeyForCalendars } = useSharing();
   const { shouldEncrypt, canPublish, notification } = useSettings();
   const notificationsEnabled = notification.enabled;
@@ -513,6 +513,43 @@ export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onC
           content,
         };
         await publishOne(unsigned);
+
+        // Undo/redo. For edits we snapshot the prior event and re-publish
+        // it on undo (replaceable events let us just write a newer version).
+        // For creates the inverse is deleting the freshly-created event.
+        if (isEdit && event) {
+          const priorEvent = { ...event };
+          const priorUnsigned = {
+            kind: priorEvent.kind,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: priorEvent.tags,
+            content: priorEvent.content,
+          };
+          const nextUnsigned = unsigned;
+          const nextOptimistic = optimisticEvent;
+          pushUndoEntry({
+            description: `Edit "${title.trim() || "event"}"`,
+            undo: async () => {
+              addEventOptimistic(priorEvent);
+              await publishOne(priorUnsigned);
+            },
+            redo: async () => {
+              addEventOptimistic(nextOptimistic);
+              await publishOne(nextUnsigned);
+            },
+          });
+        } else {
+          const createdEvent = { ...optimisticEvent };
+          const createdUnsigned = unsigned;
+          pushUndoEntry({
+            description: `Create "${title.trim() || "event"}"`,
+            undo: () => deleteEvent(createdEvent),
+            redo: async () => {
+              addEventOptimistic(createdEvent);
+              await publishOne(createdUnsigned);
+            },
+          });
+        }
       }
 
       onClose();
