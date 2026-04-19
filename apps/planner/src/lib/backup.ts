@@ -33,7 +33,7 @@
 import { BlossomClient } from "blossom-client-sdk";
 import { SimplePool } from "nostr-tools/pool";
 import { KIND_APP_DATA, DTAG_BACKUP, type CalendarEvent, type CalendarCollection } from "./nostr";
-import { queryEvents } from "./relay";
+import { queryEvents, getPrimaryRelay } from "./relay";
 import { logger } from "./logger";
 import type { PersistedSettings } from "../contexts/SettingsContext";
 import type { DailyHabit, UserList } from "../contexts/TasksContext";
@@ -377,7 +377,7 @@ async function findPointer(
   let events: RawEvent[] = [];
   try {
     events = await queryEvents(
-      relays.length > 0 ? relays.slice(0, 5) : ["wss://relay.damus.io", "wss://nos.lol"],
+      relays.length > 0 ? relays : [getPrimaryRelay()],
       { kinds: [KIND_APP_DATA], authors: [pubkey], "#d": [DTAG_BACKUP], limit: 1 },
       10_000
     ) as unknown as RawEvent[];
@@ -472,7 +472,12 @@ export function watchPointer(
   let lastSha = initialShaRef.current;
   let pool: SimplePool | null = null;
   let sub: { close: () => void } | null = null;
-  const urls = relays.length > 0 ? relays.slice(0, 5) : ["wss://relay.damus.io", "wss://nos.lol"];
+  // Live pointer subscription only to the current primary — matches the
+  // hot-path relay policy in relay.ts. Redundancy copies land via idle
+  // publishes. If the user switches primary in settings, callers should
+  // re-run watchPointer (their effect deps include primaryRelay) so a new
+  // subscription is opened against the new primary.
+  const urls = [getPrimaryRelay()];
 
   // Shared pointer-processing logic used by both the live subscription
   // and the periodic safety-net poll.

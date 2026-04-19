@@ -39,7 +39,6 @@ import {
   KIND_TIME_EVENT,
   KIND_CALENDAR,
   KIND_APP_DATA,
-  DEFAULT_RELAYS,
   generateDTag,
   buildDateEventTags,
   buildTimeEventTags,
@@ -332,7 +331,7 @@ function buildEventTags(e: CalendarEvent): string[][] {
 
 export function CalendarProvider({ children }: { children: ReactNode }) {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
-  const { shouldEncrypt, canPublish } = useSettings();
+  const { shouldEncrypt, canPublish, primaryRelay } = useSettings();
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [eventTombstones, setEventTombstones] = useState<CalendarEvent[]>([]);
   const [calendars, setCalendars] = useState<CalendarCollection[]>([]);
@@ -1806,7 +1805,12 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     if (!pubkey) return;
     const authorList = [pubkey, ...loadSharedCalOwners(pubkey).values()];
     const distinctAuthors = [...new Set(authorList)];
-    const urls = relays.length > 0 ? relays.slice(0, 5) : DEFAULT_RELAYS;
+    // Live subscription only to the user's chosen primary relay —
+    // redundancy relays must never be on the hot path; they receive
+    // background copies via idle-time publishes in relay.ts. Effect
+    // re-runs when primaryRelay changes so the subscription is torn down
+    // and reopened against the new primary.
+    const urls = [primaryRelay];
 
     let pool: SimplePool | null = null;
     let sub: { close: () => void } | null = null;
@@ -1850,7 +1854,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       try { sub?.close(); pool?.close(urls); } catch { /* ignore */ }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshEvents captured intentionally via latest closure at effect re-run
-  }, [pubkey, relays]);
+  }, [pubkey, primaryRelay]);
 
   const contextValue = useMemo(() => ({
     events,

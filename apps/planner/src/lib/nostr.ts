@@ -87,13 +87,18 @@ export const DTAG_MEMBERS_PREFIX = "planner-cal-members-";
  *  Full d-tag: `planner-digest-<calendarDTag>`. */
 export const DTAG_DIGEST_PREFIX = "planner-digest-";
 
-/** Fallback relay URLs used when the user has no NIP-65 relay list.
- *  On login, these are replaced/supplemented by the user's kind-10002 list. */
-export const DEFAULT_RELAYS = [
+/** Suggested relays the app will offer in Settings as options for the
+ *  user's primary relay. The user is free to pick any of these, one of
+ *  their NIP-65 relays, or enter a custom URL. The first entry is the
+ *  hardcoded default for users who have never chosen anything. */
+export const SUGGESTED_RELAYS = [
   "wss://relay.damus.io",
-  "wss://nos.lol",
   "wss://relay.ditto.pub",
 ];
+
+/** Default relay list used at login bootstrap before the user's chosen
+ *  primary or NIP-65 list has been loaded. */
+export const DEFAULT_RELAYS = [...SUGGESTED_RELAYS];
 
 /** Supported recurrence frequencies. `bi-weekly` is stored as iCal
  *  `FREQ=WEEKLY;INTERVAL=2` for interop; all others map 1:1 to FREQ. */

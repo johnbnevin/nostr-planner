@@ -2,14 +2,30 @@
  * Shared relay pool — manages WebSocket connections to Nostr relays.
  *
  * Uses @nostrify/nostrify's NPool for connection pooling, deduplication,
- * and reconnection. Implements NIP-65 outbox model: reads are routed to
- * the user's read relays, writes to their write relays.
+ * and reconnection.
+ *
+ * Relay strategy (primary / redundancy split):
+ * - The **primary relay** is user-configurable (see SettingsContext) and is
+ *   the only relay on the hot path. Every query and every interactive
+ *   publish goes here and nowhere else, so redundancy relays being slow or
+ *   down can never slow the app down. The default primary is the first
+ *   entry in SUGGESTED_RELAYS (damus), but users can switch to any of their
+ *   NIP-65 relays, another suggested relay, or a custom URL.
+ * - Redundancy relays (the other suggested relays plus the user's NIP-65
+ *   read/write lists, minus whatever is currently primary) are written to
+ *   in the background during idle time only. After each successful primary
+ *   publish, the event is queued and broadcast to the redundancy set via
+ *   requestIdleCallback — purely for data durability.
+ * - NIP-65 read relays are NOT queried on the hot path either. The primary
+ *   holds the app's authoritative state; redundancy is backup, not failover.
  *
  * Key behaviors:
  * - Pool is singleton — all contexts share one pool instance.
- * - Pool is recreated if the relay list changes (e.g. after NIP-65 fetch).
+ * - Switching the primary closes the old pool; next use lazily opens a new
+ *   one routed at the new primary.
  * - Every received event has its Schnorr signature verified before returning.
- * - Publishes retry up to 3 times with exponential backoff.
+ * - Interactive publishes retry up to 3 times with linear backoff.
+ * - Background redundancy publishes are best-effort: no retries, silent failures.
  * - Publish failures can be observed via onPublishFailure() for UI toasts.
  * - **Rate limiting:** max 3 relay calls (queries + publishes) per relay per
  *   second. Excess calls are queued and drained at the rate limit.
@@ -20,7 +36,7 @@
 import { NPool, NRelay1 } from "@nostrify/nostrify";
 import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
 import { verifyEvent } from "nostr-tools/pure";
-import { DEFAULT_RELAYS } from "./nostr";
+import { SUGGESTED_RELAYS } from "./nostr";
 import { logger } from "./logger";
 
 const log = logger("relay");
@@ -131,17 +147,50 @@ function drainQueue(url: string): void {
 
 // ── Pool state ──────────────────────────────────────────────────────
 
-/** The single shared pool instance. Null when logged out. */
+/** The single shared pool instance. Null when logged out or after the
+ *  primary relay changes (next getPool call will recreate). */
 let pool: NPool | null = null;
 
-/** The relay URLs currently backing the pool. Used to detect changes. */
-let currentRelays: string[] = [];
+/** URL of the current primary relay — the only relay used on the hot path.
+ *  Read from localStorage at module init so the correct primary is in
+ *  place before any React effect runs (important: CalendarApp's
+ *  loadSnapshot effect fires before SettingsContext's restore effect
+ *  due to React's child-first useEffect order). SettingsContext still
+ *  calls setPrimaryRelay after its own restore; for the last-active
+ *  pubkey that's a no-op, and for a different pubkey it switches. */
+let primaryRelay: string = loadSavedPrimaryOrDefault();
 
-/** NIP-65 read relays (queries are sent here). */
-let readRelays: string[] = [];
+/** Read the last-active user's saved primary-relay preference from
+ *  localStorage. Returns the first suggested relay if nothing is saved,
+ *  the saved value is malformed, or localStorage is unavailable. */
+function loadSavedPrimaryOrDefault(): string {
+  try {
+    const pk = localStorage.getItem("nostr-planner-pubkey");
+    if (!pk) return SUGGESTED_RELAYS[0];
+    const raw = localStorage.getItem(`nostr-planner-settings-${pk}`);
+    if (!raw) return SUGGESTED_RELAYS[0];
+    const parsed = JSON.parse(raw) as { primaryRelay?: unknown };
+    const candidate = typeof parsed.primaryRelay === "string" ? parsed.primaryRelay.trim() : "";
+    if (candidate && /^wss?:\/\//i.test(candidate)) return candidate;
+  } catch { /* fall through to default */ }
+  return SUGGESTED_RELAYS[0];
+}
 
-/** NIP-65 write relays (publishes are sent here). */
-let writeRelays: string[] = [];
+/** Cached NIP-65 read/write lists from the user's kind-10002 event.
+ *  Kept to feed the Settings UI list and to compute redundancy, nothing
+ *  else — they are never on the hot path. */
+let nip65Read: string[] = [];
+let nip65Write: string[] = [];
+
+/** Redundancy relay URLs — the union of SUGGESTED_RELAYS and the user's
+ *  NIP-65 list, minus whatever is currently primary. Recomputed on every
+ *  primary change and on every NIP-65 update. */
+let redundancyRelays: string[] = computeRedundancy();
+
+function computeRedundancy(): string[] {
+  return [...new Set([...SUGGESTED_RELAYS, ...nip65Read, ...nip65Write])]
+    .filter((u) => u !== primaryRelay);
+}
 
 // ── NIP-65 relay list parsing ───────────────────────────────────────
 
@@ -173,72 +222,89 @@ export function parseRelayList(event: { tags: string[][] }): {
 }
 
 /**
- * Update the NIP-65 read/write relay sets.
- * Call this after fetching the user's kind 10002 event on login.
- * Falls back to DEFAULT_RELAYS if either set is empty.
+ * Fold the user's NIP-65 read/write lists into the redundancy set.
+ *
+ * The hot path (queries + interactive publishes) always uses the primary
+ * relay only, so NIP-65 relays never become active read/write targets —
+ * they're purely additional redundancy destinations for idle-time
+ * background publishes. This preserves data portability (user's preferred
+ * relays still get a copy) without trading off UX latency. The lists are
+ * also exposed via {@link getNip65Relays} so the Settings UI can offer
+ * them as choices for the primary relay.
  */
 export function setRelayLists(read: string[], write: string[]): void {
-  readRelays = read.length > 0 ? read : DEFAULT_RELAYS;
-  writeRelays = write.length > 0 ? write : DEFAULT_RELAYS;
-  log.debug("NIP-65 relays set:", { read: readRelays.length, write: writeRelays.length });
+  nip65Read = [...read];
+  nip65Write = [...write];
+  redundancyRelays = computeRedundancy();
+  log.debug("NIP-65 relays:", { read: nip65Read.length, write: nip65Write.length, redundancy: redundancyRelays.length });
+}
+
+/** Get the current NIP-65 read/write lists for UI display. */
+export function getNip65Relays(): { read: string[]; write: string[] } {
+  return { read: [...nip65Read], write: [...nip65Write] };
+}
+
+/** Get the URL of the currently active primary relay. */
+export function getPrimaryRelay(): string {
+  return primaryRelay;
+}
+
+/**
+ * Switch the primary relay to a new URL.
+ *
+ * Validates the URL (must start with `wss://` or `ws://`), closes the
+ * existing pool so subsequent reads/writes route to the new primary, and
+ * recomputes the redundancy set. A no-op if the URL is unchanged or
+ * invalid.
+ */
+export function setPrimaryRelay(url: string): void {
+  const trimmed = url.trim();
+  if (!trimmed) return;
+  if (!/^wss?:\/\//i.test(trimmed)) {
+    log.warn("setPrimaryRelay: ignoring invalid URL (must be ws:// or wss://):", trimmed);
+    return;
+  }
+  if (trimmed === primaryRelay) return;
+  log.debug("switching primary relay:", primaryRelay, "→", trimmed);
+  primaryRelay = trimmed;
+  redundancyRelays = computeRedundancy();
+  // Close the current pool so the next getPool() call builds one routed at
+  // the new primary. NRelay1 instances for stale primaries are dropped.
+  pool?.close().catch(() => {});
+  pool = null;
 }
 
 // ── Pool management ─────────────────────────────────────────────────
 
-/** Resolved read/write relay URLs for the current pool. Cached for rate-limit lookup. */
-let activeReadRelays: string[] = [];
-let activeWriteRelays: string[] = [];
-
 /**
  * Get or create the shared relay pool.
  *
- * If the relay list has changed since the last call, the old pool is closed
- * and a new one is created. This is cheap — NRelay1 connects lazily on
- * first use, not on construction.
+ * Router behavior: every query and every publish (via pool.event without a
+ * `relays` override) goes to the current `primaryRelay`. Routers are
+ * evaluated per-request, so the pool picks up changes to primaryRelay
+ * immediately — but we also close the pool on setPrimaryRelay so stale
+ * WebSocket connections to the old primary are dropped eagerly.
  *
- * The pool routes requests using the NIP-65 outbox model:
- * - Queries → read relays (up to 5)
- * - Publishes → write relays (up to 5)
+ * Background idle-time redundancy publishes call
+ * pool.event(event, { relays: redundancyRelays }) to bypass the router
+ * and target the redundancy set explicitly, reusing cached connections.
+ *
+ * The `relays` argument is accepted for backward-compatibility with callers
+ * that pass a relay list (e.g. early login before NIP-65 is resolved) but
+ * has no effect on routing — primary is always the hot path.
  */
-export function getPool(relays: string[]): NPool {
-  // Check if we can reuse the existing pool (same relay list)
-  const sorted = [...relays].sort();
-  const currentSorted = [...currentRelays].sort();
-  if (pool && sorted.join(",") === currentSorted.join(",")) {
-    return pool;
-  }
+export function getPool(_relays: string[] = []): NPool {
+  if (pool) return pool;
 
-  // Close old pool if relay list changed
-  pool?.close().catch(() => {});
-  currentRelays = relays;
-
-  const urls = relays.length > 0 ? relays : DEFAULT_RELAYS;
-  const rRelays = readRelays.length > 0 ? readRelays : urls;
-  const wRelays = writeRelays.length > 0 ? writeRelays : urls;
-
-  // Cache active relay sets — cap at 3 to keep queries fast and predictable
-  activeReadRelays = rRelays.slice(0, 3);
-  activeWriteRelays = wRelays.slice(0, 3);
-
-  log.debug("creating pool:", rRelays.length, "read,", wRelays.length, "write relays");
+  log.debug("creating pool, primary:", primaryRelay);
 
   pool = new NPool({
-    // backoff: false — NPool manages reconnection at the pool level, so we
-    // disable NRelay1's built-in per-relay backoff to avoid double-backoff
-    // behaviour where both layers independently retry the same downed relay.
+    // backoff: false — NRelay1 reconnection is managed implicitly; we don't
+    // need its built-in backoff here since failed idle publishes are
+    // silently dropped and primary failures surface through retry logic.
     open: (url) => new NRelay1(url, { backoff: false }),
-
-    // NIP-65 outbox: send all queries to read relays
-    reqRouter: (filters) => {
-      const map = new Map<string, NostrFilter[]>();
-      for (const url of activeReadRelays) {
-        map.set(url, filters);
-      }
-      return map;
-    },
-
-    // NIP-65 outbox: send all publishes to write relays
-    eventRouter: () => activeWriteRelays,
+    reqRouter: (filters) => new Map([[primaryRelay, [...filters]]]),
+    eventRouter: () => [primaryRelay],
   });
 
   return pool;
@@ -246,16 +312,16 @@ export function getPool(relays: string[]): NPool {
 
 /**
  * Close the shared pool and reset all relay state.
- * Called on logout to clean up WebSocket connections.
+ * Called on logout to clean up WebSocket connections. Keeps the current
+ * primaryRelay intact so a re-login (same user) lands on the same primary.
  */
 export function closePool(): void {
   pool?.close().catch(() => {});
   pool = null;
-  currentRelays = [];
-  readRelays = [];
-  writeRelays = [];
-  activeReadRelays = [];
-  activeWriteRelays = [];
+  nip65Read = [];
+  nip65Write = [];
+  redundancyRelays = computeRedundancy();
+  redundancyQueue.length = 0;
   log.debug("pool closed");
 }
 
@@ -336,8 +402,9 @@ export async function queryEvents(
   const doQuery = async (): Promise<NostrEvent[]> => {
     const p = getPool(relays);
 
-    // Record the call for rate-limit tracking (non-blocking)
-    for (const u of activeReadRelays) acquireSlot(u);
+    // Record the call for rate-limit tracking (non-blocking).
+    // Router sends queries to primary only, so only primary's slot is used.
+    acquireSlot(primaryRelay);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -398,17 +465,19 @@ export async function queryEvents(
 // ── Publish ─────────────────────────────────────────────────────────
 
 /**
- * Publish an event to relays with automatic retry.
+ * Publish an event to the primary relay, then schedule a background
+ * redundancy publish to damus/ditto (and any NIP-65 relays) during idle time.
  *
- * On failure, retries up to 3 times with linear backoff
- * (2s, 4s, 6s). Throws if all attempts fail — the caller should
- * catch this and show a "Failed to save" toast or similar.
+ * On primary failure, retries up to 3 times with linear backoff (2s, 4s, 6s).
+ * Throws if all attempts fail — the caller should catch this and show a
+ * "Failed to save" toast or similar. The caller never waits on redundancy.
  * Rate-limited to 3 calls/sec per relay.
  *
- * @param relays - Relay URLs. Used to get/create the pool.
+ * @param relays - Relay URLs (accepted for backward-compat; routing is
+ *   always to primary regardless of this list).
  * @param event - Signed Nostr event to publish.
  * @param timeoutMs - Timeout per attempt. Default: 10s.
- * @throws Error if all retry attempts are exhausted.
+ * @throws Error if all retry attempts to the primary are exhausted.
  */
 export async function publishToRelays(
   relays: string[],
@@ -421,16 +490,19 @@ export async function publishToRelays(
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const p = getPool(relays);
 
-    // Record the call for rate-limit tracking (non-blocking)
-    for (const u of activeWriteRelays) acquireSlot(u);
+    // Rate-limit slot for primary (router sends to primary only).
+    acquireSlot(primaryRelay);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       await p.event(event, { signal: controller.signal });
-      log.debug("published event", event.id?.slice(0, 8), "kind:", event.kind);
-      return; // success
+      log.debug("published to primary", event.id?.slice(0, 8), "kind:", event.kind);
+      // Queue for background redundancy publish. Never awaited — caller
+      // returns immediately once primary has accepted the event.
+      scheduleRedundancy(event);
+      return;
     } catch (err) {
       if (attempt < MAX_RETRIES) {
         const delay = RETRY_DELAY_MS * (attempt + 1);
@@ -444,6 +516,82 @@ export async function publishToRelays(
     } finally {
       clearTimeout(timer);
     }
+  }
+}
+
+// ── Background redundancy publishing ────────────────────────────────
+//
+// After a successful primary publish, each event is queued for background
+// redundancy. A drainer, invoked via requestIdleCallback (setTimeout
+// fallback), replays queued events to every redundancy relay. These
+// publishes are best-effort — failures are logged at debug and dropped
+// without retry, since the event is already durably stored on primary.
+
+/** Max events pending redundancy publish. Bursts beyond this drop the
+ *  oldest queued events — primary already has them, so dropping is safe. */
+const MAX_REDUNDANCY_QUEUE = 500;
+
+/** Queue of events awaiting idle-time redundancy broadcast. */
+const redundancyQueue: NostrEvent[] = [];
+
+/** True while drainRedundancy is running, to prevent overlapping drains. */
+let redundancyDraining = false;
+
+/** Per-publish timeout for redundancy relays (longer than primary: not on
+ *  the hot path, so a slow relay can have time without harming UX). */
+const REDUNDANCY_TIMEOUT_MS = 15_000;
+
+/** Enqueue an event for idle-time broadcast to redundancy relays. */
+function scheduleRedundancy(event: NostrEvent): void {
+  if (redundancyRelays.length === 0) return;
+  redundancyQueue.push(event);
+  while (redundancyQueue.length > MAX_REDUNDANCY_QUEUE) {
+    redundancyQueue.shift();
+  }
+  requestIdleRun(() => { void drainRedundancy(); });
+}
+
+/** Run `fn` when the event loop is idle. Falls back to a short setTimeout
+ *  on runtimes without requestIdleCallback (Safari, some older WebViews). */
+function requestIdleRun(fn: () => void): void {
+  const g = globalThis as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void };
+  if (typeof g.requestIdleCallback === "function") {
+    g.requestIdleCallback(fn, { timeout: 30_000 });
+  } else {
+    setTimeout(fn, 1000);
+  }
+}
+
+/** Drain the redundancy queue, publishing each event to every redundancy
+ *  relay. Runs serially to avoid saturating the browser's WebSocket budget,
+ *  and yields between events so it never blocks the main thread for long. */
+async function drainRedundancy(): Promise<void> {
+  if (redundancyDraining) return;
+  if (!pool || redundancyRelays.length === 0 || redundancyQueue.length === 0) return;
+  redundancyDraining = true;
+  try {
+    while (redundancyQueue.length > 0 && redundancyRelays.length > 0) {
+      const event = redundancyQueue.shift()!;
+      const targets = [...redundancyRelays];
+      for (const url of targets) acquireSlot(url);
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REDUNDANCY_TIMEOUT_MS);
+      try {
+        // pool.event with explicit `relays` bypasses the primary-only router.
+        await pool.event(event, { signal: controller.signal, relays: targets });
+        log.debug("redundancy publish ok", event.id?.slice(0, 8));
+      } catch (err) {
+        log.debug("redundancy publish failed (best-effort):", err);
+      } finally {
+        clearTimeout(timer);
+      }
+
+      // Yield to the event loop between events so UI stays responsive.
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  } finally {
+    redundancyDraining = false;
   }
 }
 
