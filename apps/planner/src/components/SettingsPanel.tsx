@@ -1,6 +1,9 @@
-import { X, Shield, ShieldOff, AlertTriangle, Bell, Archive, Share2 } from "lucide-react";
+import { useState } from "react";
+import { X, Shield, ShieldOff, AlertTriangle, Bell, Archive, Share2, Radio } from "lucide-react";
 import { useSettings, type NotifyMethod } from "../contexts/SettingsContext";
 import { useCalendar } from "../contexts/CalendarContext";
+import { useNostr } from "../contexts/NostrContext";
+import { SUGGESTED_RELAYS } from "../lib/nostr";
 import { isTauri } from "../lib/platform";
 
 interface SettingsPanelProps {
@@ -16,8 +19,33 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
     togglePublicCalendar,
     notification,
     setNotification,
+    primaryRelay,
+    setPrimaryRelay,
   } = useSettings();
   const { calendars } = useCalendar();
+  const { nip65Relays } = useNostr();
+
+  // Set of relay URLs the user can choose from their NIP-65 list, plus the
+  // suggested hardcoded list. Deduplicated; NIP-65 entries take precedence.
+  const nip65Urls = [...new Set([...nip65Relays.read, ...nip65Relays.write])];
+  const builtInOptions = SUGGESTED_RELAYS.filter((u) => !nip65Urls.includes(u));
+
+  // "Custom" is selected when the current primary doesn't appear in either
+  // list above — i.e. it was entered manually.
+  const isBuiltInOrNip65 = nip65Urls.includes(primaryRelay) || builtInOptions.includes(primaryRelay);
+  const [customMode, setCustomMode] = useState<boolean>(!isBuiltInOrNip65);
+  const [customUrl, setCustomUrl] = useState<string>(isBuiltInOrNip65 ? "" : primaryRelay);
+  const [customError, setCustomError] = useState<string>("");
+
+  const applyCustom = () => {
+    const trimmed = customUrl.trim();
+    if (!/^wss?:\/\//i.test(trimmed)) {
+      setCustomError("URL must start with wss:// or ws://");
+      return;
+    }
+    setCustomError("");
+    setPrimaryRelay(trimmed);
+  };
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
@@ -84,6 +112,124 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Primary relay */}
+          <div>
+            <h3 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
+              <Radio className="w-4 h-4" /> Primary Relay
+            </h3>
+            <p className="text-xs text-gray-400 mb-3">
+              All reads and interactive publishes go here first. Other
+              relays in your list receive background copies during idle
+              time for durability, but never slow the app down. Pick one
+              you control or trust for fast, reliable performance.
+            </p>
+
+            <div className="space-y-1">
+              {nip65Urls.length > 0 && (
+                <div className="mb-2">
+                  <div className="text-xs text-gray-500 mb-1 px-1">From your Nostr relays (NIP-65)</div>
+                  {nip65Urls.map((url) => (
+                    <label
+                      key={`nip65-${url}`}
+                      className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-colors ${
+                        primaryRelay === url && !customMode ? "bg-primary-50" : "hover:bg-gray-50"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="primary-relay"
+                        checked={primaryRelay === url && !customMode}
+                        onChange={() => {
+                          setCustomMode(false);
+                          setCustomError("");
+                          setPrimaryRelay(url);
+                        }}
+                        className="w-4 h-4 text-primary-600"
+                      />
+                      <span className="text-sm text-gray-700 break-all">{url}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              {builtInOptions.length > 0 && (
+                <div className="mb-2">
+                  <div className="text-xs text-gray-500 mb-1 px-1">Suggested</div>
+                  {builtInOptions.map((url) => (
+                    <label
+                      key={`suggested-${url}`}
+                      className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-colors ${
+                        primaryRelay === url && !customMode ? "bg-primary-50" : "hover:bg-gray-50"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="primary-relay"
+                        checked={primaryRelay === url && !customMode}
+                        onChange={() => {
+                          setCustomMode(false);
+                          setCustomError("");
+                          setPrimaryRelay(url);
+                        }}
+                        className="w-4 h-4 text-primary-600"
+                      />
+                      <span className="text-sm text-gray-700 break-all">{url}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              <div>
+                <label
+                  className={`flex items-start gap-2 p-2 rounded-lg cursor-pointer transition-colors ${
+                    customMode ? "bg-primary-50" : "hover:bg-gray-50"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="primary-relay"
+                    checked={customMode}
+                    onChange={() => setCustomMode(true)}
+                    className="mt-0.5 w-4 h-4 text-primary-600"
+                  />
+                  <div className="flex-1">
+                    <span className="text-sm text-gray-700">Custom</span>
+                    <p className="text-xs text-gray-400">
+                      Enter any relay URL you control or trust
+                    </p>
+                  </div>
+                </label>
+                {customMode && (
+                  <div className="mt-2 pl-6 space-y-1">
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={customUrl}
+                        onChange={(e) => { setCustomUrl(e.target.value); setCustomError(""); }}
+                        onKeyDown={(e) => { if (e.key === "Enter") applyCustom(); }}
+                        placeholder="wss://relay.example.com"
+                        className="flex-1 min-w-0 px-2 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      />
+                      <button
+                        onClick={applyCustom}
+                        disabled={!customUrl.trim()}
+                        className="px-3 py-1.5 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                      >
+                        Set
+                      </button>
+                    </div>
+                    {customError && (
+                      <p className="text-xs text-red-600">{customError}</p>
+                    )}
+                    {!customError && customUrl.trim() && customUrl.trim() === primaryRelay && (
+                      <p className="text-xs text-emerald-600">Active</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* Public calendars */}

@@ -52,7 +52,7 @@ export function CalendarApp() {
   const { pubkey, profile, logout, signer, relays } = useNostr();
   const { viewMode, setViewMode, eventsLoading, calendars, events, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot, lastRemoteSha, setLastRemoteSha, eventTombstones, undoDepth, redoDepth, undo, redo } = useCalendar();
   const { acceptInviteLink } = useSharing();
-  const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, getSettings, restoreSettings } = useSettings();
+  const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, getSettings, restoreSettings, primaryRelay } = useSettings();
   const { alerts, dismiss } = useNotifications();
   const { habits, completions, lists, applySnapshot: applyTasksSnapshot, habitTombstones, listTombstones } = useTasks();
   const { phase: backupPhase, countdown: saveCountdown, lastError: backupError, backupNow } = useAutoBackup();
@@ -143,9 +143,12 @@ export function CalendarApp() {
 
   useEffect(() => {
     if (!pubkey || !signer?.nip44) return;
+    // primaryRelay is unused in the body but included in deps so the
+    // subscription tears down + reopens when the user switches primary.
+    void primaryRelay;
     const close = watchPointer(pubkey, relays, signer.nip44, lastRemoteShaRef, applyRemoteSnapshot);
     return close;
-  }, [pubkey, signer, relays, applyRemoteSnapshot]);
+  }, [pubkey, signer, relays, applyRemoteSnapshot, primaryRelay]);
 
   // Manual "Sync now" action — wired to a header button. Flushes the
   // local pending save (so the other device sees us) and pulls the

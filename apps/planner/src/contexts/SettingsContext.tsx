@@ -30,6 +30,8 @@ import { useNostr } from "./NostrContext";
 import { isNip44Available } from "../lib/crypto";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
+import { SUGGESTED_RELAYS } from "../lib/nostr";
+import { setPrimaryRelay as relaySetPrimary } from "../lib/relay";
 
 const log = logger("settings");
 
@@ -90,6 +92,11 @@ interface SettingsContextValue {
   /** Auto-backup toggle */
   autoBackup: boolean;
   setAutoBackup: (v: boolean) => void;
+  /** URL of the relay the app uses for every read and every interactive
+   *  publish. Defaults to SUGGESTED_RELAYS[0] when the user has not chosen
+   *  one. Changing this resets the relay pool. */
+  primaryRelay: string;
+  setPrimaryRelay: (url: string) => void;
   /** Snapshot all settings for backup */
   getSettings: () => PersistedSettings;
   /** Bulk-restore settings from backup */
@@ -125,8 +132,13 @@ export interface PersistedSettings {
   viewMode?: "upcoming" | "month";
   autoBackup?: boolean;
   notification?: NotificationSettings;
+  /** User's chosen primary relay URL. Undefined falls back to default. */
+  primaryRelay?: string;
   [key: string]: unknown; // forward-compat: restore won't break on future fields
 }
+
+/** Fallback primary relay when the user has not picked one. */
+const DEFAULT_PRIMARY_RELAY = SUGGESTED_RELAYS[0];
 
 /**
  * Provider that manages user preferences. Reads from and writes to localStorage
@@ -146,6 +158,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [savedViewMode, setSavedViewModeState] = useState<"upcoming" | "month">("month");
   const [autoBackup, setAutoBackupState] = useState(true);
   const [notification, setNotificationState] = useState<NotificationSettings>(DEFAULT_NOTIFY);
+  const [primaryRelay, setPrimaryRelayState] = useState<string>(DEFAULT_PRIMARY_RELAY);
 
   // Re-check NIP-44 support whenever the signer changes (login/logout/extension
   // upgrade) or the window regains focus (the user may have installed an extension
@@ -178,6 +191,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       setSavedViewModeState("month");
       setAutoBackupState(true);
       setNotificationState(DEFAULT_NOTIFY);
+      setPrimaryRelayState(DEFAULT_PRIMARY_RELAY);
+      relaySetPrimary(DEFAULT_PRIMARY_RELAY);
       /* eslint-enable react-hooks/set-state-in-effect */
       return;
     }
@@ -202,7 +217,14 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         }
         setAutoBackupState(parsed.autoBackup ?? true);
         if (parsed.notification) setNotificationState({ ...DEFAULT_NOTIFY, ...parsed.notification });
+        const savedPrimary = typeof parsed.primaryRelay === "string" && parsed.primaryRelay.trim()
+          ? parsed.primaryRelay
+          : DEFAULT_PRIMARY_RELAY;
+        setPrimaryRelayState(savedPrimary);
+        relaySetPrimary(savedPrimary);
       } else {
+        // No saved settings yet — ensure relay.ts is aligned with the default.
+        relaySetPrimary(DEFAULT_PRIMARY_RELAY);
         log.debug("no saved settings for", pubkey.slice(0, 8), "— using defaults");
       }
     } catch {
@@ -240,6 +262,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         viewMode: overrides.viewMode ?? existing.viewMode ?? "month",
         autoBackup: overrides.autoBackup ?? existing.autoBackup ?? true,
         notification: overrides.notification ?? existing.notification ?? DEFAULT_NOTIFY,
+        primaryRelay: overrides.primaryRelay ?? existing.primaryRelay,
       };
       lsSet(key, JSON.stringify(data));
       log.debug("settings persisted for", pubkey.slice(0, 8));
@@ -309,6 +332,24 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     [persist, notification]
   );
 
+  /** Update the primary relay — trims, validates, syncs to relay.ts,
+   *  persists, and updates React state. Invalid URLs are ignored so a
+   *  half-typed custom entry can't break the app. */
+  const setPrimaryRelay = useCallback(
+    (url: string) => {
+      const trimmed = url.trim();
+      if (!trimmed || !/^wss?:\/\//i.test(trimmed)) {
+        log.warn("ignoring invalid primary relay URL:", url);
+        return;
+      }
+      if (trimmed === primaryRelay) return;
+      setPrimaryRelayState(trimmed);
+      relaySetPrimary(trimmed);
+      persist({ primaryRelay: trimmed });
+    },
+    [persist, primaryRelay]
+  );
+
   /** Snapshot all current settings into a plain object suitable for backup. */
   const getSettings = useCallback((): PersistedSettings => ({
     publicCalendars: [...publicCalendars],
@@ -318,7 +359,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     viewMode: savedViewMode,
     autoBackup,
     notification,
-  }), [publicCalendars, showDaily, showTodo, showLists, savedViewMode, autoBackup, notification]);
+    primaryRelay,
+  }), [publicCalendars, showDaily, showTodo, showLists, savedViewMode, autoBackup, notification, primaryRelay]);
 
   /** Bulk-restore settings from a backup snapshot. Applies each field and persists. */
   const restoreSettings = useCallback(
@@ -331,6 +373,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       if (s.viewMode) setSavedViewModeState(s.viewMode);
       if (s.autoBackup !== undefined) setAutoBackupState(s.autoBackup);
       if (s.notification) setNotificationState({ ...DEFAULT_NOTIFY, ...s.notification });
+      if (typeof s.primaryRelay === "string" && /^wss?:\/\//i.test(s.primaryRelay.trim())) {
+        const url = s.primaryRelay.trim();
+        setPrimaryRelayState(url);
+        relaySetPrimary(url);
+      }
       persist({
         publicCalendarsSet: s.publicCalendars ? new Set(s.publicCalendars) : undefined,
         showDaily: s.showDaily,
@@ -339,6 +386,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         viewMode: s.viewMode,
         autoBackup: s.autoBackup,
         notification: s.notification ? { ...DEFAULT_NOTIFY, ...s.notification } : undefined,
+        primaryRelay: typeof s.primaryRelay === "string" ? s.primaryRelay : undefined,
       });
     },
     [persist]
@@ -383,6 +431,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setAutoBackup,
         notification,
         setNotification,
+        primaryRelay,
+        setPrimaryRelay,
         getSettings,
         restoreSettings,
       }}

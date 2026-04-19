@@ -60,6 +60,10 @@ interface NostrContextValue {
   pubkey: string | null;
   /** Active relay URLs — starts with hardcoded defaults, then merges NIP-65 list. */
   relays: string[];
+  /** User's parsed NIP-65 read/write relay lists (kind-10002). Empty until the
+   *  login-time fetch completes, or if the user has no NIP-65 event. Exposed
+   *  so the Settings UI can offer these as choices for the primary relay. */
+  nip65Relays: { read: string[]; write: string[] };
   /** Kind-0 profile metadata (display name + avatar), fetched best-effort. */
   profile: NostrProfile | null;
   /** The active signer implementation, or `null` when no session is active. */
@@ -107,6 +111,7 @@ export function useNostr() {
 export function NostrProvider({ children }: { children: ReactNode }) {
   const [pubkey, setPubkey] = useState<string | null>(null);
   const [relays, setRelays] = useState<string[]>(DEFAULT_RELAYS);
+  const [nip65Relays, setNip65Relays] = useState<{ read: string[]; write: string[] }>({ read: [], write: [] });
   const [profile, setProfile] = useState<NostrProfile | null>(null);
   const [signer, setSigner] = useState<NostrSigner | null>(null);
   // Stages: "idle" before any attempt, "attempting" during auto-login,
@@ -134,7 +139,11 @@ export function NostrProvider({ children }: { children: ReactNode }) {
         if (events.length > 0) {
           const parsed = parseRelayList(events[0]);
           if (parsed.all.length > 0) {
-            // NIP-65 outbox: separate read/write relay sets
+            // Store the raw parsed NIP-65 lists (without fallback merging)
+            // so the Settings UI can show exactly what the user published.
+            setNip65Relays({ read: [...parsed.read], write: [...parsed.write] });
+            // NIP-65 outbox: separate read/write relay sets (merged with
+            // fallbacks so redundancy publishes have at least the defaults).
             setRelayLists(
               [...new Set([...parsed.read, ...fallbackRelays])],
               [...new Set([...parsed.write, ...fallbackRelays])]
@@ -274,6 +283,7 @@ export function NostrProvider({ children }: { children: ReactNode }) {
     setSigner(null);
     setPubkey(null);
     setRelays(DEFAULT_RELAYS);
+    setNip65Relays({ read: [], write: [] });
     setProfile(null);
     setHasSavedSession(false);
     setAutoLoginState("idle");
@@ -445,6 +455,7 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       value={{
         pubkey,
         relays,
+        nip65Relays,
         profile,
         signer,
         hasSavedSession,
