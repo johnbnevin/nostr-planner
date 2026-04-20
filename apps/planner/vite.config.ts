@@ -38,8 +38,15 @@ export default defineConfig({
     environment: "node",
     include: ["src/**/*.test.ts"],
   },
-  // Tauri requires a relative base for desktop/mobile builds
-  base: inTauri ? "./" : (process.env.VITE_BASE || "/"),
+  // Use a relative base for every build (Tauri + web). Web absolute paths
+  // ("/assets/...") break sub-path deploys like noobstr.me/planner/: the
+  // browser resolves them against the domain root, gets the server's
+  // fallback HTML, and the MIME-type guard refuses the asset. "./"
+  // resolves against the HTML document's URL, so the same dist works
+  // whether the app lives at "/", "/planner/", or an nsite path.
+  // Override with VITE_BASE=/something/ if a named absolute path is
+  // actually needed for a specific deploy target.
+  base: inTauri ? "./" : (process.env.VITE_BASE || "./"),
   server: {
     // Tauri needs a fixed port and host; TAURI_DEV_HOST is set for mobile dev
     host: inTauri ? (process.env.TAURI_DEV_HOST || "localhost") : "::",
