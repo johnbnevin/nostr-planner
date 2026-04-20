@@ -118,6 +118,17 @@ const markOwnPublish = (sha: string) => {
   setTimeout(() => ownPublishedShas.delete(sha), 60_000);
 };
 
+// Sha256s of pointers this tab has loaded (either via loadSnapshot on
+// login or via the pre-save optimistic-concurrency check). watchPointer
+// also consults this set so the live subscription doesn't treat a pointer
+// we just loaded as a fresh cross-device update and fire a spurious
+// "Synced from another device" toast.
+const seenRemoteShas = new Set<string>();
+const markSeenRemote = (sha: string) => {
+  seenRemoteShas.add(sha);
+  setTimeout(() => seenRemoteShas.delete(sha), 60_000);
+};
+
 const withTimeout = async <T>(p: Promise<T>, ms: number, label: string): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -190,15 +201,25 @@ export async function saveSnapshot(
 ): Promise<SnapshotPointer> {
   const startedAt = Date.now();
 
-  // 0. Optimistic-concurrency guard. If another device has published a
-  //    newer pointer since we last synced, merge its snapshot into ours
-  //    before uploading so we don't silently overwrite their edits.
+  // 0. Optimistic-concurrency guard. If a remote pointer exists and
+  //    differs from the sha this tab last loaded/saved, merge it into
+  //    our snapshot before uploading so we don't silently clobber the
+  //    other device's edits. An undefined lastKnownSha is treated as
+  //    "we haven't synced with the remote yet, assume anything there is
+  //    newer" — this closes the window where a first login that fails
+  //    to find the pointer (e.g. primary relay is missing it) would
+  //    otherwise publish a blind overwrite on the next fingerprint
+  //    change.
   let working = snapshot;
-  if (relays && lastKnownSha !== undefined) {
+  if (relays) {
     try {
       const current = await findPointer(pubkey, relays);
       if (current && current.sha256 !== lastKnownSha) {
-        log.info(`pointer raced (ours=${lastKnownSha.slice(0, 8)}, remote=${current.sha256.slice(0, 8)}); merging`);
+        const oursLabel = lastKnownSha ? lastKnownSha.slice(0, 8) : "unknown";
+        log.info(`pointer raced (ours=${oursLabel}, remote=${current.sha256.slice(0, 8)}); merging`);
+        // loadSnapshot itself calls markSeenRemote(sha256), so the live
+        // watchPointer subscription won't re-deliver this sha as a
+        // cross-device update moments from now.
         const remote = await loadSnapshot(pubkey, relays, nip44);
         if (remote) working = mergeSnapshots(working, remote);
       }
@@ -367,6 +388,10 @@ export async function loadSnapshot(
     if (e.end) e.end = new Date(e.end as unknown as string);
   }
   log.info(`restored: ${snap.events.length} events, ${snap.calendars.length} calendars, ${snap.habits.length} habits, ${snap.lists.length} lists`);
+  // Tell watchPointer we've already processed this sha so the live
+  // subscription doesn't re-deliver it as a "Synced from another device"
+  // event seconds later.
+  markSeenRemote(pointer.sha256);
   return { ...snap, _sha256: pointer.sha256 };
 }
 
@@ -484,7 +509,12 @@ export function watchPointer(
   const processPointer = async (sha: string, servers: string[]) => {
     if (closed) return;
     if (sha === lastSha) return;
-    if (ownPublishedShas.has(sha)) { lastSha = sha; return; }
+    // Skip pointers we've already ingested on this tab — either through
+    // our own publish or through a prior load (login restore, pre-save
+    // concurrency check). Without this, a pointer that arrives on the
+    // live subscription seconds after we load it fires a spurious
+    // "Synced from another device" toast.
+    if (ownPublishedShas.has(sha) || seenRemoteShas.has(sha)) { lastSha = sha; return; }
     log.debug(`watchPointer: new pointer ${sha.slice(0, 8)}, fetching`);
     const allServers = [...new Set([...servers, ...BLOSSOM_SERVERS])];
     const body = await raceFetch(sha, allServers);
