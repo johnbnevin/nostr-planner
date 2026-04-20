@@ -493,8 +493,14 @@ export async function publishToRelays(
         await new Promise((r) => setTimeout(r, delay));
       } else {
         log.error("publish failed after", MAX_RETRIES, "retries:", err);
-        notifyPublishFailure(err instanceof Error ? err : new Error(String(err)), event);
-        throw err;
+        // The raw error from NPool is usually AggregateError("All promises
+        // were rejected") which is cryptic in a user-facing toast. Wrap
+        // with a friendlier message that names the relay so the user
+        // knows what's unreachable. The original error is still logged
+        // above for debugging.
+        const friendly = new Error(`could not reach primary relay (${primaryRelay})`);
+        notifyPublishFailure(friendly, event);
+        throw friendly;
       }
     } finally {
       clearTimeout(timer);
