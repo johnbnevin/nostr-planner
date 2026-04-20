@@ -152,29 +152,12 @@ function drainQueue(url: string): void {
 let pool: NPool | null = null;
 
 /** URL of the current primary relay — the only relay used on the hot path.
- *  Read from localStorage at module init so the correct primary is in
- *  place before any React effect runs (important: CalendarApp's
- *  loadSnapshot effect fires before SettingsContext's restore effect
- *  due to React's child-first useEffect order). SettingsContext still
- *  calls setPrimaryRelay after its own restore; for the last-active
- *  pubkey that's a no-op, and for a different pubkey it switches. */
-let primaryRelay: string = loadSavedPrimaryOrDefault();
-
-/** Read the last-active user's saved primary-relay preference from
- *  localStorage. Returns the first suggested relay if nothing is saved,
- *  the saved value is malformed, or localStorage is unavailable. */
-function loadSavedPrimaryOrDefault(): string {
-  try {
-    const pk = localStorage.getItem("nostr-planner-pubkey");
-    if (!pk) return SUGGESTED_RELAYS[0];
-    const raw = localStorage.getItem(`nostr-planner-settings-${pk}`);
-    if (!raw) return SUGGESTED_RELAYS[0];
-    const parsed = JSON.parse(raw) as { primaryRelay?: unknown };
-    const candidate = typeof parsed.primaryRelay === "string" ? parsed.primaryRelay.trim() : "";
-    if (candidate && /^wss?:\/\//i.test(candidate)) return candidate;
-  } catch { /* fall through to default */ }
-  return SUGGESTED_RELAYS[0];
-}
+ *  Defaults to the first suggested relay; SettingsContext replaces this on
+ *  login with the user's saved preference (if any). Consumers that run on
+ *  login must include `primaryRelay` in their effect deps so they retry
+ *  once SettingsContext has restored the saved choice (see loadSnapshot
+ *  and watchPointer in CalendarApp for the pattern). */
+let primaryRelay: string = SUGGESTED_RELAYS[0];
 
 /** Cached NIP-65 read/write lists from the user's kind-10002 event.
  *  Kept to feed the Settings UI list and to compute redundancy, nothing
