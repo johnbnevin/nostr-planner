@@ -68,26 +68,37 @@ export function CalendarApp() {
   // Single entry point for "login → restore" — applies calendar, tasks
   // and settings state in one pass so you don't see a flash of empty
   // events while tasks populate separately.
+  // Set to true only after a snapshot is actually found + applied, so if
+  // the first attempt runs before SettingsContext has restored the user's
+  // saved primary relay (possible because useEffect order is child-first),
+  // we retry when `primaryRelay` changes.
   const restoredRef = useRef(false);
+  // Guards against concurrent in-flight loads when deps change rapidly
+  // during the login-restore burst (pubkey, relays, primaryRelay can all
+  // update within a few ticks).
+  const restoringRef = useRef(false);
   const [syncedFromOther, setSyncedFromOther] = useState(false);
   useEffect(() => {
-    if (!pubkey) { restoredRef.current = false; return; }
-    if (restoredRef.current) return;
+    if (!pubkey) { restoredRef.current = false; restoringRef.current = false; return; }
+    if (restoredRef.current || restoringRef.current) return;
     if (!signer?.nip44) return;
-    restoredRef.current = true;
+    restoringRef.current = true;
     (async () => {
       try {
         const snap = await loadSnapshot(pubkey, relays, signer.nip44);
         if (!snap) return;
+        restoredRef.current = true;
         applyCalendarSnapshot(snap.events, snap.calendars);
         applyTasksSnapshot(snap.habits, snap.completions, snap.lists);
         restoreSettings(snap.settings);
         setLastRemoteSha(snap._sha256);
       } catch (err) {
         console.warn("snapshot restore failed:", err);
+      } finally {
+        restoringRef.current = false;
       }
     })();
-  }, [pubkey, signer, relays, applyCalendarSnapshot, applyTasksSnapshot, restoreSettings, setLastRemoteSha]);
+  }, [pubkey, signer, relays, primaryRelay, applyCalendarSnapshot, applyTasksSnapshot, restoreSettings, setLastRemoteSha]);
 
   // ── Multi-device sync: watch for snapshot pointer updates from other
   //    devices signed into the same npub. On new pointer, fetch + merge +
