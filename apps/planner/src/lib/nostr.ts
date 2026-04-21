@@ -115,6 +115,7 @@ export const DEFAULT_RELAYS = [...SUGGESTED_RELAYS];
  *  in Settings for redundancy. */
 export const SUGGESTED_BLOSSOM_SERVERS = [
   "https://nostr.download",
+  "https://blossom.f7z.io",
 ];
 
 /** Supported recurrence frequencies. `bi-weekly` is stored as iCal

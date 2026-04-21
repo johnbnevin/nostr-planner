@@ -27,12 +27,12 @@ import { lsSet } from "../lib/storage";
 
 const log = logger("auto-backup");
 
-// 3 s: short enough that cross-device propagation feels instant, long
-// enough to coalesce bursts of typing / tag-picking / checkbox toggles
-// into a single upload. Was 15 s back when the encrypt step was slow;
-// the current AES-GCM + NIP-44 path is ~100 ms on a phone so there's no
-// benefit to waiting longer.
-const DEBOUNCE_MS = 3_000;
+// 10 s: long enough to coalesce a burst of edits (typing a title,
+// picking tags, toggling habit checkboxes) into one upload, short
+// enough that cross-device propagation still feels prompt. Tuned up
+// from 3 s once Blossom deletePreviousBlob landed — every save also
+// burns a DELETE round-trip, so fewer saves is cheaper.
+const DEBOUNCE_MS = 10_000;
 const RETRY_AFTER_FAILURE_MS = 30_000;
 const LAST_BACKUP_KEY = "nostr-planner-last-autobackup";
 

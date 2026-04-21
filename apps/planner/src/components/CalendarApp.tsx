@@ -27,7 +27,6 @@ import { useAutoBackup } from "../hooks/useAutoBackup";
 import { useDigest } from "../hooks/useDigest";
 import { useTauriScheduledNotifications } from "../hooks/useTauriScheduledNotifications";
 import { decodeInvitePayload } from "../lib/sharing";
-import { onPublishFailure } from "../lib/relay";
 import type { CalendarEvent, RecurrenceFreq } from "../lib/nostr";
 import type { ParsedIcalEvent } from "../lib/ical";
 
@@ -77,7 +76,6 @@ export function CalendarApp() {
   // during the login-restore burst (pubkey, relays, primaryRelay can all
   // update within a few ticks).
   const restoringRef = useRef(false);
-  const [syncedFromOther, setSyncedFromOther] = useState(false);
   useEffect(() => {
     if (!pubkey) { restoredRef.current = false; restoringRef.current = false; return; }
     if (restoredRef.current || restoringRef.current) return;
@@ -137,8 +135,6 @@ export function CalendarApp() {
     applyTasksSnapshot(merged.habits, merged.completions, merged.lists);
     restoreSettings(merged.settings);
     if (remote._sha256) setLastRemoteSha(remote._sha256);
-    setSyncedFromOther(true);
-    setTimeout(() => setSyncedFromOther(false), 2500);
 
     // Conflict check: if the user is currently editing / viewing an
     // event that just got a newer version from another device, flag
@@ -308,18 +304,6 @@ export function CalendarApp() {
     if (parsed.view === "month") return "calendar";
     return viewMode === "upcoming" ? "upcoming" : "calendar";
   });
-  const [publishError, setPublishError] = useState<string | null>(null);
-
-  // Subscribe to relay publish failures for user-facing feedback
-  useEffect(() => {
-    const unsub = onPublishFailure((error) => {
-      setPublishError(error.message);
-      // Auto-dismiss after 6 seconds
-      setTimeout(() => setPublishError(null), 6000);
-    });
-    return unsub;
-  }, []);
-
   // Global Ctrl/Cmd+Z (undo) and Ctrl/Cmd+Shift+Z / Ctrl+Y (redo) keybindings.
   // Skips when focus is in a text input or textarea so users can still
   // undo their typing natively.
@@ -597,18 +581,6 @@ export function CalendarApp() {
       {syncError && (
         <div className="bg-red-50 border-b border-red-200 px-4 py-2 text-sm text-red-800 text-center">
           {syncError}
-        </div>
-      )}
-
-      {publishError && (
-        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 text-center cursor-pointer" onClick={() => setPublishError(null)}>
-          Failed to save: {publishError}
-        </div>
-      )}
-
-      {syncedFromOther && (
-        <div className="bg-emerald-50 border-b border-emerald-200 px-4 py-1.5 text-xs text-emerald-800 text-center">
-          Synced from another device
         </div>
       )}
 
