@@ -243,7 +243,12 @@ export async function saveSnapshot(
   /** sha256 this tab last loaded/saved. When another device has raced us
    *  and published a newer pointer with a different sha256, we merge first
    *  so we don't clobber their edits. */
-  lastKnownSha?: string
+  lastKnownSha?: string,
+  /** sha256 of the generation-2-back blob to delete after this save
+   *  succeeds. Decoupled from `lastKnownSha` so the caller can keep the
+   *  immediate-prior blob as a recovery safety net (delete N-2, keep N-1
+   *  and N). Pass undefined to skip any cleanup. */
+  shaToDelete?: string
 ): Promise<SnapshotPointer> {
   const startedAt = Date.now();
 
@@ -307,7 +312,7 @@ export async function saveSnapshot(
   let primary: string | null = null;
   for (const server of uploadOrder) {
     try {
-      log.debug(`uploading to ${server}`);
+      log.info(`blossom upload → ${server}`);
       const res = await fetchWithTimeout(
         `${server}/upload`,
         { method: "PUT", body: blob, headers: { authorization: authHeader } },
@@ -315,19 +320,25 @@ export async function saveSnapshot(
       );
       if (!res.ok) {
         const body = await res.text().catch(() => "");
-        errors.push(`${server}: HTTP ${res.status} ${body.slice(0, 120)}`);
+        const msg = `${server}: HTTP ${res.status} ${body.slice(0, 120)}`;
+        log.warn(`blossom upload ✗ ${msg}`);
+        errors.push(msg);
         continue;
       }
       const desc = await res.json().catch(() => null) as { sha256?: string } | null;
       if (!desc || desc.sha256 !== sha256) {
-        errors.push(`${server}: descriptor mismatch (got ${desc?.sha256?.slice(0, 8) ?? "null"})`);
+        const msg = `${server}: descriptor mismatch (got ${desc?.sha256?.slice(0, 8) ?? "null"})`;
+        log.warn(`blossom upload ✗ ${msg}`);
+        errors.push(msg);
         continue;
       }
       primary = server;
-      log.info(`snapshot uploaded to ${server}`);
+      log.info(`blossom upload ✓ ${server}`);
       break;
     } catch (err) {
-      errors.push(`${server}: ${err instanceof Error ? err.message : String(err)}`);
+      const msg = `${server}: ${err instanceof Error ? err.message : String(err)}`;
+      log.warn(`blossom upload ✗ ${msg}`);
+      errors.push(msg);
     }
   }
   if (!primary) {
@@ -357,13 +368,16 @@ export async function saveSnapshot(
   await withTimeout(publishEvent(refEvent), 15_000, "publish snapshot pointer event");
   log.info(`pointer published in ${Date.now() - startedAt}ms`);
 
-  // 5a. Best-effort cleanup of the previously-saved blob. Blossom blobs
-  //     are content-addressed, so every save writes a new sha — without
-  //     this, each user's footprint on every mirror server grows linearly
-  //     with save count. Fire-and-forget; a 404 (server never had it) or
-  //     refusal (server policy) is logged at debug and swallowed.
-  if (lastKnownSha && lastKnownSha !== sha256) {
-    scheduleIdle(() => { void deletePreviousBlob(lastKnownSha, signEvent); });
+  // 5a. Best-effort cleanup of the N-2 blob. Blossom blobs are
+  //     content-addressed, so every save writes a new sha — without
+  //     cleanup, each user's footprint on every mirror server grows
+  //     linearly with save count. We intentionally skip deleting the
+  //     immediate-prior blob (lastKnownSha, the N-1 generation); that
+  //     one is kept as a safety net in case the just-published sha is
+  //     corrupted at the storage layer. Caller manages the rolling
+  //     window and passes N-2 as shaToDelete. Fire-and-forget.
+  if (shaToDelete && shaToDelete !== sha256 && shaToDelete !== lastKnownSha) {
+    scheduleIdle(() => { void deletePreviousBlob(shaToDelete, signEvent); });
   }
 
   // 5. Background mirror to the user's chosen redundancy servers (capped
@@ -375,13 +389,17 @@ export async function saveSnapshot(
       void (async () => {
         for (const server of mirrorTargets) {
           try {
+            log.info(`blossom mirror → ${server}`);
             const res = await fetchWithTimeout(
               `${server}/upload`,
               { method: "PUT", body: blob, headers: { authorization: authHeader } },
               20_000
             );
-            if (res.ok) log.debug(`mirror ok: ${server}`);
-          } catch { /* silent */ }
+            if (res.ok) log.info(`blossom mirror ✓ ${server}`);
+            else log.warn(`blossom mirror ✗ ${server}: HTTP ${res.status}`);
+          } catch (err) {
+            log.warn(`blossom mirror ✗ ${server}: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
       })();
     });
@@ -413,14 +431,16 @@ async function deletePreviousBlob(sha: string, signEvent: SignEventFn): Promise<
   // Delete from every suggested server — we don't track which ones have a
   // copy (user changed redundancy or primary between saves could orphan
   // blobs on servers not in the current effective set). 404s are fine.
+  log.info(`blossom delete ${sha.slice(0, 8)} → ${SUGGESTED_BLOSSOM_SERVERS.length} server(s)`);
   await Promise.allSettled(
     SUGGESTED_BLOSSOM_SERVERS.map((server) =>
-      BlossomClient.deleteBlob(server, sha, auth).catch((err) => {
-        log.debug(`delete of ${sha.slice(0, 8)} on ${server} failed (ignored):`, err);
-      })
+      BlossomClient.deleteBlob(server, sha, auth)
+        .then(() => log.info(`blossom delete ✓ ${server} ${sha.slice(0, 8)}`))
+        .catch((err) => {
+          log.info(`blossom delete ✗ ${server} ${sha.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`);
+        })
     )
   );
-  log.info(`prior blob ${sha.slice(0, 8)} cleanup dispatched`);
 }
 
 function scheduleIdle(fn: () => void): void {
@@ -516,15 +536,27 @@ async function findPointer(
 async function raceFetch(sha256: string, servers: string[]): Promise<string | null> {
   const fetchAndVerify = async (server: string): Promise<string | null> => {
     try {
+      log.info(`blossom fetch → ${server} ${sha256.slice(0, 8)}`);
       const res = await fetchWithTimeout(`${server}/${sha256}`, {}, 15_000);
-      if (!res.ok) return null;
+      if (!res.ok) {
+        log.info(`blossom fetch ✗ ${server}: HTTP ${res.status}`);
+        return null;
+      }
       const buf = await res.arrayBuffer();
-      if (buf.byteLength > MAX_BLOB_BYTES) return null;
+      if (buf.byteLength > MAX_BLOB_BYTES) {
+        log.warn(`blossom fetch ✗ ${server}: blob too large (${buf.byteLength} bytes)`);
+        return null;
+      }
       const hashBuf = await crypto.subtle.digest("SHA-256", buf);
       const actual = hexEncode(new Uint8Array(hashBuf));
-      if (actual !== sha256) { log.warn(`${server}: sha256 mismatch`); return null; }
+      if (actual !== sha256) {
+        log.warn(`blossom fetch ✗ ${server}: sha256 mismatch`);
+        return null;
+      }
+      log.info(`blossom fetch ✓ ${server}`);
       return new TextDecoder().decode(buf);
-    } catch {
+    } catch (err) {
+      log.info(`blossom fetch ✗ ${server}: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
   };

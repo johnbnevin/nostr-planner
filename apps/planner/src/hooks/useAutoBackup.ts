@@ -65,6 +65,13 @@ export function useAutoBackup(): {
   const pendingRef = useRef(false);
   const fingerprint = useRef("");
   const initialLoadDone = useRef(false);
+  // Generation-2-back blob sha. Blossom blobs are content-addressed and
+  // each save uploads a new one; to stay safe against a corrupted
+  // just-uploaded blob we keep the immediate-prior generation alive and
+  // only delete the one before that. Shifted on every successful save:
+  //   ptr.sha256 = new current, lastRemoteSha = prior, priorShaRef = N-2.
+  // The N-2 gets passed into saveSnapshot as `shaToDelete`.
+  const priorShaRef = useRef<string | null>(null);
 
   // Stable refs so the stable-identity doBackup always sees latest state.
   const stateRef = useRef({
@@ -176,8 +183,12 @@ export function useAutoBackup(): {
       });
       const ptr = await saveSnapshot(
         s.pubkey, snapshot, s.signEvent, s.publishEvent, s.signer.nip44,
-        s.relays, s.lastRemoteSha ?? undefined
+        s.relays, s.lastRemoteSha ?? undefined,
+        priorShaRef.current ?? undefined
       );
+      // Shift generations: what was current becomes the new prior (kept
+      // as safety), what was prior becomes the next save's shaToDelete.
+      priorShaRef.current = s.lastRemoteSha ?? null;
       s.setLastRemoteSha(ptr.sha256);
       lsSet(LAST_BACKUP_KEY, new Date().toISOString());
       setLastError(null);
