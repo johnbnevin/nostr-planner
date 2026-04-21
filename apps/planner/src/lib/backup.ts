@@ -325,9 +325,18 @@ export async function saveSnapshot(
         errors.push(msg);
         continue;
       }
-      const desc = await res.json().catch(() => null) as { sha256?: string } | null;
+      const bodyText = await res.text().catch(() => "");
+      let desc: { sha256?: string } | null = null;
+      try { desc = bodyText ? JSON.parse(bodyText) : null; } catch { desc = null; }
       if (!desc || desc.sha256 !== sha256) {
-        const msg = `${server}: descriptor mismatch (got ${desc?.sha256?.slice(0, 8) ?? "null"})`;
+        // Server accepted the upload (2xx) but didn't return a BUD-02
+        // descriptor with a matching sha256. Common causes: server is
+        // misconfigured and sends an empty body / HTML / plain text; the
+        // Blossom mount point is wrong; or the server re-computed a
+        // different hash. Log the first 200 chars of the body so the
+        // user can see what the server actually returned.
+        const preview = bodyText.replace(/\s+/g, " ").trim().slice(0, 200) || "(empty body)";
+        const msg = `${server}: descriptor mismatch (got ${desc?.sha256?.slice(0, 8) ?? "null"}) — server returned: ${preview}`;
         log.warn(`blossom upload ✗ ${msg}`);
         errors.push(msg);
         continue;
@@ -395,10 +404,26 @@ export async function saveSnapshot(
               { method: "PUT", body: blob, headers: { authorization: authHeader } },
               20_000
             );
-            if (res.ok) log.info(`blossom mirror ✓ ${server}`);
-            else log.warn(`blossom mirror ✗ ${server}: HTTP ${res.status}`);
+            if (!res.ok) { log.info(`blossom mirror ✗ ${server}: HTTP ${res.status}`); continue; }
+            // Same BUD-02 descriptor check the primary upload does — a
+            // 2xx without a matching sha means the server quietly
+            // discarded the blob (this is what lets a misconfigured
+            // self-hosted server show 0 blobs despite the app logging
+            // a ✓). Report the body preview so config issues are
+            // obvious in the console.
+            const bodyText = await res.text().catch(() => "");
+            let desc: { sha256?: string } | null = null;
+            try { desc = bodyText ? JSON.parse(bodyText) : null; } catch { desc = null; }
+            if (!desc || desc.sha256 !== sha256) {
+              const preview = bodyText.replace(/\s+/g, " ").trim().slice(0, 160) || "(empty body)";
+              log.info(`blossom mirror ✗ ${server}: descriptor mismatch — server returned: ${preview}`);
+            } else {
+              log.info(`blossom mirror ✓ ${server}`);
+            }
           } catch (err) {
-            log.warn(`blossom mirror ✗ ${server}: ${err instanceof Error ? err.message : String(err)}`);
+            // Background mirrors are best-effort — log at info so the
+            // console isn't screaming about a slow third-party server.
+            log.info(`blossom mirror ✗ ${server}: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
       })();
@@ -430,14 +455,23 @@ async function deletePreviousBlob(sha: string, signEvent: SignEventFn): Promise<
   }
   // Delete from every suggested server — we don't track which ones have a
   // copy (user changed redundancy or primary between saves could orphan
-  // blobs on servers not in the current effective set). 404s are fine.
+  // blobs on servers not in the current effective set). 404s are expected
+  // for servers that don't have this sha; they get swallowed silently so
+  // the console stays readable.
   log.info(`blossom delete ${sha.slice(0, 8)} → ${SUGGESTED_BLOSSOM_SERVERS.length} server(s)`);
   await Promise.allSettled(
     SUGGESTED_BLOSSOM_SERVERS.map((server) =>
       BlossomClient.deleteBlob(server, sha, auth)
         .then(() => log.info(`blossom delete ✓ ${server} ${sha.slice(0, 8)}`))
         .catch((err) => {
-          log.info(`blossom delete ✗ ${server} ${sha.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`);
+          const msg = err instanceof Error ? err.message : String(err);
+          // BlossomClient.deleteBlob calls res.json() on the error body
+          // and 404 responses often come as plain text "Not Found",
+          // which triggers a JSON parse error. That's expected noise —
+          // it's just a "this server doesn't have the blob". Swallow
+          // both the 404 and the JSON-parse-from-404 variants silently.
+          if (/\bnot found\b/i.test(msg) || /is not valid json/i.test(msg)) return;
+          log.info(`blossom delete ✗ ${server} ${sha.slice(0, 8)}: ${msg}`);
         })
     )
   );

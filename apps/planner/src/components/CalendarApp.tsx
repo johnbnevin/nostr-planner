@@ -181,10 +181,12 @@ export function CalendarApp() {
   }, [syncingNow, backupPhase, backupNow, pubkey, signer, relays, applyRemoteSnapshot]);
 
   // Auto-sync on return: when the tab becomes visible or the window
-  // regains focus, flush any pending local changes and pull the latest
-  // remote snapshot. This is what the user expects after switching
-  // between devices — pick up the other device's edits automatically.
-  // Debounced so rapid OS-level focus flicker doesn't spam.
+  // regains focus AFTER being away for a real idle period, flush any
+  // pending local changes and pull the latest remote snapshot. This is
+  // what the user expects after switching between devices — pick up the
+  // other device's edits automatically. Skips quick tab flips / focus
+  // flicker (<60 s since last sync) so normal context-switching doesn't
+  // thrash the primary.
   const syncNowRef = useRef(syncNow);
   syncNowRef.current = syncNow;
   useEffect(() => {
@@ -193,7 +195,7 @@ export function CalendarApp() {
     const trigger = () => {
       if (document.visibilityState !== "visible") return;
       const now = Date.now();
-      if (now - lastAt < 5_000) return;
+      if (now - lastAt < 60_000) return;
       lastAt = now;
       void syncNowRef.current();
     };
