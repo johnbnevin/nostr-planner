@@ -4,7 +4,7 @@ import { useCalendar } from "../contexts/CalendarContext";
 import { useSharing } from "../contexts/SharingContext";
 import { useSettings } from "../contexts/SettingsContext";
 import { useTasks } from "../contexts/TasksContext";
-import { loadSnapshot, watchPointer, buildSnapshot, type Snapshot } from "../lib/backup";
+import { loadSnapshot, watchPointer, buildSnapshot, gcBlobsOnLogin, type Snapshot } from "../lib/backup";
 import { mergeSnapshots } from "../lib/merge";
 import { Header } from "./Header";
 import type { MobileTab } from "./Header";
@@ -17,6 +17,7 @@ import { EventModal } from "./EventModal";
 import { EventDetailModal } from "./EventDetailModal";
 import { DayDetailModal } from "./DayDetailModal";
 import { BackupPanel } from "./BackupPanel";
+import { ShrinkGuardModal } from "./ShrinkGuardModal";
 import { SettingsPanel } from "./SettingsPanel";
 import { ImportReviewModal } from "./ImportReviewModal";
 import { SharingModal } from "./SharingModal";
@@ -48,14 +49,23 @@ import type { ParsedIcalEvent } from "../lib/ical";
  *   no calendars exist yet.
  */
 export function CalendarApp() {
-  const { pubkey, profile, logout, signer, relays } = useNostr();
+  const { pubkey, profile, logout, signer, relays, signEvent } = useNostr();
   const { viewMode, setViewMode, eventsLoading, calendars, events, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot, lastRemoteSha, setLastRemoteSha, eventTombstones, undoDepth, redoDepth, undo, redo } = useCalendar();
   const { acceptInviteLink } = useSharing();
   const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, getSettings, restoreSettings, primaryRelay } = useSettings();
   const { alerts, dismiss } = useNotifications();
   const { habits, completions, lists, applySnapshot: applyTasksSnapshot, habitTombstones, listTombstones } = useTasks();
-  const { phase: backupPhase, countdown: saveCountdown, lastError: backupError, backupNow } = useAutoBackup();
+  const {
+    phase: backupPhase,
+    countdown: saveCountdown,
+    lastError: backupError,
+    backupNow,
+    blockedDetails,
+    proceedAnyway,
+    discardLocalChanges,
+  } = useAutoBackup();
   const [syncingNow, setSyncingNow] = useState(false);
+  const [showShrinkGuard, setShowShrinkGuard] = useState(false);
   useDigest();
   useTauriScheduledNotifications();
   // Apply URL-hash view state once calendars have loaded. Enables the
@@ -90,13 +100,34 @@ export function CalendarApp() {
         applyTasksSnapshot(snap.habits, snap.completions, snap.lists);
         restoreSettings(snap.settings);
         setLastRemoteSha(snap._sha256);
+        // Fire-and-forget login-time blob GC: lists blobs across every
+        // server and prunes anything beyond the 3-generation retention
+        // window (current + 2 prior). Seeds the priorShas cache in
+        // localStorage for useAutoBackup to pick up, so the next save
+        // of the session prunes correctly without waiting for its own
+        // history to build up. Best-effort; does not block the UI.
+        const pubkeyFrozen = pubkey;
+        setTimeout(() => {
+          void (async () => {
+            try {
+              const kept = await gcBlobsOnLogin(pubkeyFrozen, signEvent, snap._sha256);
+              // Seed priorShas cache (oldest first; gc returns newest first).
+              try {
+                const oldestFirst = [...kept].reverse();
+                localStorage.setItem(`nostr-planner-prior-shas-${pubkeyFrozen}`, JSON.stringify(oldestFirst));
+              } catch { /* ignore */ }
+            } catch (err) {
+              console.info("login gc failed (non-fatal):", err);
+            }
+          })();
+        }, 2_000);
       } catch (err) {
         console.warn("snapshot restore failed:", err);
       } finally {
         restoringRef.current = false;
       }
     })();
-  }, [pubkey, signer, relays, primaryRelay, applyCalendarSnapshot, applyTasksSnapshot, restoreSettings, setLastRemoteSha]);
+  }, [pubkey, signer, relays, primaryRelay, signEvent, applyCalendarSnapshot, applyTasksSnapshot, restoreSettings, setLastRemoteSha]);
 
   // ── Multi-device sync: watch for snapshot pointer updates from other
   //    devices signed into the same npub. On new pointer, fetch + merge +
@@ -505,6 +536,7 @@ export function CalendarApp() {
         saveCountdown={saveCountdown}
         backupError={backupError}
         onBackupNow={backupNow}
+        onOpenShrinkGuard={() => setShowShrinkGuard(true)}
         onLogout={logout}
         onNewEvent={() => handleNewEvent()}
         canAddEvent={!eventsLoading && calendars.length > 0}
@@ -803,6 +835,14 @@ export function CalendarApp() {
 
       {showShareView && <ShareViewModal onClose={() => setShowShareView(false)} />}
       {showBackup && <BackupPanel onClose={() => setShowBackup(false)} />}
+      {showShrinkGuard && blockedDetails && (
+        <ShrinkGuardModal
+          details={blockedDetails}
+          onClose={() => setShowShrinkGuard(false)}
+          onProceedAnyway={async () => { setShowShrinkGuard(false); await proceedAnyway(); }}
+          onDiscardLocal={async () => { setShowShrinkGuard(false); await discardLocalChanges(); }}
+        />
+      )}
       {showSettings && <SettingsPanel
         onBackup={() => setShowBackup(true)}
         onShareView={() => setShowShareView(true)}

@@ -189,6 +189,62 @@ const withTimeout = async <T>(p: Promise<T>, ms: number, label: string): Promise
   }
 };
 
+// ── Shrink-guard ────────────────────────────────────────────────────
+//
+// Don't silently publish a snapshot that drops a meaningful chunk of
+// data over a healthy remote. Catches cat-on-keyboard mass-deletes,
+// bugs in the decrypt pipeline that lose half the events, etc.
+// The UI opens a modal so the user can confirm / restore / cancel.
+
+export type SnapshotShrinkKind =
+  | "events-zero"
+  | "events-halved"
+  | "calendars-halved"
+  | "tasks-halved";
+
+export class SnapshotShrinkError extends Error {
+  readonly kind: SnapshotShrinkKind;
+  readonly remote: Snapshot;
+  readonly working: Snapshot;
+  constructor(kind: SnapshotShrinkKind, remote: Snapshot, working: Snapshot) {
+    super(`save blocked: ${kind}`);
+    this.name = "SnapshotShrinkError";
+    this.kind = kind;
+    this.remote = remote;
+    this.working = working;
+  }
+}
+
+/** Returns the shrink-kind that should block the save, or null if the
+ *  delta is within acceptable bounds. Rules documented inline. Counts
+ *  are of **live** items (events with `deleted !== true`) — tombstone
+ *  growth on its own doesn't block, but the corresponding live-count
+ *  drop does. */
+function detectShrink(remote: Snapshot, working: Snapshot): SnapshotShrinkKind | null {
+  const liveEvents = (s: Snapshot) => s.events.filter((e) => !e.deleted).length;
+  const liveCalendars = (s: Snapshot) => s.calendars.length;
+  const liveTasks = (s: Snapshot) =>
+    s.habits.filter((h) => !h.deleted).length + s.lists.filter((l) => !l.deleted).length;
+
+  const rE = liveEvents(remote);
+  const wE = liveEvents(working);
+  // Zero is always a shrink worth confirming. The one exception —
+  // fresh account with no remote snapshot — is handled earlier by
+  // skipping the shrink-check when remoteForShrinkCheck is null.
+  if (rE >= 1 && wE === 0) return "events-zero";
+  if (rE >= 10 && wE < rE * 0.5) return "events-halved";
+
+  const rC = liveCalendars(remote);
+  const wC = liveCalendars(working);
+  if (rC >= 2 && wC < rC * 0.5) return "calendars-halved";
+
+  const rT = liveTasks(remote);
+  const wT = liveTasks(working);
+  if (rT >= 10 && wT < rT * 0.5) return "tasks-halved";
+
+  return null;
+}
+
 // ── Envelope encryption ─────────────────────────────────────────────
 
 export interface Envelope {
@@ -244,11 +300,16 @@ export async function saveSnapshot(
    *  and published a newer pointer with a different sha256, we merge first
    *  so we don't clobber their edits. */
   lastKnownSha?: string,
-  /** sha256 of the generation-2-back blob to delete after this save
-   *  succeeds. Decoupled from `lastKnownSha` so the caller can keep the
-   *  immediate-prior blob as a recovery safety net (delete N-2, keep N-1
-   *  and N). Pass undefined to skip any cleanup. */
-  shaToDelete?: string
+  /** sha256 of the oldest retained generation to delete after this save
+   *  succeeds. Decoupled from `lastKnownSha` so the caller can keep two
+   *  prior blobs as a recovery safety net (delete N-3, keep N, N-1, N-2).
+   *  Pass undefined to skip any cleanup. */
+  shaToDelete?: string,
+  /** Bypass the shrink-guard below when true. Used by the "Save anyway"
+   *  escape hatch in the ShrinkGuardModal after the user has explicitly
+   *  confirmed they want to overwrite a larger remote with a smaller
+   *  local state. */
+  allowShrink?: boolean
 ): Promise<SnapshotPointer> {
   const startedAt = Date.now();
 
@@ -262,20 +323,47 @@ export async function saveSnapshot(
   //    otherwise publish a blind overwrite on the next fingerprint
   //    change.
   let working = snapshot;
+  let remoteForShrinkCheck: (Snapshot & { _sha256: string }) | null = null;
   if (relays) {
     try {
       const current = await findPointer(pubkey, relays);
-      if (current && current.sha256 !== lastKnownSha) {
+      if (current) {
+        const raced = current.sha256 !== lastKnownSha;
         const oursLabel = lastKnownSha ? lastKnownSha.slice(0, 8) : "unknown";
-        log.info(`pointer raced (ours=${oursLabel}, remote=${current.sha256.slice(0, 8)}); merging`);
+        if (raced) {
+          log.info(`pointer raced (ours=${oursLabel}, remote=${current.sha256.slice(0, 8)}); merging`);
+        }
         // loadSnapshot itself calls markSeenRemote(sha256), so the live
         // watchPointer subscription won't re-deliver this sha as a
-        // cross-device update moments from now.
+        // cross-device update moments from now. We load the remote on
+        // every save (not just on conflict) so the shrink-guard below
+        // has counts to compare against; in the same-sha case we just
+        // don't merge.
         const remote = await loadSnapshot(pubkey, relays, nip44);
-        if (remote) working = mergeSnapshots(working, remote);
+        if (remote) {
+          remoteForShrinkCheck = remote;
+          if (raced) working = mergeSnapshots(working, remote);
+        }
       }
     } catch (err) {
       log.warn("pre-save pointer check failed (continuing with local):", err);
+    }
+  }
+
+  // 0b. Shrink-guard. Don't silently publish a snapshot that drops a
+  //     meaningful chunk of data over a healthy remote. Catches cat-on-
+  //     keyboard mass-deletes, merge-pipeline bugs that lose half the
+  //     events, etc. Live counts only — deletions still reduce live
+  //     counts, which is exactly what we want to trip on; the user
+  //     confirms via the modal. allowShrink=true is the "Save anyway"
+  //     bypass the UI sets explicitly.
+  if (!allowShrink && remoteForShrinkCheck) {
+    const r = remoteForShrinkCheck;
+    const w = working;
+    const shrinkKind = detectShrink(r, w);
+    if (shrinkKind) {
+      log.warn(`save blocked — ${shrinkKind}: remote has ${r.events.length} events / ${r.calendars.length} calendars / ${r.habits.length} habits / ${r.lists.length} lists; working has ${w.events.length}/${w.calendars.length}/${w.habits.length}/${w.lists.length}`);
+      throw new SnapshotShrinkError(shrinkKind, r, w);
     }
   }
 
@@ -453,14 +541,17 @@ async function deletePreviousBlob(sha: string, signEvent: SignEventFn): Promise<
     log.debug("could not sign delete auth (ignored):", err);
     return;
   }
-  // Delete from every suggested server — we don't track which ones have a
-  // copy (user changed redundancy or primary between saves could orphan
-  // blobs on servers not in the current effective set). 404s are expected
-  // for servers that don't have this sha; they get swallowed silently so
-  // the console stays readable.
-  log.info(`blossom delete ${sha.slice(0, 8)} → ${SUGGESTED_BLOSSOM_SERVERS.length} server(s)`);
+  // Delete from every server we might have written to — the user's
+  // currently configured primary + mirrors (effectiveBlossomServers())
+  // plus every suggested server (since the user could have switched
+  // primary between saves, orphaning blobs on the old one). Without
+  // this the user's custom primary accumulates blobs forever —
+  // saveSnapshot happily uploads there but deletePreviousBlob never
+  // targeted it. 404s and refusals are silent.
+  const servers = [...new Set([...effectiveBlossomServers(), ...SUGGESTED_BLOSSOM_SERVERS])];
+  log.info(`blossom delete ${sha.slice(0, 8)} → ${servers.length} server(s)`);
   await Promise.allSettled(
-    SUGGESTED_BLOSSOM_SERVERS.map((server) =>
+    servers.map((server) =>
       BlossomClient.deleteBlob(server, sha, auth)
         .then(() => log.info(`blossom delete ✓ ${server} ${sha.slice(0, 8)}`))
         .catch((err) => {
@@ -653,6 +744,64 @@ export async function fetchSnapshotBySha(
   }
   markSeenRemote(sha256);
   return { ...snap, _sha256: sha256 };
+}
+
+/**
+ * Login-time GC. Enumerate every blob the user has on every known
+ * Blossom server, keep the 3 most recent by upload timestamp (current
+ * pointer + two prior generations — our rolling retention window),
+ * best-effort DELETE everything older. Runs once per session via
+ * CalendarApp's login-restore effect. Returns the two "kept as prior"
+ * shas (newest first) so the caller can seed `useAutoBackup`'s
+ * priorShasRef without waiting for a natural save.
+ *
+ * Why this exists: without it, blobs accumulate per session because
+ * `priorShasRef` resets on each page reload. Also cleans up any
+ * historical backlog from before the retention policy was tightened.
+ */
+export async function gcBlobsOnLogin(
+  pubkey: string,
+  signEvent: SignEventFn,
+  currentSha: string,
+): Promise<string[]> {
+  let blobs: BlobHandle[];
+  try {
+    blobs = await listUserBlobs(pubkey, signEvent);
+  } catch (err) {
+    log.warn("gc: list failed", err);
+    return [];
+  }
+  if (blobs.length === 0) return [];
+
+  // Newest-first order from listUserBlobs. Force the current sha into
+  // the keep set regardless of its upload timestamp — some servers
+  // return odd timestamps, and we *always* want the live pointer's
+  // blob alive.
+  const keepShas = new Set<string>([currentSha]);
+  for (const b of blobs) {
+    if (keepShas.size >= 3) break;
+    keepShas.add(b.sha256);
+  }
+
+  const toDelete = blobs.map((b) => b.sha256).filter((sha) => !keepShas.has(sha));
+  if (toDelete.length === 0) {
+    log.info(`gc: nothing to prune (${blobs.length} blobs, all within keep window)`);
+  } else {
+    log.info(`gc: pruning ${toDelete.length} blob(s); keeping ${keepShas.size}`);
+    // Sequential so we don't flood a single signer with parallel delete-auth calls.
+    for (const sha of toDelete) {
+      try { await deletePreviousBlob(sha, signEvent); }
+      catch (err) { log.info(`gc: delete of ${sha.slice(0, 8)} failed (best-effort):`, err); }
+    }
+  }
+
+  // Return the non-current kept shas in newest-first order, which is
+  // the shape useAutoBackup expects (oldest first means we reverse).
+  const priorKept = blobs
+    .map((b) => b.sha256)
+    .filter((sha) => keepShas.has(sha) && sha !== currentSha)
+    .slice(0, 2);
+  return priorKept;
 }
 
 async function findPointer(

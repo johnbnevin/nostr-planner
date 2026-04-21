@@ -21,7 +21,7 @@ import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useSettings } from "../contexts/SettingsContext";
 import { useTasks } from "../contexts/TasksContext";
-import { saveSnapshot, buildSnapshot } from "../lib/backup";
+import { saveSnapshot, buildSnapshot, SnapshotShrinkError, loadSnapshot, type Snapshot, type SnapshotShrinkKind } from "../lib/backup";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
 
@@ -36,7 +36,32 @@ const DEBOUNCE_MS = 10_000;
 const RETRY_AFTER_FAILURE_MS = 30_000;
 const LAST_BACKUP_KEY = "nostr-planner-last-autobackup";
 
-export type BackupPhase = "idle" | "dirty" | "saving" | "error";
+export type BackupPhase = "idle" | "dirty" | "saving" | "error" | "blocked";
+
+export interface BlockedDetails {
+  kind: SnapshotShrinkKind;
+  remote: { events: number; calendars: number; habits: number; lists: number };
+  working: { events: number; calendars: number; habits: number; lists: number };
+}
+
+/** localStorage key storing the JSON array of the two prior-generation
+ *  shas (oldest first) so cross-session pruning works. Scoped per pubkey
+ *  so a second account on the same device doesn't read the wrong list. */
+const priorShasKey = (pubkey: string) => `nostr-planner-prior-shas-${pubkey}`;
+
+function readPriorShas(pubkey: string): string[] {
+  try {
+    const raw = localStorage.getItem(priorShasKey(pubkey));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((s): s is string => typeof s === "string" && /^[0-9a-f]{64}$/.test(s)).slice(-2);
+  } catch { return []; }
+}
+function writePriorShas(pubkey: string, shas: string[]): void {
+  try { lsSet(priorShasKey(pubkey), JSON.stringify(shas.slice(-2))); }
+  catch { /* ignore quota errors etc. */ }
+}
 
 export function useAutoBackup(): {
   phase: BackupPhase;
@@ -46,16 +71,29 @@ export function useAutoBackup(): {
   lastError: string | null;
   /** Force a save right now, bypassing the debounce. */
   backupNow: () => Promise<void>;
+  /** Details of a blocked save (from the shrink-guard). Null unless phase === "blocked". */
+  blockedDetails: BlockedDetails | null;
+  /** User-chosen: proceed with the blocked save. Consumes a one-shot bypass flag. */
+  proceedAnyway: () => Promise<void>;
+  /** User-chosen: throw away local edits, reload the remote snapshot as current. */
+  discardLocalChanges: () => Promise<void>;
 } {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
-  const { events, calendars, eventsLoading, lastRemoteSha, setLastRemoteSha, eventTombstones } = useCalendar();
-  const { habits, completions, lists, loading: tasksLoading, habitTombstones, listTombstones } = useTasks();
-  const { getSettings, autoBackup } = useSettings();
+  const {
+    events, calendars, eventsLoading, lastRemoteSha, setLastRemoteSha, eventTombstones,
+    applySnapshot: applyCalendarSnapshot,
+  } = useCalendar();
+  const {
+    habits, completions, lists, loading: tasksLoading, habitTombstones, listTombstones,
+    applySnapshot: applyTasksSnapshot,
+  } = useTasks();
+  const { getSettings, autoBackup, restoreSettings } = useSettings();
 
   const [phase, setPhase] = useState<BackupPhase>("idle");
   const [lastError, setLastError] = useState<string | null>(null);
   const [saveDueAt, setSaveDueAt] = useState<number | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [blockedDetails, setBlockedDetails] = useState<BlockedDetails | null>(null);
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backingUpRef = useRef(false);
@@ -65,13 +103,22 @@ export function useAutoBackup(): {
   const pendingRef = useRef(false);
   const fingerprint = useRef("");
   const initialLoadDone = useRef(false);
-  // Generation-2-back blob sha. Blossom blobs are content-addressed and
-  // each save uploads a new one; to stay safe against a corrupted
-  // just-uploaded blob we keep the immediate-prior generation alive and
-  // only delete the one before that. Shifted on every successful save:
-  //   ptr.sha256 = new current, lastRemoteSha = prior, priorShaRef = N-2.
-  // The N-2 gets passed into saveSnapshot as `shaToDelete`.
-  const priorShaRef = useRef<string | null>(null);
+  // Two most recent prior-generation blob shas, oldest first. Retention
+  // policy is N + N-1 + N-2; every save prunes the N-3 blob (= the
+  // oldest entry in this array before we shift in a new one). Persisted
+  // in localStorage so cross-session pruning works — without that,
+  // every session leaked one blob on every server. The N-2 at index 0
+  // is what gets passed into saveSnapshot as `shaToDelete`.
+  const priorShasRef = useRef<string[]>([]);
+  // One-shot bypass flag for the shrink-guard. Set by proceedAnyway(),
+  // consumed on the next doBackup() call, then reset to false.
+  const allowShrinkRef = useRef(false);
+  // Seed priorShas from localStorage when the pubkey settles, so
+  // pruning resumes where the last session left off.
+  useEffect(() => {
+    if (!pubkey) { priorShasRef.current = []; return; }
+    priorShasRef.current = readPriorShas(pubkey);
+  }, [pubkey]);
 
   // Stable refs so the stable-identity doBackup always sees latest state.
   const stateRef = useRef({
@@ -181,24 +228,59 @@ export function useAutoBackup(): {
         listTombstones: s.listTombstones,
         settings: s.getSettings(),
       });
+      const allowShrink = allowShrinkRef.current;
+      allowShrinkRef.current = false; // consume one-shot
+      // Oldest of the two prior generations = N-2, which becomes N-3
+      // once the new save lands. That's what we prune on success.
+      const shaToDelete = priorShasRef.current[0];
       const ptr = await saveSnapshot(
         s.pubkey, snapshot, s.signEvent, s.publishEvent, s.signer.nip44,
         s.relays, s.lastRemoteSha ?? undefined,
-        priorShaRef.current ?? undefined
+        shaToDelete,
+        allowShrink,
       );
-      // Shift generations: what was current becomes the new prior (kept
-      // as safety), what was prior becomes the next save's shaToDelete.
-      priorShaRef.current = s.lastRemoteSha ?? null;
+      // Shift generations. Old state → [N-2, N-1]; new state → [N-1, N].
+      // Specifically: drop the now-pruned N-3 (priorShasRef[0]) and
+      // append what was "current" before this save (lastRemoteSha), then
+      // setLastRemoteSha to the freshly-published sha. Cap at length 2.
+      if (s.lastRemoteSha) {
+        priorShasRef.current = [...priorShasRef.current.slice(1), s.lastRemoteSha].slice(-2);
+      }
+      if (s.pubkey) writePriorShas(s.pubkey, priorShasRef.current);
       s.setLastRemoteSha(ptr.sha256);
       lsSet(LAST_BACKUP_KEY, new Date().toISOString());
       setLastError(null);
+      setBlockedDetails(null);
       setPhase("idle");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.error("save failed:", msg);
-      setLastError(msg);
-      setPhase("error");
-      scheduleSave(RETRY_AFTER_FAILURE_MS);
+      if (err instanceof SnapshotShrinkError) {
+        // Save stopped at the shrink-guard. Surface the comparison to
+        // the user via the ShrinkGuardModal (phase="blocked") and do
+        // NOT schedule a retry — we'd just hit the guard again in 30 s.
+        // Fingerprint-change path also won't re-schedule while blocked.
+        log.warn(`save blocked by shrink-guard (${err.kind})`);
+        const summarize = (s: Snapshot) => ({
+          events: s.events.filter((e) => !e.deleted).length,
+          calendars: s.calendars.length,
+          habits: s.habits.filter((h) => !h.deleted).length,
+          lists: s.lists.filter((l) => !l.deleted).length,
+        });
+        setBlockedDetails({
+          kind: err.kind,
+          remote: summarize(err.remote),
+          working: summarize(err.working),
+        });
+        setLastError(null);
+        setPhase("blocked");
+        setSaveDueAt(null);
+        if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+      } else {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error("save failed:", msg);
+        setLastError(msg);
+        setPhase("error");
+        scheduleSave(RETRY_AFTER_FAILURE_MS);
+      }
     } finally {
       backingUpRef.current = false;
       if (pendingRef.current) {
@@ -207,6 +289,47 @@ export function useAutoBackup(): {
       }
     }
   }, []);
+
+  /** User pressed "Save anyway" in the ShrinkGuardModal. Sets the
+   *  one-shot bypass flag and re-fires doBackup immediately. */
+  const proceedAnyway = useCallback(async () => {
+    allowShrinkRef.current = true;
+    setPhase("saving");
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    setSaveDueAt(null);
+    await doBackup();
+  }, [doBackup]);
+
+  /** User pressed "Restore what's on the cloud" — throw away the local
+   *  state that tripped the guard and re-apply whatever the remote has.
+   *  Bypasses the shrink-guard naturally (loaded state == remote, so
+   *  no shrink vs remote on the subsequent save). */
+  const discardLocalChanges = useCallback(async () => {
+    const s = stateRef.current;
+    if (!s.pubkey || !s.signer?.nip44) return;
+    try {
+      const remote = await loadSnapshot(s.pubkey, s.relays, s.signer.nip44);
+      if (!remote) {
+        setLastError("No remote snapshot to restore from.");
+        return;
+      }
+      applyCalendarSnapshot(remote.events, remote.calendars);
+      applyTasksSnapshot(remote.habits, remote.completions, remote.lists);
+      restoreSettings(remote.settings);
+      s.setLastRemoteSha(remote._sha256);
+      // Reset fingerprint to the restored state so the change-detection
+      // effect doesn't immediately interpret the apply as a "dirty" edit.
+      fingerprint.current = computeFingerprint();
+      setBlockedDetails(null);
+      setLastError(null);
+      setPhase("idle");
+      if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+      setSaveDueAt(null);
+    } catch (err) {
+      setLastError(err instanceof Error ? err.message : String(err));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable setters
+  }, [applyCalendarSnapshot, applyTasksSnapshot, restoreSettings]);
 
   // Change detection — runs every render; cheap enough.
   // NO cleanup that clears the timer: that was the autosave-never-fires bug.
@@ -220,8 +343,23 @@ export function useAutoBackup(): {
     const next = computeFingerprint();
     if (next === fingerprint.current) return;
     fingerprint.current = next;
-    setLastError(null);
-    setPhase((prev) => (prev === "saving" ? prev : "dirty"));
+    // While blocked by the shrink-guard, fingerprint changes don't
+    // schedule a new save — they'd just hit the guard again. The
+    // user has to resolve via the modal (Save anyway / Restore /
+    // Keep current) before autosave resumes. But clearing phase
+    // here if the state has grown back past the shrink threshold
+    // is a nice UX: fingerprint updates mean the user is editing;
+    // if they undo whatever shrunk the state, we drop out of
+    // blocked. Simplest: drop blocked on any fingerprint change —
+    // the next save attempt will either succeed (no longer shrunk)
+    // or re-trigger the block.
+    if (phase === "blocked") {
+      setBlockedDetails(null);
+      setPhase("dirty");
+    } else {
+      setLastError(null);
+      setPhase((prev) => (prev === "saving" ? prev : "dirty"));
+    }
     scheduleSave(DEBOUNCE_MS);
   });
 
@@ -258,7 +396,15 @@ export function useAutoBackup(): {
     return () => clearInterval(id);
   }, [saveDueAt]);
 
-  return { phase, countdown, lastError, backupNow: doBackup };
+  return {
+    phase,
+    countdown,
+    lastError,
+    backupNow: doBackup,
+    blockedDetails,
+    proceedAnyway,
+    discardLocalChanges,
+  };
 }
 
 export function getLastAutoBackupTime(): string | null {

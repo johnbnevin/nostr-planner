@@ -17,6 +17,7 @@ import {
   Layers,
   Undo2,
   Redo2,
+  ShieldAlert,
 } from "lucide-react";
 import { format, addMonths, subMonths } from "date-fns";
 
@@ -29,10 +30,13 @@ export type MobileTab = "upcoming" | "calendar" | "daily" | "todos";
 interface HeaderProps {
   pubkey: string;
   profile: NostrProfile | null;
-  backupPhase: "idle" | "dirty" | "saving" | "error";
+  backupPhase: "idle" | "dirty" | "saving" | "error" | "blocked";
   saveCountdown: number | null;
   backupError: string | null;
   onBackupNow: () => Promise<void>;
+  /** Click handler for the cloud icon when phase==="blocked" — opens the
+   *  ShrinkGuardModal where the user picks Save anyway / Restore / Keep. */
+  onOpenShrinkGuard: () => void;
   onLogout: () => void;
   onNewEvent: () => void;
   canAddEvent: boolean;
@@ -71,6 +75,7 @@ export function Header({
   saveCountdown,
   backupError,
   onBackupNow,
+  onOpenShrinkGuard,
   onLogout,
   onNewEvent,
   canAddEvent,
@@ -275,17 +280,20 @@ export function Header({
 
             <button
               onClick={() => {
+                if (backupPhase === "blocked") { onOpenShrinkGuard(); return; }
                 const next = !autoBackup;
                 setAutoBackup(next);
                 if (next) onBackupNow();
               }}
               className={`relative p-1.5 rounded-lg transition-colors ${
                 !autoBackup ? "hover:bg-gray-100"
+                : backupPhase === "blocked" ? "bg-amber-50 hover:bg-amber-100 ring-2 ring-amber-400 animate-pulse"
                 : backupPhase === "idle" ? "bg-emerald-50 hover:bg-emerald-100"
                 : "bg-red-50 hover:bg-red-100"
               }`}
               title={
                 !autoBackup ? "Auto-backup off"
+                : backupPhase === "blocked" ? "Save blocked: the new snapshot would drop a lot of data. Click to review."
                 : backupPhase === "saving" ? "Saving backup…"
                 : backupPhase === "error"
                   ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
@@ -295,6 +303,8 @@ export function Header({
             >
               {!autoBackup ? (
                 <CloudOff className="w-4 h-4 text-gray-400" />
+              ) : backupPhase === "blocked" ? (
+                <ShieldAlert className="w-4 h-4 text-amber-600" />
               ) : backupPhase === "saving" ? (
                 <Loader className="w-4 h-4 animate-spin text-red-600" />
               ) : backupPhase === "error" ? (
@@ -381,17 +391,20 @@ export function Header({
             </button>
             <button
               onClick={() => {
+                if (backupPhase === "blocked") { onOpenShrinkGuard(); return; }
                 const next = !autoBackup;
                 setAutoBackup(next);
                 if (next) onBackupNow();
               }}
               className={`relative p-1.5 rounded-lg transition-colors ${
                 !autoBackup ? "hover:bg-gray-100"
+                : backupPhase === "blocked" ? "bg-amber-50 hover:bg-amber-100 ring-2 ring-amber-400 animate-pulse"
                 : backupPhase === "idle" ? "bg-emerald-50 hover:bg-emerald-100"
                 : "bg-red-50 hover:bg-red-100"
               }`}
               title={
                 !autoBackup ? "Auto-backup off"
+                : backupPhase === "blocked" ? "Save blocked: the new snapshot would drop a lot of data. Click to review."
                 : backupPhase === "saving" ? "Saving backup…"
                 : backupPhase === "error"
                   ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
@@ -401,6 +414,8 @@ export function Header({
             >
               {!autoBackup ? (
                 <CloudOff className="w-4 h-4 text-gray-400" />
+              ) : backupPhase === "blocked" ? (
+                <ShieldAlert className="w-4 h-4 text-amber-600" />
               ) : backupPhase === "saving" ? (
                 <Loader className="w-4 h-4 animate-spin text-red-600" />
               ) : backupPhase === "error" ? (
