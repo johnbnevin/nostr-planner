@@ -394,7 +394,9 @@ export async function queryEvents(
     log.time("query");
 
     try {
+      log.info(`relay query → ${primaryRelay} kinds=${filter.kinds?.join(",") ?? "*"}`);
       const events = await p.query([filter], { signal: controller.signal });
+      log.info(`relay query ✓ ${primaryRelay} ${events.length} event(s)`);
 
       // Verify Schnorr signatures — don't trust relays. Process in batches
       // and yield to the main thread between batches to avoid blocking UI.
@@ -480,8 +482,9 @@ export async function publishToRelays(
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      log.info(`relay publish → ${primaryRelay} kind=${event.kind} id=${event.id?.slice(0, 8)}`);
       await p.event(event, { signal: controller.signal });
-      log.debug("published to primary", event.id?.slice(0, 8), "kind:", event.kind);
+      log.info(`relay publish ✓ ${primaryRelay} kind=${event.kind}`);
       // Queue for background redundancy publish. Never awaited — caller
       // returns immediately once primary has accepted the event.
       scheduleRedundancy(event);
@@ -567,11 +570,12 @@ async function drainRedundancy(): Promise<void> {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), REDUNDANCY_TIMEOUT_MS);
       try {
+        log.info(`relay mirror → [${targets.join(", ")}] kind=${event.kind} id=${event.id?.slice(0, 8)}`);
         // pool.event with explicit `relays` bypasses the primary-only router.
         await pool.event(event, { signal: controller.signal, relays: targets });
-        log.debug("redundancy publish ok", event.id?.slice(0, 8));
+        log.info(`relay mirror ✓ kind=${event.kind}`);
       } catch (err) {
-        log.debug("redundancy publish failed (best-effort):", err);
+        log.info(`relay mirror ✗ (best-effort): ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         clearTimeout(timer);
       }
