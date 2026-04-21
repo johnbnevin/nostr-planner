@@ -1,6 +1,6 @@
 {
   "name": "@nostr-planner/app",
-  "version": "1.16.12",
+  "version": "1.16.13",
   "description": "A personal planner and calendar built on Nostr — no accounts, no servers, just your keys",
   "license": "MIT",
   "type": "module",
