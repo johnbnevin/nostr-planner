@@ -103,12 +103,14 @@ export const DEFAULT_RELAYS = [...SUGGESTED_RELAYS];
 /** Suggested Blossom servers offered in Settings as options for the user's
  *  primary blob store and redundancy mirrors. User can pick any of these
  *  or enter a custom URL (e.g. a self-hosted Blossom server). The first
- *  entry is the hardcoded default for users who have never chosen one. */
+ *  entry is the hardcoded default for users who have never chosen one.
+ *  List is curated to BUD-02-compliant servers that accept binary blob
+ *  uploads (application/octet-stream). CDN-only hosts that reject
+ *  non-media content-types are intentionally excluded. */
 export const SUGGESTED_BLOSSOM_SERVERS = [
-  "https://cdn.sovbit.host",
-  "https://blossom.yakihonne.com",
-  "https://blossom.nostr.build",
   "https://nostr.download",
+  "https://blossom.primal.net",
+  "https://cdn.satellite.earth",
 ];
 
 /** Supported recurrence frequencies. `bi-weekly` is stored as iCal
