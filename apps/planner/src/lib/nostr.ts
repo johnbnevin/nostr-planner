@@ -100,6 +100,17 @@ export const SUGGESTED_RELAYS = [
  *  primary or NIP-65 list has been loaded. */
 export const DEFAULT_RELAYS = [...SUGGESTED_RELAYS];
 
+/** Suggested Blossom servers offered in Settings as options for the user's
+ *  primary blob store and redundancy mirrors. User can pick any of these
+ *  or enter a custom URL (e.g. a self-hosted Blossom server). The first
+ *  entry is the hardcoded default for users who have never chosen one. */
+export const SUGGESTED_BLOSSOM_SERVERS = [
+  "https://cdn.sovbit.host",
+  "https://blossom.yakihonne.com",
+  "https://blossom.nostr.build",
+  "https://nostr.download",
+];
+
 /** Supported recurrence frequencies. `bi-weekly` is stored as iCal
  *  `FREQ=WEEKLY;INTERVAL=2` for interop; all others map 1:1 to FREQ. */
 export type RecurrenceFreq = "daily" | "weekly" | "bi-weekly" | "monthly" | "yearly";

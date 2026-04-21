@@ -519,8 +519,6 @@ export function CalendarApp() {
         saveCountdown={saveCountdown}
         backupError={backupError}
         onBackupNow={backupNow}
-        onSyncNow={syncNow}
-        syncingNow={syncingNow}
         onLogout={logout}
         onNewEvent={() => handleNewEvent()}
         canAddEvent={!eventsLoading && calendars.length > 0}

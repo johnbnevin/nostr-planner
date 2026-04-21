@@ -296,6 +296,11 @@ async function signAndPublish(
   sharedKey?: CryptoKey,
   sharedCalDTag?: string
 ) {
+  // Private-personal (encrypted, not part of a shared calendar) data
+  // never hits the relays. It lives in the Blossom snapshot only;
+  // cross-device sync is handled by watchPointer. Skip the whole
+  // sign-and-publish hop — saves the signer round-trip too.
+  if (encrypt && !sharedKey) return;
   const signed = await prepareSignedEvent(pubkey, kind, tags, content, encrypt, signEvent, signer, sharedKey, sharedCalDTag);
   await publishEvent(signed);
 }
@@ -1603,6 +1608,11 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
 
       if (!pubkey) return;
       const isEncrypted = shouldEncrypt([dTag]) || sharedKeys.has(dTag);
+      const isShared = sharedKeys.has(dTag);
+      // Private-personal calendars are Blossom-only; the kind-5 relay
+      // tombstone is unnecessary — the deleted=true field in the next
+      // snapshot carries the intent across devices. Skip the publish.
+      if (isEncrypted && !isShared) return;
       const publishedKind = isEncrypted ? KIND_APP_DATA : KIND_CALENDAR;
       const tags: string[][] = [["a", `${publishedKind}:${pubkey}:${dTag}`]];
       if (publishedKind !== KIND_CALENDAR) {
