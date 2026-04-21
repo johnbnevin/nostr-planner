@@ -64,7 +64,7 @@ import {
   removeSharedCalOwner,
   loadSharedCalOwners,
 } from "../lib/sharing";
-import { queryEvents } from "../lib/relay";
+import { queryEvents, type NostrEvent } from "../lib/relay";
 import {
   filterCalendarAppData,
   buildDeletedCoords,
@@ -336,7 +336,7 @@ function buildEventTags(e: CalendarEvent): string[][] {
 
 export function CalendarProvider({ children }: { children: ReactNode }) {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
-  const { shouldEncrypt, canPublish, primaryRelay } = useSettings();
+  const { shouldEncrypt, canPublish, primaryRelay, publicCalendars } = useSettings();
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [eventTombstones, setEventTombstones] = useState<CalendarEvent[]>([]);
   const [calendars, setCalendars] = useState<CalendarCollection[]>([]);
@@ -567,26 +567,43 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       //   b) Kind 30078 app-data (contains NIP-44 or AES-GCM encrypted events)
       //   c) Kind 5 deletion events
       // All queries are scoped to the user + any shared-calendar foreign owners.
+      //
+      // Skip the whole block when the user has zero public calendars AND
+      // zero shared calendars. Private-personal data has lived exclusively
+      // in the Blossom snapshot since v1.16.4b, so the relay has nothing
+      // we need (the kind-30078 query in particular pulls 100s of events
+      // from every other app that ever wrote app-data for this pubkey —
+      // wasteful, noisy, and we throw it all away client-side). Callers
+      // still get well-formed empty arrays so the downstream
+      // merge/decrypt pipeline runs and clears the loading state.
       const authorList = [pubkey, ...foreignOwners];
-      const [rawCalendarEvents, rawAppData, rawDeletions] = await Promise.all([
-        queryEvents(relays, {
-          kinds: [KIND_DATE_EVENT, KIND_TIME_EVENT, KIND_CALENDAR],
-          authors: authorList,
-          ...sinceFilter,
-        }),
-        queryEvents(relays, {
-          kinds: [KIND_APP_DATA],
-          authors: authorList,
-          ...sinceFilter,
-        }),
-        queryEvents(relays, {
-          kinds: [5],
-          authors: authorList,
-          ...sinceFilter,
-        }),
-      ]);
+      const hasRelayBackedCalendars = publicCalendars.size > 0 || freshKeys.size > 0;
+      const [rawCalendarEvents, rawAppData, rawDeletions]: [NostrEvent[], NostrEvent[], NostrEvent[]] =
+        hasRelayBackedCalendars
+          ? await Promise.all([
+              queryEvents(relays, {
+                kinds: [KIND_DATE_EVENT, KIND_TIME_EVENT, KIND_CALENDAR],
+                authors: authorList,
+                ...sinceFilter,
+              }),
+              queryEvents(relays, {
+                kinds: [KIND_APP_DATA],
+                authors: authorList,
+                ...sinceFilter,
+              }),
+              queryEvents(relays, {
+                kinds: [5],
+                authors: authorList,
+                ...sinceFilter,
+              }),
+            ])
+          : [[], [], []];
 
-      log.debug("relay query complete:", rawCalendarEvents.length, "plaintext,", rawAppData.length, "app-data,", rawDeletions.length, "deletions");
+      if (!hasRelayBackedCalendars) {
+        log.info("doRefresh: no public or shared calendars — skipping relay event queries (Blossom snapshot is authoritative)");
+      } else {
+        log.debug("relay query complete:", rawCalendarEvents.length, "plaintext,", rawAppData.length, "app-data,", rawDeletions.length, "deletions");
+      }
 
       // ── Phase 3: Filter non-calendar app-data ─────────────────────
       const rawEvents = [
