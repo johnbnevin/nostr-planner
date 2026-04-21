@@ -1803,7 +1803,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
   // Live subscription to calendar event kinds so shared + public calendar
   // edits from another device appear within seconds instead of waiting for
   // the next manual refresh. Private events propagate via the Blossom
-  // blob (watchPointer) so this doesn't help them — but the 3 s autosave
+  // blob (watchPointer) so this doesn't help them — but the autosave
   // debounce already covers that case.
   //
   // When a matching event arrives, we kick refreshEvents() which runs the
