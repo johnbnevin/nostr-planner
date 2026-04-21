@@ -8,7 +8,7 @@
  */
 
 import { useState } from "react";
-import { X, Check, AlertCircle, HardDrive, Lock, Cloud, Trash2, Download } from "lucide-react";
+import { X, Check, AlertCircle, HardDrive, Lock, Cloud, Trash2, Download, History } from "lucide-react";
 import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useTasks } from "../contexts/TasksContext";
@@ -20,6 +20,9 @@ import {
   buildSnapshot,
   clearSnapshotPointer,
   wrapEnvelope,
+  listUserBlobs,
+  fetchSnapshotBySha,
+  type BlobHandle,
 } from "../lib/backup";
 import { npubEncode } from "nostr-tools/nip19";
 
@@ -35,6 +38,11 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
   const [error, setError] = useState<string>("");
   const [working, setWorking] = useState(false);
   const [done, setDone] = useState(false);
+  // Recovery panel state — list of historical blobs available on the
+  // Blossom servers the user has written to. Opened on demand from the
+  // "Find older backups" button; each row can be previewed + restored.
+  const [recoverList, setRecoverList] = useState<BlobHandle[] | null>(null);
+  const [recoverLoading, setRecoverLoading] = useState(false);
 
   const nip44Available = isNip44Available(signer);
 
@@ -93,6 +101,43 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
       await clearSnapshotPointer(signEvent, publishEvent);
       setStatus("Pointer cleared. Autosave will create a fresh one on next change.");
       setDone(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const findOlderBackups = async () => {
+    if (!pubkey) { setError("Not signed in."); return; }
+    setRecoverLoading(true); setError(""); setStatus("");
+    try {
+      const blobs = await listUserBlobs(pubkey, signEvent);
+      setRecoverList(blobs);
+      if (blobs.length === 0) {
+        setError("No blobs found on any Blossom server. If you uploaded to a custom server, add it in Settings → Primary Blossom Server first.");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRecoverLoading(false);
+    }
+  };
+
+  const restoreFromBlob = async (sha: string) => {
+    if (!pubkey || !signer?.nip44) { setError("NIP-44 signer required"); return; }
+    setWorking(true); setError(""); setDone(false);
+    setStatus(`Fetching and decrypting ${sha.slice(0, 8)}…`);
+    try {
+      const snap = await fetchSnapshotBySha(sha, pubkey, signer.nip44);
+      if (!snap) { setError("Couldn't fetch or decrypt that blob — try another."); return; }
+      applyCalendarSnapshot(snap.events, snap.calendars);
+      applyTasksSnapshot(snap.habits, snap.completions, snap.lists);
+      restoreSettings(snap.settings);
+      setStatus(`Restored ${snap.events.length} events, ${snap.calendars.length} calendars, ${snap.habits.length} habits, ${snap.lists.length} lists from ${sha.slice(0, 8)}. Autosave will publish this as the new current snapshot shortly.`);
+      setDone(true);
+      // Collapse the recover list so the success banner is visible.
+      setRecoverList(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -171,6 +216,48 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
             <HardDrive className="w-5 h-5 text-emerald-600" />
             <span className="text-sm font-medium">Restore from cloud</span>
           </button>
+
+          <button
+            onClick={findOlderBackups}
+            disabled={working || recoverLoading || !nip44Available}
+            className="w-full flex items-center justify-center gap-2 p-3 border border-amber-200 rounded-xl hover:bg-amber-50 transition-colors disabled:opacity-50"
+          >
+            <History className="w-5 h-5 text-amber-600" />
+            <span className="text-sm font-medium">
+              {recoverLoading ? "Searching Blossom servers…" : "Find older backups"}
+            </span>
+          </button>
+
+          {recoverList && recoverList.length > 0 && (
+            <div className="border border-amber-200 rounded-xl p-3 space-y-2 bg-amber-50/30 max-h-72 overflow-y-auto">
+              <div className="text-xs text-amber-900">
+                {recoverList.length} blob(s) found across your Blossom servers, newest first.
+                Pick one to preview + restore. The current snapshot will be
+                overwritten by autosave after the restore.
+              </div>
+              {recoverList.map((b) => {
+                const when = b.uploaded > 0 ? new Date(b.uploaded * 1000) : null;
+                const kb = (b.size / 1024).toFixed(1);
+                return (
+                  <div key={b.sha256} className="flex items-center justify-between gap-2 bg-white rounded-lg border border-amber-200 p-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-mono text-gray-700 truncate">{b.sha256.slice(0, 12)}…</div>
+                      <div className="text-[11px] text-gray-500">
+                        {when ? when.toLocaleString() : "(no timestamp)"} · {kb} KB · {new URL(b.server).host}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => void restoreFromBlob(b.sha256)}
+                      disabled={working}
+                      className="shrink-0 px-2 py-1 text-xs font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 transition-colors"
+                    >
+                      Restore
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           <button
             onClick={exportToFile}

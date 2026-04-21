@@ -543,6 +543,118 @@ export async function loadSnapshot(
   return { ...snap, _sha256: pointer.sha256 };
 }
 
+// ── Recovery helpers ─────────────────────────────────────────────────
+//
+// Used by the "Find older backups" flow in BackupPanel when the current
+// pointer is lost, corrupted, or restored state is otherwise missing.
+// Walks every known Blossom server the user has ever written to, asks
+// each one for its list of this pubkey's blobs (BUD-02 /list/<pubkey>),
+// and returns the union sorted newest-first. The caller decides which
+// sha256 to restore; fetchSnapshotBySha re-hydrates a specific one.
+
+export interface BlobHandle {
+  /** sha256 of the encrypted envelope blob. */
+  sha256: string;
+  /** Bytes on disk — the encrypted size, not the plaintext size. */
+  size: number;
+  /** Unix seconds when the server received this blob. */
+  uploaded: number;
+  /** A server known to hold this blob (first one that reported it). */
+  server: string;
+}
+
+/**
+ * Enumerate every Blossom blob the user has written across all known
+ * servers. Returns newest-first. Best-effort: a server that refuses
+ * /list auth or is unreachable just contributes zero rows; we still
+ * return whatever the others gave us.
+ */
+export async function listUserBlobs(
+  pubkey: string,
+  signEvent: SignEventFn
+): Promise<BlobHandle[]> {
+  let auth: SignedEvent;
+  try {
+    auth = await BlossomClient.getListAuth(
+      signEvent as unknown as Parameters<typeof BlossomClient.getListAuth>[0],
+      "Planner recovery: list blobs"
+    );
+  } catch (err) {
+    log.warn("could not sign list auth:", err);
+    return [];
+  }
+
+  // Include the user's current effective servers plus every known
+  // suggested server, deduped. Custom primaries the user configured
+  // in Settings are already in effectiveBlossomServers().
+  const targets = [...new Set([...effectiveBlossomServers(), ...SUGGESTED_BLOSSOM_SERVERS])];
+  const dedup = new Map<string, BlobHandle>();
+
+  await Promise.all(targets.map(async (server) => {
+    try {
+      log.info(`blossom list → ${server}`);
+      const blobs = await BlossomClient.listBlobs(server, pubkey, undefined, auth);
+      log.info(`blossom list ✓ ${server} (${blobs.length} blob(s))`);
+      for (const b of blobs) {
+        if (!b.sha256) continue;
+        const uploaded = b.uploaded ?? b.created ?? 0;
+        const existing = dedup.get(b.sha256);
+        // Prefer the latest `uploaded` timestamp across servers (they
+        // can differ when one server mirrored from another).
+        if (!existing || uploaded > existing.uploaded) {
+          dedup.set(b.sha256, { sha256: b.sha256, size: b.size ?? 0, uploaded, server });
+        }
+      }
+    } catch (err) {
+      log.info(`blossom list ✗ ${server}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }));
+
+  return [...dedup.values()].sort((a, b) => b.uploaded - a.uploaded);
+}
+
+/**
+ * Fetch and decrypt a specific snapshot blob by its sha256. Unlike
+ * loadSnapshot() this doesn't go through findPointer — the caller
+ * supplies the sha directly, so the user can pick any version from the
+ * listUserBlobs() output. Returns null if no server has the blob, the
+ * blob isn't a valid envelope, or decryption fails.
+ */
+export async function fetchSnapshotBySha(
+  sha256: string,
+  pubkey: string,
+  nip44: Nip44
+): Promise<(Snapshot & { _sha256: string }) | null> {
+  const servers = [...new Set([...effectiveBlossomServers(), ...SUGGESTED_BLOSSOM_SERVERS])];
+  log.info(`blossom recover ${sha256.slice(0, 8)} from ${servers.length} server(s)`);
+  const body = await raceFetch(sha256, servers);
+  if (!body) { log.warn(`blossom recover: no server returned ${sha256.slice(0, 8)}`); return null; }
+
+  let env: Envelope;
+  try { env = JSON.parse(body); }
+  catch { log.warn("recover: blob is not JSON"); return null; }
+
+  let plaintext: string;
+  try {
+    plaintext = await withTimeout(unwrapEnvelope(env, pubkey, nip44), 60_000, "recover decrypt");
+  } catch (err) {
+    log.warn("recover: decrypt failed", err);
+    return null;
+  }
+
+  let snap: Snapshot;
+  try { snap = JSON.parse(plaintext) as Snapshot; }
+  catch { log.warn("recover: decrypted blob is not JSON"); return null; }
+
+  if (snap.version !== 1) { log.warn(`recover: unsupported snapshot version ${snap.version}`); return null; }
+  for (const e of snap.events) {
+    e.start = new Date(e.start as unknown as string);
+    if (e.end) e.end = new Date(e.end as unknown as string);
+  }
+  markSeenRemote(sha256);
+  return { ...snap, _sha256: sha256 };
+}
+
 async function findPointer(
   pubkey: string,
   relays: string[]
