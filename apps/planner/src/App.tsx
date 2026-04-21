@@ -61,14 +61,17 @@ function AppContent() {
   const [forceLoginScreen, setForceLoginScreen] = useState(false);
 
   if (!pubkey) {
-    // Returning user whose auto-login is still running or has just failed —
-    // show the reconnect splash so they don't see the full login screen as
-    // if they had been kicked out. Only the "sign out" button or a manual
-    // "use a different login method" tap falls back to the login screen.
+    // Returning user whose auto-login is still running — show the
+    // reconnect splash so they don't see the full login screen as if
+    // they had been kicked out. If auto-login actually fails, fall
+    // straight through to LoginScreen (the "Session paused / try again"
+    // state in between was dead UI — retry never recovered, so the
+    // user's only real option was "use a different login method",
+    // which is what LoginScreen already is).
     const showReconnect =
       !forceLoginScreen &&
       hasSavedSession &&
-      (autoLoginState === "attempting" || autoLoginState === "failed");
+      autoLoginState === "attempting";
     if (showReconnect) {
       return <ReconnectScreen onSwitchAccount={() => setForceLoginScreen(true)} />;
     }
