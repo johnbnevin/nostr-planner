@@ -104,13 +104,17 @@ export const DEFAULT_RELAYS = [...SUGGESTED_RELAYS];
  *  primary blob store and redundancy mirrors. User can pick any of these
  *  or enter a custom URL (e.g. a self-hosted Blossom server). The first
  *  entry is the hardcoded default for users who have never chosen one.
- *  List is curated to BUD-02-compliant servers that accept binary blob
- *  uploads (application/octet-stream). CDN-only hosts that reject
- *  non-media content-types are intentionally excluded. */
+ *
+ *  Criteria for inclusion: must (a) accept BUD-02 `PUT /upload` with
+ *  `application/octet-stream`, (b) return proper CORS headers so the
+ *  browser can fetch blobs back, and (c) honour self-owned DELETE.
+ *  Most public Blossom servers fail at least one — Primal CORS-blocks
+ *  browser fetches, Satellite rejects our auth, yakihonne refuses
+ *  uploads. Curated conservatively: better a short list that works
+ *  than a long list that errors. Users can add their own custom URL
+ *  in Settings for redundancy. */
 export const SUGGESTED_BLOSSOM_SERVERS = [
   "https://nostr.download",
-  "https://blossom.primal.net",
-  "https://cdn.satellite.earth",
 ];
 
 /** Supported recurrence frequencies. `bi-weekly` is stored as iCal
