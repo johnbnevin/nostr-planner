@@ -25,9 +25,8 @@ import {
   type ReactNode,
 } from "react";
 import { useNostr } from "./NostrContext";
-import { useSettings } from "./SettingsContext";
 import { useCalendar } from "./CalendarContext";
-import { isNip44Available, encryptEvent, decryptEvent, isEncryptedEvent } from "../lib/crypto";
+import { isNip44Available, decryptEvent, isEncryptedEvent } from "../lib/crypto";
 import { generateDTag, KIND_APP_DATA, DTAG_DAILY, DTAG_LISTS, DTAG_LISTS_OLD } from "../lib/nostr";
 import { queryEvents } from "../lib/relay";
 import { logger } from "../lib/logger";
@@ -134,38 +133,16 @@ const DAILY_D_TAG = DTAG_DAILY;
 const LISTS_D_TAG = DTAG_LISTS;
 const LISTS_D_TAG_OLD = DTAG_LISTS_OLD;
 
-/** Keep only the last 400 days of completion data to support year-over-year statistics. */
-const COMPLETION_RETENTION_DAYS = 400;
-
-/** Debounce delay for relay publishes (ms). */
+/** Debounce delay for relay publishes (ms). Only applies to the
+ *  legacy code path that still queues publishDaily / publishLists;
+ *  those functions are now no-ops but the timer plumbing lives on
+ *  to keep call-site semantics stable. */
 const PUBLISH_DEBOUNCE_MS = 1500;
-
-/**
- * Remove completion entries older than COMPLETION_RETENTION_DAYS.
- * This prevents the daily-data event payload from growing indefinitely.
- * Dates are compared lexicographically ("YYYY-MM-DD" strings sort correctly).
- */
-function pruneCompletions(completions: Record<string, string[]>): Record<string, string[]> {
-  // Calculate the earliest date we want to keep
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - COMPLETION_RETENTION_DAYS);
-  const cutoffStr = cutoff.toISOString().slice(0, 10); // "YYYY-MM-DD"
-
-  const pruned: Record<string, string[]> = {};
-  for (const [date, ids] of Object.entries(completions)) {
-    // ISO date strings are lexicographically comparable, so >= works correctly
-    if (date >= cutoffStr) {
-      pruned[date] = ids;
-    }
-  }
-  return pruned;
-}
 
 // ── Provider ───────────────────────────────────────────────────────────
 
 export function TasksProvider({ children }: { children: ReactNode }) {
-  const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
-  const { shouldEncrypt } = useSettings();
+  const { pubkey, relays, signer } = useNostr();
   const { pushUndoEntry } = useCalendar();
   const [habits, setHabits] = useState<DailyHabit[]>([]);
   const [habitTombstones, setHabitTombstones] = useState<DailyHabit[]>([]);
@@ -295,73 +272,47 @@ export function TasksProvider({ children }: { children: ReactNode }) {
    * Serialize and publish the daily habits + completions to relays.
    * Prunes stale completions and optionally NIP-44 encrypts before signing.
    */
+  // Daily habits and task lists are strictly single-user, private-personal
+  // data. In v1.16.4b we moved all private calendar data off the relays
+  // (Blossom snapshot is the single source of truth + cross-device sync
+  // channel). These tasks publishers were left on the relay path by
+  // oversight — each edit was firing an immediate kind-30078 publish to
+  // the primary relay, which is exactly the "any change is triggering
+  // upload immediately" symptom the autosave debounce couldn't explain.
+  //
+  // Now they're intentional no-ops: state still updates optimistically
+  // via setHabits / setLists, the fingerprint in useAutoBackup picks up
+  // the change, and 10 s later the Blossom snapshot upload carries the
+  // new state to every device. Signing + encrypting + publishing per
+  // keystroke was pure overhead.
+  //
+  // Signature preserved so the dozens of callers below don't churn; we
+  // just skip the relay hop entirely. publishingRef still bumps so any
+  // in-flight indicators that watch it behave as before.
   const publishDaily = useCallback(
-    async (newHabits: DailyHabit[], newCompletions: Record<string, string[]>) => {
+    async (_newHabits: DailyHabit[], _newCompletions: Record<string, string[]>) => {
       if (!pubkey) return;
       publishingRef.current++;
       try {
-        const pruned = pruneCompletions(newCompletions);
-        const content = JSON.stringify({ habits: newHabits, completions: pruned });
-        const tags: string[][] = [["d", DAILY_D_TAG]];
-
-        const encrypt = shouldEncrypt([]);
-        let finalTags = tags;
-        let finalContent = content;
-
-        if (encrypt && signer) {
-          const encrypted = await encryptEvent(pubkey, KIND_APP_DATA, DAILY_D_TAG, tags, content, signer);
-          finalTags = encrypted.tags;
-          finalContent = encrypted.content;
-        }
-
-        const signed = await signEvent({
-          kind: KIND_APP_DATA,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: finalTags,
-          content: finalContent,
-        });
-        await publishEvent(signed);
+        // no relay publish — Blossom snapshot carries the state
       } finally {
         publishingRef.current--;
       }
     },
-    [pubkey, signEvent, publishEvent, shouldEncrypt, signer]
+    [pubkey]
   );
 
-  /**
-   * Serialize and publish the task lists to relays.
-   * Optionally NIP-44 encrypts before signing.
-   */
   const publishLists = useCallback(
-    async (newLists: UserList[]) => {
+    async (_newLists: UserList[]) => {
       if (!pubkey) return;
       publishingRef.current++;
       try {
-        const content = JSON.stringify({ lists: newLists });
-        const tags: string[][] = [["d", LISTS_D_TAG]];
-
-        const encrypt = shouldEncrypt([]);
-        let finalTags = tags;
-        let finalContent = content;
-
-        if (encrypt && signer) {
-          const encrypted = await encryptEvent(pubkey, KIND_APP_DATA, LISTS_D_TAG, tags, content, signer);
-          finalTags = encrypted.tags;
-          finalContent = encrypted.content;
-        }
-
-        const signed = await signEvent({
-          kind: KIND_APP_DATA,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: finalTags,
-          content: finalContent,
-        });
-        await publishEvent(signed);
+        // no relay publish — Blossom snapshot carries the state
       } finally {
         publishingRef.current--;
       }
     },
-    [pubkey, signEvent, publishEvent, shouldEncrypt, signer]
+    [pubkey]
   );
 
   // ── Debounced publish scheduling ────────────────────────────────

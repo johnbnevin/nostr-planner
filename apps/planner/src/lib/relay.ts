@@ -170,9 +170,25 @@ let nip65Write: string[] = [];
  *  primary change and on every NIP-65 update. */
 let redundancyRelays: string[] = computeRedundancy();
 
+/** Normalize a relay URL so trailing-slash and non-trailing-slash
+ *  variants dedupe to the same entry (NIP-65 often has the slash;
+ *  our SUGGESTED_RELAYS don't). Also lowercases the scheme. */
+function normalizeRelayUrl(u: string): string {
+  return u.trim().replace(/\/+$/, "").replace(/^WSS:/i, "wss:").replace(/^WS:/i, "ws:");
+}
+
 function computeRedundancy(): string[] {
-  return [...new Set([...SUGGESTED_RELAYS, ...nip65Read, ...nip65Write])]
-    .filter((u) => u !== primaryRelay);
+  const primaryNorm = normalizeRelayUrl(primaryRelay);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of [...SUGGESTED_RELAYS, ...nip65Read, ...nip65Write]) {
+    const norm = normalizeRelayUrl(raw);
+    if (!norm || norm === primaryNorm) continue;
+    if (seen.has(norm)) continue;
+    seen.add(norm);
+    out.push(norm);
+  }
+  return out;
 }
 
 // ── NIP-65 relay list parsing ───────────────────────────────────────
