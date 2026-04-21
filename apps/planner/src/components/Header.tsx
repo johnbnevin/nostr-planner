@@ -6,7 +6,6 @@ import {
   ChevronRight,
   Plus,
   LogOut,
-  RefreshCw,
   Settings,
   CalendarCheck,
   CalendarDays,
@@ -18,7 +17,6 @@ import {
   Layers,
   Undo2,
   Redo2,
-  RotateCw,
 } from "lucide-react";
 import { format, addMonths, subMonths } from "date-fns";
 
@@ -35,11 +33,6 @@ interface HeaderProps {
   saveCountdown: number | null;
   backupError: string | null;
   onBackupNow: () => Promise<void>;
-  /** Manual cross-device sync trigger — flushes pending local save and pulls
-   *  the latest pointer + merge. Complements the live subscription. */
-  onSyncNow: () => Promise<void>;
-  /** True while onSyncNow is in flight, so the icon can show a spinner. */
-  syncingNow: boolean;
   onLogout: () => void;
   onNewEvent: () => void;
   canAddEvent: boolean;
@@ -78,8 +71,6 @@ export function Header({
   saveCountdown,
   backupError,
   onBackupNow,
-  onSyncNow,
-  syncingNow,
   onLogout,
   onNewEvent,
   canAddEvent,
@@ -283,25 +274,6 @@ export function Header({
             </button>
 
             <button
-              onClick={refreshEvents}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
-              title="Refresh from relays"
-            >
-              <RefreshCw className="w-4 h-4 text-gray-500" />
-            </button>
-
-            <button
-              onClick={() => void onSyncNow()}
-              disabled={syncingNow}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
-              title="Sync now across devices (flush local changes, pull latest)"
-            >
-              <RotateCw
-                className={`w-4 h-4 text-gray-500 ${syncingNow ? "animate-spin" : ""}`}
-              />
-            </button>
-
-            <button
               onClick={() => {
                 const next = !autoBackup;
                 setAutoBackup(next);
@@ -406,23 +378,6 @@ export function Header({
               title={redoDepth > 0 ? `Redo: ${redoPreview}` : "Nothing to redo"}
             >
               <Redo2 className="w-4 h-4 text-gray-500" />
-            </button>
-            <button
-              onClick={refreshEvents}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
-              title="Refresh from relays"
-            >
-              <RefreshCw className="w-4 h-4 text-gray-500" />
-            </button>
-            <button
-              onClick={() => void onSyncNow()}
-              disabled={syncingNow}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
-              title="Sync now across devices"
-            >
-              <RotateCw
-                className={`w-4 h-4 text-gray-500 ${syncingNow ? "animate-spin" : ""}`}
-              />
             </button>
             <button
               onClick={() => {

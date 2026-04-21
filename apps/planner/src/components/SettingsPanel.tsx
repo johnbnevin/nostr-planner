@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { X, Shield, ShieldOff, AlertTriangle, Bell, Archive, Share2, Radio } from "lucide-react";
+import { X, Shield, ShieldOff, AlertTriangle, Bell, Archive, Share2, Radio, Cloud } from "lucide-react";
 import { useSettings, type NotifyMethod } from "../contexts/SettingsContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useNostr } from "../contexts/NostrContext";
-import { SUGGESTED_RELAYS } from "../lib/nostr";
+import { SUGGESTED_RELAYS, SUGGESTED_BLOSSOM_SERVERS } from "../lib/nostr";
 import { isTauri } from "../lib/platform";
 
 interface SettingsPanelProps {
@@ -21,6 +21,10 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
     setNotification,
     primaryRelay,
     setPrimaryRelay,
+    primaryBlossom,
+    setPrimaryBlossom,
+    blossomRedundancy,
+    setBlossomRedundancy,
   } = useSettings();
   const { calendars } = useCalendar();
   const { nip65Relays } = useNostr();
@@ -46,6 +50,31 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
     setCustomError("");
     setPrimaryRelay(trimmed);
   };
+
+  // ── Blossom primary picker state ──────────────────────────────────
+  // Mirror the relay picker: a list of known servers + a custom entry
+  // field. The built-in list IS the full suggested set since Blossom
+  // has no equivalent of a user-published NIP-65 list yet.
+  const isBuiltInBlossom = SUGGESTED_BLOSSOM_SERVERS.includes(primaryBlossom);
+  const [blossomCustomMode, setBlossomCustomMode] = useState<boolean>(!isBuiltInBlossom);
+  const [blossomCustomUrl, setBlossomCustomUrl] = useState<string>(isBuiltInBlossom ? "" : primaryBlossom);
+  const [blossomCustomError, setBlossomCustomError] = useState<string>("");
+
+  const applyBlossomCustom = () => {
+    const trimmed = blossomCustomUrl.trim();
+    if (!/^https?:\/\//i.test(trimmed)) {
+      setBlossomCustomError("URL must start with https:// or http://");
+      return;
+    }
+    setBlossomCustomError("");
+    setPrimaryBlossom(trimmed);
+  };
+
+  // Max redundancy is (suggested count - 1) when primary is one of the
+  // suggested servers — we can mirror to the remaining N-1. If primary
+  // is custom, we can still mirror to all N suggested. Keep the cap at
+  // the suggested length and let the server picker de-duplicate.
+  const maxRedundancy = SUGGESTED_BLOSSOM_SERVERS.length;
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
@@ -120,10 +149,12 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
               <Radio className="w-4 h-4" /> Primary Relay
             </h3>
             <p className="text-xs text-gray-400 mb-3">
-              All reads and interactive publishes go here first. Other
-              relays in your list receive background copies during idle
-              time for durability, but never slow the app down. Pick one
-              you control or trust for fast, reliable performance.
+              Nostr relay used for calendars you mark public and for shared
+              calendars (so invited members can receive them). Private
+              calendars stay in your Blossom backup and never touch a
+              relay. Pick a relay you control or trust — self-hosting the
+              best option for privacy; any reliable public relay works
+              otherwise.
             </p>
 
             <div className="space-y-1">
@@ -228,6 +259,127 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
                     )}
                   </div>
                 )}
+              </div>
+            </div>
+          </div>
+
+          {/* Primary Blossom server + redundancy */}
+          <div>
+            <h3 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
+              <Cloud className="w-4 h-4" /> Primary Blossom Server
+            </h3>
+            <p className="text-xs text-gray-400 mb-3">
+              Where your encrypted planner backup is uploaded on every
+              save. This is how your data syncs between devices. Pick
+              one you trust or self-host — the snapshot is NIP-44
+              encrypted to your key before upload, so even the server
+              operator can't read it.
+            </p>
+
+            <div className="space-y-1">
+              <div className="mb-2">
+                <div className="text-xs text-gray-500 mb-1 px-1">Suggested</div>
+                {SUGGESTED_BLOSSOM_SERVERS.map((url) => (
+                  <label
+                    key={`blossom-${url}`}
+                    className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-colors ${
+                      primaryBlossom === url && !blossomCustomMode ? "bg-primary-50" : "hover:bg-gray-50"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="primary-blossom"
+                      checked={primaryBlossom === url && !blossomCustomMode}
+                      onChange={() => {
+                        setBlossomCustomMode(false);
+                        setBlossomCustomError("");
+                        setPrimaryBlossom(url);
+                      }}
+                      className="w-4 h-4 text-primary-600"
+                    />
+                    <span className="text-sm text-gray-700 break-all">{url}</span>
+                  </label>
+                ))}
+              </div>
+
+              <div>
+                <label
+                  className={`flex items-start gap-2 p-2 rounded-lg cursor-pointer transition-colors ${
+                    blossomCustomMode ? "bg-primary-50" : "hover:bg-gray-50"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="primary-blossom"
+                    checked={blossomCustomMode}
+                    onChange={() => setBlossomCustomMode(true)}
+                    className="mt-0.5 w-4 h-4 text-primary-600"
+                  />
+                  <div className="flex-1">
+                    <span className="text-sm text-gray-700">Custom</span>
+                    <p className="text-xs text-gray-400">
+                      Self-hosted Blossom server or any compatible URL
+                    </p>
+                  </div>
+                </label>
+                {blossomCustomMode && (
+                  <div className="mt-2 pl-6 space-y-1">
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={blossomCustomUrl}
+                        onChange={(e) => { setBlossomCustomUrl(e.target.value); setBlossomCustomError(""); }}
+                        onKeyDown={(e) => { if (e.key === "Enter") applyBlossomCustom(); }}
+                        placeholder="https://blossom.example.com"
+                        className="flex-1 min-w-0 px-2 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      />
+                      <button
+                        onClick={applyBlossomCustom}
+                        disabled={!blossomCustomUrl.trim()}
+                        className="px-3 py-1.5 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                      >
+                        Set
+                      </button>
+                    </div>
+                    {blossomCustomError && (
+                      <p className="text-xs text-red-600">{blossomCustomError}</p>
+                    )}
+                    {!blossomCustomError && blossomCustomUrl.trim() && blossomCustomUrl.trim() === primaryBlossom && (
+                      <p className="text-xs text-emerald-600">Active</p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Redundancy mirrors */}
+              <div className="mt-4 pt-3 border-t border-gray-100">
+                <label className="block">
+                  <div className="text-xs font-medium text-gray-700 mb-1">
+                    Backup mirrors: {blossomRedundancy}
+                  </div>
+                  <p className="text-xs text-gray-400 mb-2">
+                    Extra Blossom servers your snapshot is copied to in
+                    the background after each save. 0 = primary only
+                    (fastest, one point of failure). Higher = more
+                    durable, slightly more upload per save. If your
+                    primary goes offline, the app falls back to any
+                    server that has the blob, so mirrors double as
+                    failover.
+                  </p>
+                  <input
+                    type="range"
+                    min={0}
+                    max={maxRedundancy}
+                    step={1}
+                    value={Math.min(blossomRedundancy, maxRedundancy)}
+                    onChange={(e) => setBlossomRedundancy(Number(e.target.value))}
+                    className="w-full accent-primary-600"
+                  />
+                  <div className="flex justify-between text-[10px] text-gray-400 mt-1">
+                    <span>None</span>
+                    <span>All suggested</span>
+                  </div>
+                </label>
               </div>
             </div>
           </div>

@@ -30,7 +30,7 @@
  *   blob wins.
  */
 
-import { BlossomClient } from "blossom-client-sdk";
+import { BlossomClient, type SignedEvent } from "blossom-client-sdk";
 import { SimplePool } from "nostr-tools/pool";
 import { KIND_APP_DATA, DTAG_BACKUP, type CalendarEvent, type CalendarCollection } from "./nostr";
 import { queryEvents, getPrimaryRelay } from "./relay";
@@ -41,12 +41,58 @@ import { mergeSnapshots } from "./merge";
 
 const log = logger("backup");
 
-const BLOSSOM_SERVERS = [
-  "https://cdn.sovbit.host",
-  "https://blossom.yakihonne.com",
-  "https://blossom.nostr.build",
-  "https://nostr.download",
-];
+import { SUGGESTED_BLOSSOM_SERVERS } from "./nostr";
+
+// ── User-configurable Blossom server state ─────────────────────────
+//
+// `primaryBlossom` is where each save is uploaded first — the blob isn't
+// considered durable until this server confirms. `blossomRedundancy` is
+// the number of additional suggested servers that receive a background
+// mirror copy after the primary succeeds. SettingsContext drives both
+// via `setPrimaryBlossom` / `setBlossomRedundancy` on login and on
+// user-initiated changes; before that we fall back to the hardcoded
+// defaults so the app works out of the box.
+
+let primaryBlossom: string = SUGGESTED_BLOSSOM_SERVERS[0];
+let blossomRedundancy: number = SUGGESTED_BLOSSOM_SERVERS.length - 1;
+
+export function getPrimaryBlossom(): string {
+  return primaryBlossom;
+}
+
+export function setPrimaryBlossom(url: string): void {
+  const trimmed = url.trim();
+  if (!trimmed || !/^https?:\/\//i.test(trimmed)) {
+    log.warn("ignoring invalid primary Blossom URL:", url);
+    return;
+  }
+  if (trimmed === primaryBlossom) return;
+  log.debug("switching primary Blossom:", primaryBlossom, "→", trimmed);
+  primaryBlossom = trimmed;
+}
+
+export function getBlossomRedundancy(): number {
+  return blossomRedundancy;
+}
+
+export function setBlossomRedundancy(count: number): void {
+  const clamped = Math.max(0, Math.min(10, Math.floor(count)));
+  if (clamped === blossomRedundancy) return;
+  log.debug("blossom redundancy →", clamped);
+  blossomRedundancy = clamped;
+}
+
+/** Effective upload targets: primary first, then up to blossomRedundancy
+ *  additional entries from SUGGESTED_BLOSSOM_SERVERS (excluding primary),
+ *  deduplicated. The primary is always included even if the user set
+ *  redundancy to 0 — the primary *is* the data store, not a mirror. */
+function effectiveBlossomServers(): string[] {
+  const extras = SUGGESTED_BLOSSOM_SERVERS
+    .filter((s) => s !== primaryBlossom)
+    .slice(0, blossomRedundancy);
+  return [primaryBlossom, ...extras];
+}
+
 const MAX_BLOB_BYTES = 50 * 1024 * 1024;
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -249,11 +295,17 @@ export async function saveSnapshot(
   );
   const authHeader = BlossomClient.encodeAuthorizationHeader(authEvent);
 
-  // 3. Upload to the first server that accepts and returns a matching
-  //    descriptor. Sequential; first success wins.
+  // 3. Upload in preference order: the user's chosen primary first, then
+  //    any remaining suggested server as a fallback if primary is down.
+  //    Sequential; first success wins and becomes the effective primary
+  //    recorded on the pointer event.
+  const uploadOrder = [
+    primaryBlossom,
+    ...SUGGESTED_BLOSSOM_SERVERS.filter((s) => s !== primaryBlossom),
+  ];
   const errors: string[] = [];
   let primary: string | null = null;
-  for (const server of BLOSSOM_SERVERS) {
+  for (const server of uploadOrder) {
     try {
       log.debug(`uploading to ${server}`);
       const res = await fetchWithTimeout(
@@ -282,10 +334,9 @@ export async function saveSnapshot(
     throw new Error(`Every Blossom server rejected the upload:\n${errors.join("\n")}`);
   }
 
-  // 4. Publish the pointer event. Lists ALL known servers — mirrors in
-  //    step 5 may arrive after the pointer is published, but that's OK
-  //    because restore also falls back to BLOSSOM_SERVERS.
-  const servers = [primary, ...BLOSSOM_SERVERS.filter((s) => s !== primary)];
+  // 4. Publish the pointer event. Lists the user's configured set plus
+  //    any fallback used as primary so restore can race them all on load.
+  const servers = [primary, ...SUGGESTED_BLOSSOM_SERVERS.filter((s) => s !== primary)];
   const savedAt = working.savedAt;
   const counts = {
     events: working.events.length,
@@ -306,9 +357,19 @@ export async function saveSnapshot(
   await withTimeout(publishEvent(refEvent), 15_000, "publish snapshot pointer event");
   log.info(`pointer published in ${Date.now() - startedAt}ms`);
 
-  // 5. Background mirror to redundancy servers. Best-effort — user's data
-  //    is already durable on `primary` and we've already returned.
-  const mirrorTargets = BLOSSOM_SERVERS.filter((s) => s !== primary);
+  // 5a. Best-effort cleanup of the previously-saved blob. Blossom blobs
+  //     are content-addressed, so every save writes a new sha — without
+  //     this, each user's footprint on every mirror server grows linearly
+  //     with save count. Fire-and-forget; a 404 (server never had it) or
+  //     refusal (server policy) is logged at debug and swallowed.
+  if (lastKnownSha && lastKnownSha !== sha256) {
+    scheduleIdle(() => { void deletePreviousBlob(lastKnownSha, signEvent); });
+  }
+
+  // 5. Background mirror to the user's chosen redundancy servers (capped
+  //    by `blossomRedundancy` in Settings). Best-effort — user's data is
+  //    already durable on `primary` and we've already returned.
+  const mirrorTargets = effectiveBlossomServers().filter((s) => s !== primary);
   if (mirrorTargets.length > 0) {
     scheduleIdle(() => {
       void (async () => {
@@ -327,6 +388,39 @@ export async function saveSnapshot(
   }
 
   return { sha256, servers, savedAt, counts };
+}
+
+/**
+ * Sign one BUD-02 delete auth and DELETE the blob from every known
+ * Blossom server in parallel. Errors are logged at debug and ignored —
+ * a server that never had the blob returns 404, a server that refuses
+ * self-delete returns 401/403, and a down server throws. None of these
+ * are worth surfacing because the blob that matters is the one the
+ * current pointer points at; cleanup of the prior blob is opportunistic.
+ */
+async function deletePreviousBlob(sha: string, signEvent: SignEventFn): Promise<void> {
+  let auth: SignedEvent;
+  try {
+    auth = await BlossomClient.getDeleteAuth(
+      sha,
+      signEvent as unknown as Parameters<typeof BlossomClient.getDeleteAuth>[1],
+      "Planner snapshot cleanup"
+    );
+  } catch (err) {
+    log.debug("could not sign delete auth (ignored):", err);
+    return;
+  }
+  // Delete from every suggested server — we don't track which ones have a
+  // copy (user changed redundancy or primary between saves could orphan
+  // blobs on servers not in the current effective set). 404s are fine.
+  await Promise.allSettled(
+    SUGGESTED_BLOSSOM_SERVERS.map((server) =>
+      BlossomClient.deleteBlob(server, sha, auth).catch((err) => {
+        log.debug(`delete of ${sha.slice(0, 8)} on ${server} failed (ignored):`, err);
+      })
+    )
+  );
+  log.info(`prior blob ${sha.slice(0, 8)} cleanup dispatched`);
 }
 
 function scheduleIdle(fn: () => void): void {
@@ -353,7 +447,7 @@ export async function loadSnapshot(
     return null;
   }
 
-  const allServers = [...new Set([...pointer.servers, ...BLOSSOM_SERVERS])];
+  const allServers = [...new Set([...pointer.servers, ...SUGGESTED_BLOSSOM_SERVERS])];
   log.info(`fetching snapshot ${pointer.sha256.slice(0, 8)} from ${allServers.length} servers`);
 
   const envelopeJson = await raceFetch(pointer.sha256, allServers);
@@ -516,7 +610,7 @@ export function watchPointer(
     // "Synced from another device" toast.
     if (ownPublishedShas.has(sha) || seenRemoteShas.has(sha)) { lastSha = sha; return; }
     log.debug(`watchPointer: new pointer ${sha.slice(0, 8)}, fetching`);
-    const allServers = [...new Set([...servers, ...BLOSSOM_SERVERS])];
+    const allServers = [...new Set([...servers, ...SUGGESTED_BLOSSOM_SERVERS])];
     const body = await raceFetch(sha, allServers);
     if (!body || closed) return;
     try {
