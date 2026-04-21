@@ -19,19 +19,18 @@ import { logger } from "./logger";
 const log = logger("nip46");
 
 // NIP-46 relay choice matters: the bunker must be able to both read our
-// requests from these and publish responses. Four relays give redundancy
+// requests from these and publish responses. Three relays give redundancy
 // against one being slow/down — SimplePool's default 3-second connection
 // timeout is aggressive, and if every listed relay fails to connect within
 // that budget the whole handshake subscription collapses with "subscription
 // closed before connection was established".
 // NIP-46-friendly relays. relay.nsec.app is the de-facto default for most
-// bunker apps (Amber, nsec.app, nsecbunker). The others are widely reachable
-// public relays that don't require NIP-42 AUTH for kind-24133 traffic, so a
+// bunker apps (Amber, nsec.app). The others are widely reachable public
+// relays that don't require NIP-42 AUTH for kind-24133 traffic, so a
 // bunker scanning our nostrconnect:// URI can publish ack/response events
 // to at least one of them even if its preferred relay is down.
 const NIP46_RELAYS = [
   "wss://relay.nsec.app",
-  "wss://relay.nsecbunker.com",
   "wss://relay.damus.io",
   "wss://nos.lol",
 ];
