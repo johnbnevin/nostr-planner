@@ -26,9 +26,7 @@ import {
 } from "react";
 import { useNostr } from "./NostrContext";
 import { useCalendar } from "./CalendarContext";
-import { isNip44Available, decryptEvent, isEncryptedEvent } from "../lib/crypto";
-import { generateDTag, KIND_APP_DATA, DTAG_DAILY, DTAG_LISTS, DTAG_LISTS_OLD } from "../lib/nostr";
-import { queryEvents } from "../lib/relay";
+import { generateDTag } from "../lib/nostr";
 import { logger } from "../lib/logger";
 
 const log = logger("tasks");
@@ -43,11 +41,6 @@ export interface DailyHabit {
   updatedAt?: number;
   /** Tombstone marker. */
   deleted?: boolean;
-}
-
-interface DailyData {
-  habits: DailyHabit[];
-  completions: Record<string, string[]>;
 }
 
 export interface ListItem {
@@ -66,10 +59,6 @@ export interface UserList {
   updatedAt?: number;
   /** Tombstone marker. */
   deleted?: boolean;
-}
-
-interface ListsData {
-  lists: UserList[];
 }
 
 interface HabitStats {
@@ -129,20 +118,15 @@ export function useTasks() {
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-const DAILY_D_TAG = DTAG_DAILY;
-const LISTS_D_TAG = DTAG_LISTS;
-const LISTS_D_TAG_OLD = DTAG_LISTS_OLD;
-
-/** Debounce delay for relay publishes (ms). Only applies to the
- *  legacy code path that still queues publishDaily / publishLists;
- *  those functions are now no-ops but the timer plumbing lives on
- *  to keep call-site semantics stable. */
+/** Debounce delay for the legacy publish timer (ms). Both publishers
+ *  are now no-ops (tasks live in the Blossom snapshot only) but the
+ *  debounce plumbing stays to preserve call-site semantics. */
 const PUBLISH_DEBOUNCE_MS = 1500;
 
 // ── Provider ───────────────────────────────────────────────────────────
 
 export function TasksProvider({ children }: { children: ReactNode }) {
-  const { pubkey, relays, signer } = useNostr();
+  const { pubkey } = useNostr();
   const { pushUndoEntry } = useCalendar();
   const [habits, setHabits] = useState<DailyHabit[]>([]);
   const [habitTombstones, setHabitTombstones] = useState<DailyHabit[]>([]);
@@ -181,86 +165,15 @@ export function TasksProvider({ children }: { children: ReactNode }) {
    */
   const fetchData = useCallback(async () => {
     if (!pubkey) return;
-
-    // If a publish is in-flight, skip this fetch — the relay may not have
-    // the latest data yet and overwriting optimistic state would cause
-    // completions to flicker (green dots disappearing then reappearing).
-    if (publishingRef.current > 0) {
-      log.info("skipping fetch — publish in-flight");
-      return;
-    }
-
-    setLoading(true);
-
-    try {
-      const rawEvents = await queryEvents(relays, {
-        kinds: [KIND_APP_DATA],
-        authors: [pubkey],
-        "#d": [DAILY_D_TAG, LISTS_D_TAG, LISTS_D_TAG_OLD],
-      });
-
-      // Re-check after the async gap — a publish may have started while
-      // we were waiting on the relay query.
-      if (publishingRef.current > 0) {
-        log.info("skipping state update — publish started during fetch");
-        setLoading(false);
-        return;
-      }
-
-      // Keep the most recent event per d-tag
-      const seen = new Map<string, { raw: typeof rawEvents[0]; createdAt: number }>();
-      for (const raw of rawEvents) {
-        const dTag = raw.tags.find((t: string[]) => t[0] === "d")?.[1];
-        if (!dTag) continue;
-        const existing = seen.get(dTag);
-        if (!existing || raw.created_at > existing.createdAt) {
-          seen.set(dTag, { raw, createdAt: raw.created_at });
-        }
-      }
-
-      const nip44Ok = isNip44Available(signer);
-      log.info(`fetched ${rawEvents.length} app-data events, d-tags: ${[...seen.keys()].join(", ") || "(none)"}`);
-
-      // Parse daily habits
-      const dailyEntry = seen.get(DAILY_D_TAG);
-      if (dailyEntry) {
-        const dailyRaw = dailyEntry.raw;
-        let content = dailyRaw.content;
-        if (isEncryptedEvent(dailyRaw.tags) && nip44Ok && signer) {
-          try {
-            const decrypted = await decryptEvent(pubkey, dailyRaw.content, dailyRaw.kind, DAILY_D_TAG, signer);
-            content = decrypted.content;
-          } catch (err) { log.warn("daily decrypt failed, using raw", err); }
-        }
-        try {
-          const parsed: DailyData = JSON.parse(content);
-          setHabits(parsed.habits || []);
-          setCompletions(parsed.completions || {});
-        } catch (err) { log.warn("daily data corrupt", err); }
-      }
-
-      // Parse lists (check current d-tag, fall back to old d-tag for backwards compat)
-      const listsEntry = seen.get(LISTS_D_TAG) || seen.get(LISTS_D_TAG_OLD);
-      if (listsEntry) {
-        const listsRaw = listsEntry.raw;
-        let content = listsRaw.content;
-        if (isEncryptedEvent(listsRaw.tags) && nip44Ok && signer) {
-          try {
-            const decrypted = await decryptEvent(pubkey, listsRaw.content, listsRaw.kind, LISTS_D_TAG, signer);
-            content = decrypted.content;
-          } catch (err) { log.warn("lists decrypt failed, using raw", err); }
-        }
-        try {
-          const parsed: ListsData = JSON.parse(content);
-          setLists(parsed.lists || []);
-        } catch (err) { log.warn("lists data corrupt", err); }
-      }
-    } catch (err) {
-      log.error("fetch failed", err);
-    } finally {
-      setLoading(false);
-    }
-  }, [pubkey, relays, signer]);
+    // Tasks state (daily habits, completions, lists) is entirely carried
+    // by the Blossom snapshot since v1.16.10b — we stopped publishing
+    // kind-30078 daily/lists events, so any relay response here would
+    // only contain pre-v1.16.10b stale data that would clobber the
+    // freshly-loaded snapshot. CalendarApp's loadSnapshot effect calls
+    // applyTasksSnapshot with the authoritative values; this hook just
+    // has to flip loading off so the rest of the UI unblocks.
+    setLoading(false);
+  }, [pubkey]);
 
   useEffect(() => {
     if (pubkey) fetchData();

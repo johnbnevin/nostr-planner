@@ -29,7 +29,7 @@ import {
   type ReactNode,
 } from "react";
 import { DEFAULT_RELAYS, KIND_RELAY_LIST } from "../lib/nostr";
-import { queryEvents, publishToRelays, closePool, parseRelayList, setRelayLists } from "../lib/relay";
+import { queryEvents, publishToRelays, closePool, parseRelayList, setRelayLists, setPrimaryRelay as relaySetPrimary } from "../lib/relay";
 import type { NostrEvent } from "../lib/relay";
 import type { NostrSigner, UnsignedEvent } from "../lib/signer";
 import { Nip07Signer } from "../lib/signer";
@@ -41,6 +41,21 @@ import { lsSet } from "../lib/storage";
 import { clearCalendarCache } from "../lib/eventCache";
 
 const log = logger("nostr");
+
+/** Read the saved primaryRelay URL from this user's settings blob.
+ *  Returns null if no valid URL is stored. Swallows all errors so a
+ *  corrupt or unavailable localStorage never blocks login. */
+function readSavedPrimaryRelay(pubkey: string): string | null {
+  try {
+    const raw = localStorage.getItem(`nostr-planner-settings-${pubkey}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { primaryRelay?: unknown };
+    const url = typeof parsed.primaryRelay === "string" ? parsed.primaryRelay.trim() : "";
+    return url && /^wss?:\/\//i.test(url) ? url : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Minimal profile metadata extracted from a kind-0 event.
@@ -223,6 +238,16 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       setAutoLoginState("done");
       setHasSavedSession(true);
       lsSet("nostr-planner-pubkey", pk);
+      // Restore the user's saved primary relay BEFORE we fire any queries
+      // below. SettingsContext also restores it on `pubkey` change, but
+      // that effect lands after this function returns — the queries here
+      // would otherwise hit whatever was in `primaryRelay` at module init
+      // (first suggested, i.e. damus) even when the user has set their
+      // own primary in Settings. Reading localStorage here is safe (we're
+      // inside an async callback, pubkey is known, try/catch around the
+      // access); avoids the module-init read that broke the UI in 1.16.0b.
+      const saved = readSavedPrimaryRelay(pk);
+      if (saved) relaySetPrimary(saved);
       // Fire-and-forget: failures are non-fatal (defaults work fine).
       void fetchRelayList(pk, DEFAULT_RELAYS).catch(err =>
         log.warn("relay list fetch failed", err)
