@@ -19,6 +19,7 @@ import {
   loadSnapshot,
   buildSnapshot,
   clearSnapshotPointer,
+  wrapEnvelope,
 } from "../lib/backup";
 import { npubEncode } from "nostr-tools/nip19";
 
@@ -110,16 +111,15 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
         completions, lists, listTombstones,
         settings: getSettings(),
       });
-      // Reuse the snapshot encryption path by running through saveSnapshot's
-      // encrypt step manually would require refactoring; simplest is to
-      // encrypt with nip44 directly here. But we already have the plaintext,
-      // so just ship the plaintext snapshot inside an nip44-wrapped envelope.
+      // Envelope-encrypt the snapshot: AES-256-GCM encrypts the full JSON
+      // (arbitrary size), NIP-44 encrypts only the 32-byte AES key. This
+      // is the same format saveSnapshot uploads to Blossom, and it avoids
+      // NIP-44's 65 535-byte plaintext cap — a direct nip44.encrypt(json)
+      // rejected anything over ~65 KB as "invalid plaintext size".
       const json = JSON.stringify(snap);
-      const encrypted = await signer.nip44.encrypt(pubkey, json);
-      // TextDecoder/Encoder limits: NIP-44 can exceed 65535 bytes. If that
-      // bites, we can swap to the same AES+NIP44 envelope the cloud uses.
+      const envelope = await wrapEnvelope(json, pubkey, signer.nip44);
       const npub = npubEncode(pubkey);
-      const file = { planner: true as const, version: 1 as const, npub, nip44: encrypted };
+      const file = { planner: true as const, version: 2 as const, npub, envelope };
       const blob = new Blob([JSON.stringify(file, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");

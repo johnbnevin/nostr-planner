@@ -121,7 +121,7 @@ export type RawEvent = {
 };
 type SignEventFn = (e: { kind: number; created_at: number; tags: string[][]; content: string }) => Promise<RawEvent>;
 type PublishEventFn = (e: RawEvent) => Promise<void>;
-type Nip44 = {
+export type Nip44 = {
   encrypt: (pubkey: string, plaintext: string) => Promise<string>;
   decrypt: (pubkey: string, ciphertext: string) => Promise<string>;
 };
@@ -191,7 +191,7 @@ const withTimeout = async <T>(p: Promise<T>, ms: number, label: string): Promise
 
 // ── Envelope encryption ─────────────────────────────────────────────
 
-interface Envelope {
+export interface Envelope {
   v: 1;
   /** NIP-44 ciphertext of the AES-256 key as 64 hex chars. */
   key: string;
@@ -201,7 +201,7 @@ interface Envelope {
   data: string;
 }
 
-async function wrapEnvelope(plaintext: string, pubkey: string, nip44: Nip44): Promise<Envelope> {
+export async function wrapEnvelope(plaintext: string, pubkey: string, nip44: Nip44): Promise<Envelope> {
   const aesKeyBytes = crypto.getRandomValues(new Uint8Array(32));
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const aesKey = await crypto.subtle.importKey("raw", aesKeyBytes, { name: "AES-GCM" }, false, ["encrypt"]);
@@ -212,7 +212,7 @@ async function wrapEnvelope(plaintext: string, pubkey: string, nip44: Nip44): Pr
   return { v: 1, key: encryptedKey, iv: b64Encode(iv), data: b64Encode(new Uint8Array(ciphertext)) };
 }
 
-async function unwrapEnvelope(env: Envelope, pubkey: string, nip44: Nip44): Promise<string> {
+export async function unwrapEnvelope(env: Envelope, pubkey: string, nip44: Nip44): Promise<string> {
   if (env.v !== 1) throw new Error(`unsupported envelope version ${env.v}`);
   const aesKeyHex = await nip44.decrypt(pubkey, env.key);
   const aesKeyBytes = hexDecode(aesKeyHex);
