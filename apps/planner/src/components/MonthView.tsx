@@ -57,6 +57,7 @@ export function MonthView({ onEventClick, onDateClick, onDayDetail, onEventCopy,
   const [dragOverDate, setDragOverDate] = useState<string | null>(null);
   const [draggingEvent, setDraggingEvent] = useState<CalendarEvent | null>(null);
   const [expandedDay, setExpandedDay] = useState<string | null>(null);
+  const dragLeaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Long-press handlers to give touch devices the same right-click UX.
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -208,11 +209,15 @@ export function MonthView({ onEventClick, onDateClick, onDayDetail, onEventCopy,
   const handleDragOver = (e: DragEvent, dateKey: string) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
+    if (dragLeaveTimer.current) { clearTimeout(dragLeaveTimer.current); dragLeaveTimer.current = null; }
     setDragOverDate(dateKey);
   };
 
+  // Debounced so a brief dragLeave when the cursor moves from the cell
+  // background to an overlapping event pill doesn't flicker the placeholder
+  // away. handleDragOver cancels the timer, keeping dragOverDate stable.
   const handleDragLeave = () => {
-    setDragOverDate(null);
+    dragLeaveTimer.current = setTimeout(() => setDragOverDate(null), 50);
   };
 
   const handleDrop = (e: DragEvent, day: Date) => {
@@ -323,6 +328,9 @@ export function MonthView({ onEventClick, onDateClick, onDayDetail, onEventCopy,
                     e.stopPropagation();
                     if (onDayDetail) onDayDetail(day);
                   }}
+                  onDragOver={(e) => handleDragOver(e, key)}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(e) => handleDrop(e, day)}
                   className="pointer-events-auto flex items-center justify-center py-1 hover:bg-primary-50 transition-colors cursor-pointer"
                   style={{ gridColumn: col + 1, gridRow: 1 }}
                   title="Open day details"
@@ -357,6 +365,9 @@ export function MonthView({ onEventClick, onDateClick, onDayDetail, onEventCopy,
                   draggable
                   onDragStart={(e) => handleDragStart(e, bar.event)}
                   onDragEnd={handleDragEnd}
+                  onDragOver={(e) => handleDragOver(e, format(week.days[bar.startCol], "yyyy-MM-dd"))}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(e) => handleDrop(e, week.days[bar.startCol])}
                   onClick={(e) => {
                     e.stopPropagation();
                     if (longPressFired.current) {
@@ -426,6 +437,9 @@ export function MonthView({ onEventClick, onDateClick, onDayDetail, onEventCopy,
                         draggable
                         onDragStart={(e) => handleDragStart(e, event)}
                         onDragEnd={handleDragEnd}
+                        onDragOver={(e) => handleDragOver(e, key)}
+                        onDragLeave={handleDragLeave}
+                        onDrop={(e) => handleDrop(e, day)}
                         onClick={(e) => {
                           e.stopPropagation();
                           if (longPressFired.current) {

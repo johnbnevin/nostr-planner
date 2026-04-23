@@ -73,7 +73,7 @@ import {
 import type { NostrSigner } from "../lib/signer";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
-import { cacheCalendarData } from "../lib/eventCache";
+import { cacheCalendarData, loadCachedCalendarData } from "../lib/eventCache";
 
 const log = logger("calendar");
 
@@ -1802,6 +1802,21 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!pubkey) return;
     lastFetchRef.current = 0;
+    const pk = pubkey; // capture for async closure
+
+    // Pre-populate from IndexedDB cache so the calendar is visible immediately
+    // on slow/mobile connections while the relay + Blossom fetches are in flight.
+    // Only applies if we have no events yet (Blossom restore may have already run).
+    void loadCachedCalendarData(pk).then((cached) => {
+      if (!cached || cached.events.length === 0) return;
+      if (eventsRef.current.length > 0) return; // already have data
+      log.debug("pre-populating from IndexedDB cache:", cached.events.length, "events");
+      setEvents(cached.events);
+      if (cached.calendars.length > 0) {
+        setCalendars(cached.calendars);
+        setActiveCalendarIds(new Set(cached.calendars.map((c) => c.dTag)));
+      }
+    }).catch(() => {});
 
     // Safety net: clear the loading indicator after 60s even if relay sync
     // hasn't finished. Prevents "Loading events…" from staying forever when

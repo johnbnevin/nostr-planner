@@ -44,6 +44,7 @@ References:
 - Always encrypt private data
 - No telemetry, no tracking
 - Preserve user choice, prefer opt-in
+- Show user avatars and human readable nicknames in the UI rather than full, ellipsed, or truncated npubs.  Allow option to copy and paste npub in UI where appropriate.
 
 ## Events
 Categories for nostr events:

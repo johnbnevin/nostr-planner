@@ -37,8 +37,10 @@ const NIP46_RELAYS = [
 
 /** Longer relay-connect budget than SimplePool's 3-second default.
  *  Amber et al. commonly need several seconds on the first WebSocket
- *  connection (DNS + TLS + handshake), especially on mobile networks. */
-const NIP46_CONNECT_TIMEOUT_MS = 15_000;
+ *  connection (DNS + TLS + handshake), especially on mobile networks.
+ *  30s gives enough headroom for 2G/lossy connections without feeling
+ *  broken to users on fast connections. */
+const NIP46_CONNECT_TIMEOUT_MS = 30_000;
 
 // ── Public API ─────────────────────────────────────────────────────
 

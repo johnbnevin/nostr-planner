@@ -1,4 +1,4 @@
-import { Component, useState, type ReactNode } from "react";
+import { Component, useEffect, useRef, useState, type ReactNode } from "react";
 import { NostrProvider } from "./contexts/NostrContext";
 import { SettingsProvider } from "./contexts/SettingsContext";
 import { SharingProvider } from "./contexts/SharingContext";
@@ -54,26 +54,49 @@ class ErrorBoundary extends Component<
 }
 
 function AppContent() {
-  const { pubkey, hasSavedSession, autoLoginState } = useNostr();
-  // When the user explicitly taps "Use a different login method" on the
-  // reconnect screen, we want to show the full LoginScreen until they either
-  // log in successfully or the session finishes reconnecting on its own.
+  const { pubkey, hasSavedSession, autoLoginState, retryAutoLogin } = useNostr();
   const [forceLoginScreen, setForceLoginScreen] = useState(false);
+  // Set to true when the user clicks "Wait longer" — keeps the reconnect
+  // screen visible even after the 60-second bunker window expires, and
+  // silently restarts the attempt each time it times out.
+  const [userWantsToWait, setUserWantsToWait] = useState(false);
+  // Bumped each time autoLoginState transitions TO "attempting" (first load
+  // or after a retry). Used as ReconnectScreen key so its countdown resets
+  // automatically without prop-drilling a "reset" signal.
+  const [attemptKey, setAttemptKey] = useState(0);
+  const prevStateRef = useRef(autoLoginState);
+
+  useEffect(() => {
+    if (autoLoginState === "attempting" && prevStateRef.current !== "attempting") {
+      setAttemptKey((k) => k + 1);
+    }
+    prevStateRef.current = autoLoginState;
+  }, [autoLoginState]);
+
+  // When the user asked to wait and the current 60-second attempt expires,
+  // silently kick off a new attempt. This keeps the screen alive without
+  // the user having to do anything.
+  useEffect(() => {
+    if (userWantsToWait && autoLoginState === "failed") {
+      retryAutoLogin();
+    }
+  }, [userWantsToWait, autoLoginState, retryAutoLogin]);
 
   if (!pubkey) {
-    // Returning user whose auto-login is still running — show the
-    // reconnect splash so they don't see the full login screen as if
-    // they had been kicked out. If auto-login actually fails, fall
-    // straight through to LoginScreen (the "Session paused / try again"
-    // state in between was dead UI — retry never recovered, so the
-    // user's only real option was "use a different login method",
-    // which is what LoginScreen already is).
     const showReconnect =
       !forceLoginScreen &&
       hasSavedSession &&
-      autoLoginState === "attempting";
+      (autoLoginState === "attempting" ||
+        (userWantsToWait && autoLoginState === "failed"));
+
     if (showReconnect) {
-      return <ReconnectScreen onSwitchAccount={() => setForceLoginScreen(true)} />;
+      return (
+        <ReconnectScreen
+          key={attemptKey}
+          onSwitchAccount={() => { setForceLoginScreen(true); setUserWantsToWait(false); }}
+          onWaitLonger={() => setUserWantsToWait(true)}
+        />
+      );
     }
     return <LoginScreen />;
   }

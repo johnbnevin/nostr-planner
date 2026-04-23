@@ -1,6 +1,6 @@
-import { useMemo, useRef, useState, useEffect } from "react";
+import { useMemo, useRef, useState, useEffect, type DragEvent } from "react";
 import { Clock, MapPin, Tag, Link as LinkIcon, FileText, Repeat, Plus, Loader2 } from "lucide-react";
-import { format, isSameDay, isToday, isTomorrow, isYesterday, addDays, startOfDay } from "date-fns";
+import { format, isSameDay, isToday, isTomorrow, isYesterday, addDays, startOfDay, set } from "date-fns";
 import { useCalendar } from "../contexts/CalendarContext";
 import type { CalendarEvent } from "../lib/nostr";
 
@@ -21,7 +21,48 @@ const INITIAL_WINDOW_DAYS = 60;
  * Past events are not shown; use the calendar view to navigate backwards.
  */
 export function UpcomingView({ onEventClick, onNewEvent }: UpcomingViewProps) {
-  const { filteredEvents, calendars } = useCalendar();
+  const { filteredEvents, calendars, moveEvent } = useCalendar();
+  const [dragOverKey, setDragOverKey] = useState<string | null>(null);
+  const [draggingEvent, setDraggingEvent] = useState<CalendarEvent | null>(null);
+  const dragLeaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleDragStart = (e: DragEvent, event: CalendarEvent) => {
+    e.dataTransfer.setData("text/plain", JSON.stringify({ dTag: event.dTag, kind: event.kind }));
+    e.dataTransfer.effectAllowed = "move";
+    setDraggingEvent(event);
+  };
+
+  const handleDragEnd = () => {
+    setDraggingEvent(null);
+    setDragOverKey(null);
+  };
+
+  const handleDragOver = (e: DragEvent, key: string) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dragLeaveTimer.current) { clearTimeout(dragLeaveTimer.current); dragLeaveTimer.current = null; }
+    setDragOverKey(key);
+  };
+
+  const handleDragLeave = () => {
+    dragLeaveTimer.current = setTimeout(() => setDragOverKey(null), 50);
+  };
+
+  const handleDrop = (e: DragEvent, date: Date) => {
+    e.preventDefault();
+    if (dragLeaveTimer.current) { clearTimeout(dragLeaveTimer.current); dragLeaveTimer.current = null; }
+    setDragOverKey(null);
+    setDraggingEvent(null);
+    try {
+      const data = JSON.parse(e.dataTransfer.getData("text/plain"));
+      const event = filteredEvents.find((ev) => ev.dTag === data.dTag);
+      if (!event || isSameDay(event.start, date)) return;
+      const newStart = event.allDay
+        ? date
+        : set(date, { hours: event.start.getHours(), minutes: event.start.getMinutes() });
+      void moveEvent(event, newStart);
+    } catch { /* invalid drag data */ }
+  };
   // How many days into the future to show. Grows on scroll.
   const [horizonDays, setHorizonDays] = useState(INITIAL_WINDOW_DAYS);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -120,7 +161,16 @@ export function UpcomingView({ onEventClick, onNewEvent }: UpcomingViewProps) {
         <div className="space-y-4">
           {grouped.map(({ key, date, events }) => (
             <div key={key}>
-              <div className="sticky top-0 z-10 -mx-1 px-2 py-1 bg-gradient-to-b from-gray-50 via-gray-50 to-gray-50/80 backdrop-blur-sm">
+              <div
+                className={`sticky top-0 z-10 -mx-1 px-2 py-1 backdrop-blur-sm rounded transition-colors ${
+                  dragOverKey === key && draggingEvent && !isSameDay(draggingEvent.start, date)
+                    ? "bg-primary-100 ring-2 ring-inset ring-primary-400"
+                    : "bg-gradient-to-b from-gray-50 via-gray-50 to-gray-50/80"
+                }`}
+                onDragOver={(e) => handleDragOver(e, key)}
+                onDragLeave={handleDragLeave}
+                onDrop={(e) => handleDrop(e, date)}
+              >
                 <div className="flex items-baseline gap-2">
                   <h3 className="text-sm font-semibold text-gray-900">
                     {dayHeader(date)}
@@ -128,6 +178,9 @@ export function UpcomingView({ onEventClick, onNewEvent }: UpcomingViewProps) {
                   <span className="text-xs text-gray-400">
                     {format(date, "MMM d, yyyy")}
                   </span>
+                  {dragOverKey === key && draggingEvent && !isSameDay(draggingEvent.start, date) && (
+                    <span className="text-xs text-primary-600 font-medium ml-1">→ drop to move here</span>
+                  )}
                 </div>
               </div>
               <div className="space-y-2 mt-2">
@@ -164,8 +217,11 @@ export function UpcomingView({ onEventClick, onNewEvent }: UpcomingViewProps) {
                   return (
                     <button
                       key={event.dTag}
+                      draggable
+                      onDragStart={(e) => handleDragStart(e, event)}
+                      onDragEnd={handleDragEnd}
                       onClick={() => onEventClick(event)}
-                      className="w-full text-left bg-white border border-gray-200 hover:border-primary-300 hover:shadow-sm rounded-xl p-3 transition-all"
+                      className="w-full text-left bg-white border border-gray-200 hover:border-primary-300 hover:shadow-sm rounded-xl p-3 transition-all cursor-grab active:cursor-grabbing"
                     >
                       <div className="flex items-start gap-3">
                         <div
