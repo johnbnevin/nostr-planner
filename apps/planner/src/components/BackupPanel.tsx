@@ -25,6 +25,8 @@ import {
   type BlobHandle,
 } from "../lib/backup";
 import { npubEncode } from "nostr-tools/nip19";
+import { saveFile } from "../lib/fileSave";
+import { useReplicationStatus } from "../hooks/useReplicationStatus";
 
 interface BackupPanelProps { onClose: () => void; }
 
@@ -50,6 +52,7 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
   const [shaInput, setShaInput] = useState<string>("");
 
   const nip44Available = isNip44Available(signer);
+  const replication = useReplicationStatus();
 
   const saveNow = async () => {
     if (!pubkey || !signer?.nip44) { setError("NIP-44 signer required"); return; }
@@ -223,13 +226,14 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
       const envelope = await wrapEnvelope(json, pubkey, signer.nip44);
       const npub = npubEncode(pubkey);
       const file = { planner: true as const, version: 2 as const, npub, envelope };
-      const blob = new Blob([JSON.stringify(file, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `planner-backup-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // Route through saveFile so mobile (Tauri + iOS PWA) gets the
+      // share sheet instead of relying on a.download — which iOS Safari
+      // and some webviews block or send to an inaccessible location.
+      await saveFile(
+        JSON.stringify(file, null, 2),
+        `planner-backup-${new Date().toISOString().slice(0, 10)}.json`,
+        "application/json",
+      );
       setStatus(`Exported: ${snap.events.length} events, ${snap.calendars.length} calendars.`);
       setDone(true);
     } catch (err) {
@@ -256,6 +260,36 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
               Your data is encrypted with AES-256-GCM; the key is wrapped with NIP-44 to your own npub.
             </span>
           </div>
+
+          {/* Replication status — only shown once we've recorded a save
+              this session. Lists primary + per-mirror outcomes so the
+              user can see exactly where their last save landed. */}
+          {replication.lastBlossom && (
+            <div className="rounded-xl border border-gray-200 p-3 text-xs space-y-1">
+              <div className="font-medium text-gray-700">Last cloud save replication</div>
+              <div className="text-emerald-700">
+                ✓ Primary: <span className="font-mono">{new URL(replication.lastBlossom.primary).host}</span>
+              </div>
+              {replication.lastBlossom.mirrors.length === 0 ? (
+                <div className="text-gray-500 italic">No additional mirror servers known.</div>
+              ) : (
+                replication.lastBlossom.mirrors.map((m) => (
+                  <div key={m.url} className={m.status === "ok" ? "text-emerald-700" : "text-amber-700"}>
+                    {m.status === "ok" ? "✓" : "⚠"} {new URL(m.url).host}
+                    {m.status === "failed" && m.error ? (
+                      <span className="text-gray-400"> — {m.error}</span>
+                    ) : null}
+                  </div>
+                ))
+              )}
+              {(replication.pendingBlossomMirrors > 0 || replication.pendingRelayMirrors > 0) && (
+                <div className="text-amber-700 italic pt-1">
+                  {replication.pendingBlossomMirrors + replication.pendingRelayMirrors} mirror
+                  {replication.pendingBlossomMirrors + replication.pendingRelayMirrors === 1 ? "" : "s"} retrying in background
+                </div>
+              )}
+            </div>
+          )}
 
           <button
             onClick={saveNow}
@@ -286,50 +320,69 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
             </span>
           </button>
 
-          {recoverList && recoverList.length > 0 && (
-            <div className="border border-amber-200 rounded-xl p-3 space-y-2 bg-amber-50/30 max-h-96 overflow-y-auto">
-              <div className="text-xs text-amber-900">
-                {recoverList.length} blob(s) found, newest first. Counts
-                are decrypted client-side so you can tell which is which.
-                Restore immediately re-publishes the chosen blob as the
-                current snapshot so a page reload won't clobber it.
-              </div>
-              {recoverList.map((b) => {
-                const when = b.uploaded > 0 ? new Date(b.uploaded * 1000) : null;
-                const kb = (b.size / 1024).toFixed(1);
-                const preview = previews[b.sha256];
-                return (
-                  <div key={b.sha256} className="flex items-center justify-between gap-2 bg-white rounded-lg border border-amber-200 p-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="text-xs font-mono text-gray-700 truncate">{b.sha256.slice(0, 12)}…</div>
-                      <div className="text-[11px] text-gray-500">
-                        {when ? when.toLocaleString() : "(no timestamp)"} · {kb} KB · {new URL(b.server).host}
-                      </div>
-                      <div className="text-[11px] mt-0.5">
-                        {preview === "loading" ? (
-                          <span className="text-gray-400">Decrypting…</span>
-                        ) : preview === "failed" ? (
-                          <span className="text-red-500">Couldn't decrypt (not a Planner snapshot?)</span>
-                        ) : preview ? (
-                          <span className="text-emerald-700 font-medium">
-                            {preview.events} events · {preview.calendars} calendars · {preview.habits} habits · {preview.lists} lists
-                            {preview.savedAt ? ` · saved ${new Date(preview.savedAt).toLocaleString()}` : ""}
-                          </span>
-                        ) : null}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => void restoreFromBlob(b.sha256)}
-                      disabled={working}
-                      className="shrink-0 px-2 py-1 text-xs font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 transition-colors"
-                    >
-                      Restore
-                    </button>
+          {recoverList && recoverList.length > 0 && (() => {
+            // Filter out non-Planner blobs: any blob whose preview came
+            // back "failed" was successfully fetched but didn't decrypt
+            // to a Planner snapshot (or didn't decrypt at all). The
+            // user's Blossom account can contain blobs from other apps
+            // under the same pubkey — those shouldn't clutter the
+            // restore list. Keep rows that are still loading so the user
+            // sees progress as decrypts settle.
+            const visible = recoverList.filter((b) => previews[b.sha256] !== "failed");
+            const hidden = recoverList.length - visible.length;
+            return (
+              <div className="border border-amber-200 rounded-xl p-3 space-y-2 bg-amber-50/30 max-h-96 overflow-y-auto">
+                <div className="text-xs text-amber-900">
+                  {visible.length} Planner snapshot{visible.length === 1 ? "" : "s"} found, newest first. Counts
+                  are decrypted client-side so you can tell which is which.
+                  Restore immediately re-publishes the chosen blob as the
+                  current snapshot so a page reload won't clobber it.
+                </div>
+                {hidden > 0 && (
+                  <div className="text-[11px] text-amber-700 italic">
+                    {hidden} other blob{hidden === 1 ? "" : "s"} in your account hidden — not Planner snapshots.
                   </div>
-                );
-              })}
-            </div>
-          )}
+                )}
+                {visible.map((b) => {
+                  const when = b.uploaded > 0 ? new Date(b.uploaded * 1000) : null;
+                  const kb = (b.size / 1024).toFixed(1);
+                  const preview = previews[b.sha256];
+                  return (
+                    <div key={b.sha256} className="flex items-center justify-between gap-2 bg-white rounded-lg border border-amber-200 p-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-mono text-gray-700 truncate">{b.sha256.slice(0, 12)}…</div>
+                        <div className="text-[11px] text-gray-500">
+                          {when ? when.toLocaleString() : "(no timestamp)"} · {kb} KB · {new URL(b.server).host}
+                        </div>
+                        <div className="text-[11px] mt-0.5">
+                          {preview === "loading" || preview === undefined ? (
+                            <span className="text-gray-400">Decrypting…</span>
+                          ) : preview && preview !== "failed" ? (
+                            <span className="text-emerald-700 font-medium">
+                              {preview.events} events · {preview.calendars} calendars · {preview.habits} habits · {preview.lists} lists
+                              {preview.savedAt ? ` · saved ${new Date(preview.savedAt).toLocaleString()}` : ""}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => void restoreFromBlob(b.sha256)}
+                        disabled={working || preview === "loading" || preview === undefined}
+                        title={
+                          preview === "loading" || preview === undefined
+                            ? "Wait for the snapshot to finish decrypting"
+                            : ""
+                        }
+                        className="shrink-0 px-2 py-1 text-xs font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 transition-colors"
+                      >
+                        Restore
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
 
           {/* Restore by sha256 — escape hatch when the blob you want is
               not in the "Find older backups" list (servers garbage-collect

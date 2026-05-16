@@ -1,5 +1,6 @@
 import type { CalendarEvent } from "./nostr";
 import { toRRule } from "./nostr";
+import { saveFile } from "./fileSave";
 import {
   escapeIcal,
   sanitizeRRule,
@@ -67,20 +68,8 @@ export function exportToIcal(events: CalendarEvent[], calendarName = "Planner"):
   return lines.join("\r\n");
 }
 
-export function downloadIcalFile(events: CalendarEvent[], filename = "nostr-planner.ics") {
-  const ical = exportToIcal(events);
-  const blob = new Blob([ical], { type: "text/calendar;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  try {
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+export async function downloadIcalFile(events: CalendarEvent[], filename = "nostr-planner.ics") {
+  await saveFile(exportToIcal(events), filename, "text/calendar");
 }
 
 // ── Import (parse) ─────────────────────────────────────────────────────

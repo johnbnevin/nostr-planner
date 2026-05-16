@@ -269,7 +269,7 @@ function SidebarContent({
   };
 
   const handleExport = () => {
-    downloadIcalFile(filteredEvents, "nostr-planner.ics");
+    void downloadIcalFile(filteredEvents, "nostr-planner.ics");
   };
 
   const handleCalDragStart = useCallback((dTag: string) => {

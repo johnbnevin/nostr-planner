@@ -74,6 +74,8 @@ import type { NostrSigner } from "../lib/signer";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
 import { cacheCalendarData, loadCachedCalendarData } from "../lib/eventCache";
+import { withFieldStamps } from "../lib/merge";
+import { useUndoRedo } from "../hooks/useUndoRedo";
 
 const log = logger("calendar");
 
@@ -200,14 +202,9 @@ interface CalendarContextValue {
   pushUndoEntry: (op: { description: string; undo: () => Promise<void>; redo: () => Promise<void> }) => void;
 }
 
-/** One reversible operation — deletion, move, tag mutation, etc. */
-interface UndoableOperation {
-  description: string;
-  /** Undo: apply the inverse of the operation. */
-  undo: () => Promise<void>;
-  /** Redo: re-apply the original operation. */
-  redo: () => Promise<void>;
-}
+// UndoableOperation is now defined in useUndoRedo (see hooks/useUndoRedo.ts).
+// Local pushUndo calls match the same shape; no re-import needed because
+// usage is always inline {description, undo, redo} object literals.
 
 const CalendarContext = createContext<CalendarContextValue | null>(null);
 
@@ -366,38 +363,19 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
   const clearActiveTags = useCallback(() => {
     setActiveTagsState(new Set());
   }, []);
-  // Undo/redo stacks — most recent op at the end. Capped so long sessions don't
-  // grow unbounded; old entries simply fall off the bottom. New operations
-  // clear the redo stack (standard undo semantics — once you branch, the
-  // previously-undone future is no longer reachable).
-  //
-  // The refs mirror state so undo()/redo() can pop synchronously without
-  // racing React's render cycle — reading the popped op directly from the
-  // ref avoids a bug where a side-effectful setState updater was sometimes
-  // scheduled but not yet run, leaving `op` undefined at replay time.
-  const [undoStack, setUndoStack] = useState<UndoableOperation[]>([]);
-  const [redoStack, setRedoStack] = useState<UndoableOperation[]>([]);
-  const undoStackRef = useRef<UndoableOperation[]>([]);
-  const redoStackRef = useRef<UndoableOperation[]>([]);
-  useEffect(() => { undoStackRef.current = undoStack; }, [undoStack]);
-  useEffect(() => { redoStackRef.current = redoStack; }, [redoStack]);
-  const UNDO_CAP = 20;
-  // When an undo or redo is replaying a prior op, mutations that run inside
-  // the replay (e.g. `undo: () => deleteEvent(...)`) shouldn't themselves
-  // push onto the undo stack — that would cause the just-replayed op to
-  // double-register and the redo stack to be wiped mid-undo. This ref is
-  // flipped by undo()/redo() around the replay call so any nested pushUndo
-  // is silently ignored.
-  const suppressUndoPushRef = useRef(false);
-  const pushUndo = useCallback((op: UndoableOperation) => {
-    if (suppressUndoPushRef.current) return;
-    const next = [...undoStackRef.current, op];
-    const capped = next.length > UNDO_CAP ? next.slice(next.length - UNDO_CAP) : next;
-    undoStackRef.current = capped;
-    redoStackRef.current = [];
-    setUndoStack(capped);
-    setRedoStack([]);
-  }, []);
+  // Undo/redo — extracted to apps/planner/src/hooks/useUndoRedo for
+  // testability. Behavior is identical: 20-entry cap, replay re-entry
+  // guard, synchronous ref mirror. See the hook for full notes.
+  const {
+    pushUndo,
+    undo,
+    redo,
+    clear: clearUndoStacks,
+    undoDepth,
+    redoDepth,
+    undoPreview,
+    redoPreview,
+  } = useUndoRedo();
 
   // ── Sharing state (from SharingContext) ──────────────────────────
   const {
@@ -999,10 +977,11 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       if (affected.length === 0) return;
 
       const originals = affected.map((e) => ({ ...e }));
-      const updated = affected.map((e) => ({
-        ...e,
-        hashtags: transform(e.hashtags).filter((t, i, arr) => !!t && arr.indexOf(t) === i),
-      }));
+      const updated = affected.map((e) =>
+        withFieldStamps(e, ["hashtags"], {
+          hashtags: transform(e.hashtags).filter((t, i, arr) => !!t && arr.indexOf(t) === i),
+        })
+      );
       await applyEventUpdates(updated);
       pushUndo({
         description,
@@ -1058,7 +1037,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       const originals = affected.map((e) => ({ ...e }));
       const updated = affected.map((e) => {
         const next = transform(e.location || "").trim();
-        return { ...e, location: next || undefined };
+        return withFieldStamps(e, ["location"], { location: next || undefined });
       });
       await applyEventUpdates(updated);
       pushUndo({
@@ -1101,7 +1080,9 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
 
       setEvents((prev) =>
         prev.map((e) =>
-          e.dTag === event.dTag ? { ...e, start: newStart, end: newEnd } : e
+          e.dTag === event.dTag
+            ? withFieldStamps(e, newEnd ? ["start", "end"] : ["start"], { start: newStart, end: newEnd })
+            : e
         )
       );
 
@@ -1110,7 +1091,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       if (isPrivate) return;
 
       const content = event.content;
-      const movedEvent = { ...event, start: newStart, end: newEnd };
+      const movedEvent = withFieldStamps(event, newEnd ? ["start", "end"] : ["start"], { start: newStart, end: newEnd });
       const tags = buildEventTags(movedEvent);
 
       await signAndPublish(
@@ -1556,19 +1537,20 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       const cal = calendarsRef.current.find((c) => c.dTag === dTag);
       if (!cal || cal.title === newTitle) return;
       const priorTitle = cal.title;
-      const updated: CalendarCollection = { ...cal, title: newTitle };
+      const updated = withFieldStamps(cal, ["title"], { title: newTitle });
       setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? updated : c)));
       await publishCalendarCollection(updated);
       pushUndo({
         description: `Rename calendar "${priorTitle}" → "${newTitle}"`,
         undo: async () => {
-          const reverted = { ...updated, title: priorTitle };
+          const reverted = withFieldStamps(updated, ["title"], { title: priorTitle });
           setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? reverted : c)));
           await publishCalendarCollection(reverted);
         },
         redo: async () => {
-          setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? updated : c)));
-          await publishCalendarCollection(updated);
+          const replay = withFieldStamps(updated, ["title"], { title: newTitle });
+          setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? replay : c)));
+          await publishCalendarCollection(replay);
         },
       });
     },
@@ -1582,19 +1564,20 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       const cal = calendarsRef.current.find((c) => c.dTag === dTag);
       if (!cal || cal.color === newColor) return;
       const priorColor = cal.color;
-      const updated: CalendarCollection = { ...cal, color: newColor };
+      const updated = withFieldStamps(cal, ["color"], { color: newColor });
       setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? updated : c)));
       await publishCalendarCollection(updated);
       pushUndo({
         description: `Recolor "${cal.title}"`,
         undo: async () => {
-          const reverted = { ...updated, color: priorColor };
+          const reverted = withFieldStamps(updated, ["color"], { color: priorColor });
           setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? reverted : c)));
           await publishCalendarCollection(reverted);
         },
         redo: async () => {
-          setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? updated : c)));
-          await publishCalendarCollection(updated);
+          const replay = withFieldStamps(updated, ["color"], { color: newColor });
+          setCalendars((prev) => prev.map((c) => (c.dTag === dTag ? replay : c)));
+          await publishCalendarCollection(replay);
         },
       });
     },
@@ -1681,7 +1664,6 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
         redo: () => deleteCalendarInternal(dTag),
       });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- refs/setters stable
     [deleteCalendarInternal, activeCalendarIds, sharedKeys, pubkey, pushUndo, publishCalendarCollection]
   );
 
@@ -1724,77 +1706,12 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     await doRefresh();
   }, [doRefresh]);
 
-  // Undo: pop the most recent op, run its reverse, and push it onto the redo
-  // stack so Ctrl+Shift+Z can replay it. Errors are swallowed after logging.
-  // Guard against overlapping replays — if a user spams Ctrl+Z the second
-  // tap can fire before the first replay finishes, ending up with two
-  // concurrent calls pulling from the stack.
-  const replayingRef = useRef(false);
-
-  const undo = useCallback(async () => {
-    if (replayingRef.current) return;
-    const stack = undoStackRef.current;
-    if (stack.length === 0) return;
-    const op = stack[stack.length - 1];
-    const nextStack = stack.slice(0, -1);
-    undoStackRef.current = nextStack;
-    setUndoStack(nextStack);
-
-    replayingRef.current = true;
-    suppressUndoPushRef.current = true;
-    try {
-      await op.undo();
-      const nextRedo = [...redoStackRef.current, op];
-      redoStackRef.current = nextRedo;
-      setRedoStack(nextRedo);
-    } catch (err) {
-      log.warn("undo failed:", err);
-      // Restore the popped op so the user can retry.
-      undoStackRef.current = stack;
-      setUndoStack(stack);
-    } finally {
-      suppressUndoPushRef.current = false;
-      replayingRef.current = false;
-    }
-  }, []);
-
-  const redo = useCallback(async () => {
-    if (replayingRef.current) return;
-    const stack = redoStackRef.current;
-    if (stack.length === 0) return;
-    const op = stack[stack.length - 1];
-    const nextStack = stack.slice(0, -1);
-    redoStackRef.current = nextStack;
-    setRedoStack(nextStack);
-
-    replayingRef.current = true;
-    suppressUndoPushRef.current = true;
-    try {
-      await op.redo();
-      const nextUndo = [...undoStackRef.current, op];
-      const capped = nextUndo.length > UNDO_CAP ? nextUndo.slice(nextUndo.length - UNDO_CAP) : nextUndo;
-      undoStackRef.current = capped;
-      setUndoStack(capped);
-    } catch (err) {
-      log.warn("redo failed:", err);
-      redoStackRef.current = stack;
-      setRedoStack(stack);
-    } finally {
-      suppressUndoPushRef.current = false;
-      replayingRef.current = false;
-    }
-  }, []);
-
-  // Clear the undo/redo stacks on logout — operations against the previous
-  // user's data shouldn't be replayable under a different identity.
+  // undo/redo callbacks come from the hook. Identity-change cleanup
+  // calls clearUndoStacks() so operations from the previous user aren't
+  // replayable under a new login.
   useEffect(() => {
-    if (!pubkey) {
-      undoStackRef.current = [];
-      redoStackRef.current = [];
-      setUndoStack([]);
-      setRedoStack([]);
-    }
-  }, [pubkey]);
+    if (!pubkey) clearUndoStacks();
+  }, [pubkey, clearUndoStacks]);
 
   // On login, reset the relay refresh cursor. CalendarApp drives the
   // actual Blossom snapshot restore so it can apply state to every context
@@ -1830,7 +1747,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     }, 60_000);
 
     doRefreshRef.current().finally(() => clearTimeout(safetyTimer));
-  }, [pubkey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pubkey]);
 
   // Live subscription to calendar event kinds so shared + public calendar
   // edits from another device appear within seconds instead of waiting for
@@ -1945,14 +1862,14 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     completeCalendarSetup,
     decryptionErrors,
     syncError,
-    undoDepth: undoStack.length,
-    redoDepth: redoStack.length,
-    undoPreview: undoStack.length > 0 ? undoStack[undoStack.length - 1].description : null,
-    redoPreview: redoStack.length > 0 ? redoStack[redoStack.length - 1].description : null,
+    undoDepth,
+    redoDepth,
+    undoPreview,
+    redoPreview,
     undo,
     redo,
     pushUndoEntry: pushUndo,
-  }), [events, filteredEvents, calendars, activeCalendarIds, allTags, tagsByUsage, locationsByUsage, activeTags, setActiveTags, toggleActiveTag, clearActiveTags, eventsLoading, currentDate, viewMode, toggleCalendar, createCalendar, createSharedCalendar, updateCalendarEvents, getSeriesEvents, renameCalendar, recolorCalendar, deleteCalendar, reorderCalendars, refreshEvents, forceFullRefresh, deleteEvent, deleteSeries, renameTag, deleteTag, renameLocation, deleteLocation, moveEvent, removeMember, convertToShared, leaveSharedCalendarAndCleanup, addEventOptimistic, eventTombstones, applySnapshot, lastRemoteSha, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, undoStack, redoStack, undo, redo, pushUndo]);
+  }), [events, filteredEvents, calendars, activeCalendarIds, allTags, tagsByUsage, locationsByUsage, activeTags, setActiveTags, toggleActiveTag, clearActiveTags, eventsLoading, currentDate, viewMode, toggleCalendar, createCalendar, createSharedCalendar, updateCalendarEvents, getSeriesEvents, renameCalendar, recolorCalendar, deleteCalendar, reorderCalendars, refreshEvents, forceFullRefresh, deleteEvent, deleteSeries, renameTag, deleteTag, renameLocation, deleteLocation, moveEvent, removeMember, convertToShared, leaveSharedCalendarAndCleanup, addEventOptimistic, eventTombstones, applySnapshot, lastRemoteSha, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, undoDepth, redoDepth, undoPreview, redoPreview, undo, redo, pushUndo]);
 
   return (
     <CalendarContext.Provider

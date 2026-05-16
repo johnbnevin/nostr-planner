@@ -42,8 +42,17 @@ interface DigestDataPayload {
 
 interface PushSubscriptionPayload {
   v: number;
+  /** Transport identifier. "webpush" is the existing browser path (VAPID
+   *  + endpoint + p256dh/auth). "fcm" is native Android push via Firebase
+   *  Cloud Messaging — the daemon owns those credentials. Apple/iOS
+   *  platforms are deliberately not supported. */
+  platform?: "webpush" | "fcm";
+  /** Web Push endpoint. Required when platform === "webpush" (default). */
   endpoint: string;
+  /** Web Push encryption keys. Required when platform === "webpush". */
   keys: { p256dh: string; auth: string };
+  /** Native device token. Required when platform === "fcm". */
+  token?: string;
   allDayMinsBefore: number;
   timedMinsBefore: number;
   timezone: string;
@@ -52,8 +61,15 @@ interface PushSubscriptionPayload {
 // ── Push subscription entry ──────────────────────────────────────────
 
 export interface PushSubEntry {
+  platform: "webpush" | "fcm";
+  /** Web Push endpoint (platform === "webpush") or stable identifier for
+   *  the FCM token (used as the registry key, since FCM tokens also need
+   *  a unique identity per device). */
   endpoint: string;
+  /** Web Push keys — only populated for platform === "webpush". */
   keys: { p256dh: string; auth: string };
+  /** Native device token — only populated for "fcm". */
+  token?: string;
   allDayMinsBefore: number;
   timedMinsBefore: number;
   timezone: string;
@@ -171,12 +187,10 @@ export class UserRegistry {
   }
 
   private handlePushSub(pubkey: string, sub: PushSubscriptionPayload): void {
-    // Schema validation — reject malformed push subscription payloads
+    const platform = sub.platform ?? "webpush";
+
+    // Common-shape validation (delivery prefs + timezone).
     if (
-      typeof sub.endpoint !== "string" ||
-      !sub.endpoint.startsWith("https://") ||
-      typeof sub.keys?.p256dh !== "string" ||
-      typeof sub.keys?.auth !== "string" ||
       typeof sub.allDayMinsBefore !== "number" ||
       typeof sub.timedMinsBefore !== "number" ||
       typeof sub.timezone !== "string"
@@ -184,17 +198,44 @@ export class UserRegistry {
       console.warn(`[registry] malformed push sub from ${pubkey.slice(0, 8)}, ignoring`);
       return;
     }
+
+    if (platform === "webpush") {
+      // Web Push needs the VAPID endpoint and encryption keys.
+      if (
+        typeof sub.endpoint !== "string" ||
+        !sub.endpoint.startsWith("https://") ||
+        typeof sub.keys?.p256dh !== "string" ||
+        typeof sub.keys?.auth !== "string"
+      ) {
+        console.warn(`[registry] malformed webpush sub from ${pubkey.slice(0, 8)}, ignoring`);
+        return;
+      }
+    } else if (platform === "fcm") {
+      // Native push needs a device token. The endpoint serves only as
+      // a stable identifier for replacement on re-registration.
+      if (typeof sub.token !== "string" || sub.token.length < 8 ||
+          typeof sub.endpoint !== "string") {
+        console.warn(`[registry] malformed fcm sub from ${pubkey.slice(0, 8)}, ignoring`);
+        return;
+      }
+    } else {
+      console.warn(`[registry] unknown push platform "${platform}" from ${pubkey.slice(0, 8)}, ignoring`);
+      return;
+    }
+
     const user = this.ensureUser(pubkey);
     user.pushSubs.set(sub.endpoint, {
+      platform,
       endpoint: sub.endpoint,
       keys: sub.keys,
+      token: sub.token,
       allDayMinsBefore: sub.allDayMinsBefore,
       timedMinsBefore: sub.timedMinsBefore,
       timezone: sub.timezone,
       notifiedToday: new Set(),
       notifiedDateKey: "",
     });
-    console.log(`[registry] push sub for ${pubkey.slice(0, 8)} (${user.pushSubs.size} device(s))`);
+    console.log(`[registry] ${platform} sub for ${pubkey.slice(0, 8)} (${user.pushSubs.size} device(s))`);
   }
 
   /** Get push notifications that need to fire right now. */

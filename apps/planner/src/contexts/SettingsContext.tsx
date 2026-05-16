@@ -32,10 +32,7 @@ import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
 import { SUGGESTED_RELAYS, SUGGESTED_BLOSSOM_SERVERS } from "../lib/nostr";
 import { setPrimaryRelay as relaySetPrimary } from "../lib/relay";
-import {
-  setPrimaryBlossom as blossomSetPrimary,
-  setBlossomRedundancy as blossomSetRedundancy,
-} from "../lib/backup";
+import { setPrimaryBlossom as blossomSetPrimary } from "../lib/backup";
 
 const log = logger("settings");
 
@@ -105,10 +102,6 @@ interface SettingsContextValue {
    *  Defaults to SUGGESTED_BLOSSOM_SERVERS[0]. */
   primaryBlossom: string;
   setPrimaryBlossom: (url: string) => void;
-  /** Number of additional Blossom servers to mirror every save to. 0 = no
-   *  mirrors, just the primary. Capped at the size of SUGGESTED_BLOSSOM_SERVERS. */
-  blossomRedundancy: number;
-  setBlossomRedundancy: (count: number) => void;
   /** Snapshot all settings for backup */
   getSettings: () => PersistedSettings;
   /** Bulk-restore settings from backup */
@@ -148,7 +141,8 @@ export interface PersistedSettings {
   primaryRelay?: string;
   /** User's chosen primary Blossom server URL. Undefined falls back to default. */
   primaryBlossom?: string;
-  /** Number of additional Blossom mirrors per save (on top of primary). */
+  /** @deprecated Removed in v1.16.18. Reading legacy snapshots is fine; the
+   *  value is ignored. Every known server is now mirrored to on every save. */
   blossomRedundancy?: number;
   [key: string]: unknown; // forward-compat: restore won't break on future fields
 }
@@ -157,8 +151,6 @@ export interface PersistedSettings {
 const DEFAULT_PRIMARY_RELAY = SUGGESTED_RELAYS[0];
 /** Fallback primary Blossom server. */
 const DEFAULT_PRIMARY_BLOSSOM = SUGGESTED_BLOSSOM_SERVERS[0];
-/** Fallback redundancy: mirror to every other suggested server. */
-const DEFAULT_BLOSSOM_REDUNDANCY = SUGGESTED_BLOSSOM_SERVERS.length - 1;
 
 /**
  * Provider that manages user preferences. Reads from and writes to localStorage
@@ -180,7 +172,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [notification, setNotificationState] = useState<NotificationSettings>(DEFAULT_NOTIFY);
   const [primaryRelay, setPrimaryRelayState] = useState<string>(DEFAULT_PRIMARY_RELAY);
   const [primaryBlossom, setPrimaryBlossomState] = useState<string>(DEFAULT_PRIMARY_BLOSSOM);
-  const [blossomRedundancy, setBlossomRedundancyState] = useState<number>(DEFAULT_BLOSSOM_REDUNDANCY);
 
   // Re-check NIP-44 support whenever the signer changes (login/logout/extension
   // upgrade) or the window regains focus (the user may have installed an extension
@@ -217,8 +208,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       relaySetPrimary(DEFAULT_PRIMARY_RELAY);
       setPrimaryBlossomState(DEFAULT_PRIMARY_BLOSSOM);
       blossomSetPrimary(DEFAULT_PRIMARY_BLOSSOM);
-      setBlossomRedundancyState(DEFAULT_BLOSSOM_REDUNDANCY);
-      blossomSetRedundancy(DEFAULT_BLOSSOM_REDUNDANCY);
       /* eslint-enable react-hooks/set-state-in-effect */
       return;
     }
@@ -253,17 +242,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
           : DEFAULT_PRIMARY_BLOSSOM;
         setPrimaryBlossomState(savedBlossom);
         blossomSetPrimary(savedBlossom);
-        const savedRedundancy = typeof parsed.blossomRedundancy === "number" && Number.isFinite(parsed.blossomRedundancy)
-          ? parsed.blossomRedundancy
-          : DEFAULT_BLOSSOM_REDUNDANCY;
-        setBlossomRedundancyState(savedRedundancy);
-        blossomSetRedundancy(savedRedundancy);
       } else {
         // No saved settings yet — ensure the backup/relay modules are
         // aligned with the defaults the UI is about to display.
         relaySetPrimary(DEFAULT_PRIMARY_RELAY);
         blossomSetPrimary(DEFAULT_PRIMARY_BLOSSOM);
-        blossomSetRedundancy(DEFAULT_BLOSSOM_REDUNDANCY);
         log.debug("no saved settings for", pubkey.slice(0, 8), "— using defaults");
       }
     } catch {
@@ -303,7 +286,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         notification: overrides.notification ?? existing.notification ?? DEFAULT_NOTIFY,
         primaryRelay: overrides.primaryRelay ?? existing.primaryRelay,
         primaryBlossom: overrides.primaryBlossom ?? existing.primaryBlossom,
-        blossomRedundancy: overrides.blossomRedundancy ?? existing.blossomRedundancy,
       };
       lsSet(key, JSON.stringify(data));
       log.debug("settings persisted for", pubkey.slice(0, 8));
@@ -406,17 +388,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     [persist, primaryBlossom]
   );
 
-  const setBlossomRedundancy = useCallback(
-    (count: number) => {
-      const clamped = Math.max(0, Math.min(10, Math.floor(count)));
-      if (clamped === blossomRedundancy) return;
-      setBlossomRedundancyState(clamped);
-      blossomSetRedundancy(clamped);
-      persist({ blossomRedundancy: clamped });
-    },
-    [persist, blossomRedundancy]
-  );
-
   /** Snapshot all current settings into a plain object suitable for backup. */
   const getSettings = useCallback((): PersistedSettings => ({
     publicCalendars: [...publicCalendars],
@@ -428,8 +399,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     notification,
     primaryRelay,
     primaryBlossom,
-    blossomRedundancy,
-  }), [publicCalendars, showDaily, showTodo, showLists, savedViewMode, autoBackup, notification, primaryRelay, primaryBlossom, blossomRedundancy]);
+  }), [publicCalendars, showDaily, showTodo, showLists, savedViewMode, autoBackup, notification, primaryRelay, primaryBlossom]);
 
   /** Bulk-restore settings from a backup snapshot. Applies each field and persists. */
   const restoreSettings = useCallback(
@@ -452,11 +422,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setPrimaryBlossomState(url);
         blossomSetPrimary(url);
       }
-      if (typeof s.blossomRedundancy === "number" && Number.isFinite(s.blossomRedundancy)) {
-        const n = Math.max(0, Math.min(10, Math.floor(s.blossomRedundancy)));
-        setBlossomRedundancyState(n);
-        blossomSetRedundancy(n);
-      }
+      // s.blossomRedundancy is intentionally ignored — legacy field, see
+      // PersistedSettings doc. The app always mirrors to every server.
       persist({
         publicCalendarsSet: s.publicCalendars ? new Set(s.publicCalendars) : undefined,
         showDaily: s.showDaily,
@@ -467,7 +434,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         notification: s.notification ? { ...DEFAULT_NOTIFY, ...s.notification } : undefined,
         primaryRelay: typeof s.primaryRelay === "string" ? s.primaryRelay : undefined,
         primaryBlossom: typeof s.primaryBlossom === "string" ? s.primaryBlossom : undefined,
-        blossomRedundancy: typeof s.blossomRedundancy === "number" ? s.blossomRedundancy : undefined,
       });
     },
     [persist]
@@ -516,8 +482,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setPrimaryRelay,
         primaryBlossom,
         setPrimaryBlossom,
-        blossomRedundancy,
-        setBlossomRedundancy,
         getSettings,
         restoreSettings,
       }}

@@ -23,8 +23,6 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
     setPrimaryRelay,
     primaryBlossom,
     setPrimaryBlossom,
-    blossomRedundancy,
-    setBlossomRedundancy,
   } = useSettings();
   const { calendars } = useCalendar();
   const { nip65Relays } = useNostr();
@@ -69,12 +67,6 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
     setBlossomCustomError("");
     setPrimaryBlossom(trimmed);
   };
-
-  // Max redundancy is (suggested count - 1) when primary is one of the
-  // suggested servers — we can mirror to the remaining N-1. If primary
-  // is custom, we can still mirror to all N suggested. Keep the cap at
-  // the suggested length and let the server picker de-duplicate.
-  const maxRedundancy = SUGGESTED_BLOSSOM_SERVERS.length;
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
@@ -351,36 +343,19 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
                 )}
               </div>
 
-              {/* Redundancy mirrors */}
-              <div className="mt-4 pt-3 border-t border-gray-100">
-                <label className="block">
-                  <div className="text-xs font-medium text-gray-700 mb-1">
-                    Backup mirrors: {blossomRedundancy}
-                  </div>
-                  <p className="text-xs text-gray-400 mb-2">
-                    Extra Blossom servers your snapshot is copied to in
-                    the background after each save. 0 = primary only
-                    (fastest, one point of failure). Higher = more
-                    durable, slightly more upload per save. If your
-                    primary goes offline, the app falls back to any
-                    server that has the blob, so mirrors double as
-                    failover.
-                  </p>
-                  <input
-                    type="range"
-                    min={0}
-                    max={maxRedundancy}
-                    step={1}
-                    value={Math.min(blossomRedundancy, maxRedundancy)}
-                    onChange={(e) => setBlossomRedundancy(Number(e.target.value))}
-                    className="w-full accent-primary-600"
-                  />
-                  <div className="flex justify-between text-[10px] text-gray-400 mt-1">
-                    <span>None</span>
-                    <span>All suggested</span>
-                  </div>
-                </label>
-              </div>
+              {/* Mirror behavior — automatic, no user control. After
+                  every save, the same encrypted snapshot is uploaded to
+                  every other known Blossom server in the background.
+                  Failed mirrors are retried automatically (see
+                  lib/mirrorRetry.ts). Restore races every server in
+                  parallel, so any mirror that succeeded is a usable
+                  source of truth. */}
+              <p className="mt-3 text-[11px] text-gray-500 leading-snug">
+                Every save also mirrors to every other known Blossom
+                server in the background. Failed mirrors retry on their
+                own; restore races every server in parallel so any
+                surviving copy works.
+              </p>
             </div>
           </div>
 
@@ -529,6 +504,25 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
                 <p className="text-xs text-gray-400">
                   Individual events can opt out via the notification checkbox when creating or editing.
                 </p>
+
+                {/* Platform note for Tauri Android (push delivery from
+                    the daemon requires an FCM token, which Tauri 2.x
+                    does not expose by default). Web Push works on web
+                    PWAs; Tauri builds currently rely on OS-scheduled
+                    local notifications fired from within the app
+                    process. */}
+                {isTauri() && notification.method === "push" && (
+                  <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800 space-y-1">
+                    <p className="font-medium">Background push on this build</p>
+                    <p>
+                      Reminders fire while the app is running. Background
+                      delivery from the server (when the app is closed)
+                      requires Android FCM credentials — see
+                      <span className="font-mono"> README</span> for setup. Web Push works
+                      out of the box in the browser version.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>

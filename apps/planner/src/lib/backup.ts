@@ -38,6 +38,12 @@ import { logger } from "./logger";
 import type { PersistedSettings } from "../contexts/SettingsContext";
 import type { DailyHabit, UserList } from "../contexts/TasksContext";
 import { mergeSnapshots } from "./merge";
+import {
+  recordReplication,
+  enqueueBlossomMirrorRetry,
+  registerBlossomMirrorDrainer,
+  type MirrorOutcome,
+} from "./replication";
 
 const log = logger("backup");
 
@@ -46,15 +52,18 @@ import { SUGGESTED_BLOSSOM_SERVERS } from "./nostr";
 // ── User-configurable Blossom server state ─────────────────────────
 //
 // `primaryBlossom` is where each save is uploaded first — the blob isn't
-// considered durable until this server confirms. `blossomRedundancy` is
-// the number of additional suggested servers that receive a background
-// mirror copy after the primary succeeds. SettingsContext drives both
-// via `setPrimaryBlossom` / `setBlossomRedundancy` on login and on
-// user-initiated changes; before that we fall back to the hardcoded
-// defaults so the app works out of the box.
+// considered durable until this server confirms. Every OTHER known
+// server (the hardcoded suggested list, deduped against primary) is
+// always also mirrored to in the background after primary succeeds.
+// There used to be a "blossom redundancy" slider that capped how many
+// mirrors ran; it was removed because (a) the cypherpunk default is
+// "spray to every server we know", (b) capping required users to think
+// about a number that has no good reason to be less than the full set.
+// SettingsContext drives the primary via `setPrimaryBlossom` on login
+// and on user-initiated changes; before that we fall back to the
+// hardcoded default so the app works out of the box.
 
 let primaryBlossom: string = SUGGESTED_BLOSSOM_SERVERS[0];
-let blossomRedundancy: number = SUGGESTED_BLOSSOM_SERVERS.length - 1;
 
 export function getPrimaryBlossom(): string {
   return primaryBlossom;
@@ -71,25 +80,12 @@ export function setPrimaryBlossom(url: string): void {
   primaryBlossom = trimmed;
 }
 
-export function getBlossomRedundancy(): number {
-  return blossomRedundancy;
-}
-
-export function setBlossomRedundancy(count: number): void {
-  const clamped = Math.max(0, Math.min(10, Math.floor(count)));
-  if (clamped === blossomRedundancy) return;
-  log.debug("blossom redundancy →", clamped);
-  blossomRedundancy = clamped;
-}
-
-/** Effective upload targets: primary first, then up to blossomRedundancy
- *  additional entries from SUGGESTED_BLOSSOM_SERVERS (excluding primary),
- *  deduplicated. The primary is always included even if the user set
- *  redundancy to 0 — the primary *is* the data store, not a mirror. */
+/** Effective upload targets: primary first, then every other known
+ *  suggested server. No user-configurable cap — every save goes
+ *  everywhere, and individual mirror failures are tracked + retried by
+ *  the background mirror-retry queue (see lib/mirrorRetry.ts). */
 function effectiveBlossomServers(): string[] {
-  const extras = SUGGESTED_BLOSSOM_SERVERS
-    .filter((s) => s !== primaryBlossom)
-    .slice(0, blossomRedundancy);
+  const extras = SUGGESTED_BLOSSOM_SERVERS.filter((s) => s !== primaryBlossom);
   return [primaryBlossom, ...extras];
 }
 
@@ -477,49 +473,89 @@ export async function saveSnapshot(
     scheduleIdle(() => { void deletePreviousBlob(shaToDelete, signEvent); });
   }
 
-  // 5. Background mirror to the user's chosen redundancy servers (capped
-  //    by `blossomRedundancy` in Settings). Best-effort — user's data is
-  //    already durable on `primary` and we've already returned.
+  // 5. Background mirror to every other known Blossom server. Each
+  //    server's outcome is recorded for the replication-status UI; any
+  //    that failed are enqueued for retry via lib/replication.ts. The
+  //    user's data is already durable on `primary` so this is purely
+  //    additive durability — we never block the caller on mirrors.
   const mirrorTargets = effectiveBlossomServers().filter((s) => s !== primary);
   if (mirrorTargets.length > 0) {
     scheduleIdle(() => {
       void (async () => {
+        const mirrors: MirrorOutcome[] = [];
+        const failed: string[] = [];
         for (const server of mirrorTargets) {
-          try {
-            log.info(`blossom mirror → ${server}`);
-            const res = await fetchWithTimeout(
-              `${server}/upload`,
-              { method: "PUT", body: blob, headers: { authorization: authHeader } },
-              20_000
-            );
-            if (!res.ok) { log.info(`blossom mirror ✗ ${server}: HTTP ${res.status}`); continue; }
-            // Same BUD-02 descriptor check the primary upload does — a
-            // 2xx without a matching sha means the server quietly
-            // discarded the blob (this is what lets a misconfigured
-            // self-hosted server show 0 blobs despite the app logging
-            // a ✓). Report the body preview so config issues are
-            // obvious in the console.
-            const bodyText = await res.text().catch(() => "");
-            let desc: { sha256?: string } | null = null;
-            try { desc = bodyText ? JSON.parse(bodyText) : null; } catch { desc = null; }
-            if (!desc || desc.sha256 !== sha256) {
-              const preview = bodyText.replace(/\s+/g, " ").trim().slice(0, 160) || "(empty body)";
-              log.info(`blossom mirror ✗ ${server}: descriptor mismatch — server returned: ${preview}`);
-            } else {
-              log.info(`blossom mirror ✓ ${server}`);
-            }
-          } catch (err) {
-            // Background mirrors are best-effort — log at info so the
-            // console isn't screaming about a slow third-party server.
-            log.info(`blossom mirror ✗ ${server}: ${err instanceof Error ? err.message : String(err)}`);
-          }
+          const result = await uploadBlobTo(server, sha256, blob, authHeader);
+          mirrors.push(result.ok
+            ? { url: server, status: "ok" }
+            : { url: server, status: "failed", error: result.error });
+          if (!result.ok) failed.push(server);
         }
+        recordReplication({ kind: "blossom", primary: primary!, mirrors, at: Date.now() });
+        if (failed.length > 0) enqueueBlossomMirrorRetry(sha256, blob, authHeader, failed);
       })();
     });
+  } else {
+    // Single-server topology (user customized primary, no other suggested
+    // servers available). Still record so the UI shows where things landed.
+    recordReplication({ kind: "blossom", primary: primary!, mirrors: [], at: Date.now() });
   }
 
   return { sha256, servers, savedAt, counts };
 }
+
+/** Upload one blob to one Blossom server with the existing pre-signed
+ *  auth header. Returns ok=true only when the server returns a BUD-02
+ *  descriptor with a matching sha256 — a 2xx with no matching descriptor
+ *  is a misconfigured server (silently discards) and counts as failed. */
+async function uploadBlobTo(
+  server: string,
+  sha256: string,
+  blob: Blob,
+  authHeader: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    log.info(`blossom mirror → ${server}`);
+    const res = await fetchWithTimeout(
+      `${server}/upload`,
+      { method: "PUT", body: blob, headers: { authorization: authHeader } },
+      20_000
+    );
+    if (!res.ok) {
+      const msg = `HTTP ${res.status}`;
+      log.info(`blossom mirror ✗ ${server}: ${msg}`);
+      return { ok: false, error: msg };
+    }
+    const bodyText = await res.text().catch(() => "");
+    let desc: { sha256?: string } | null = null;
+    try { desc = bodyText ? JSON.parse(bodyText) : null; } catch { desc = null; }
+    if (!desc || desc.sha256 !== sha256) {
+      const preview = bodyText.replace(/\s+/g, " ").trim().slice(0, 160) || "(empty body)";
+      const msg = `descriptor mismatch — got: ${preview}`;
+      log.info(`blossom mirror ✗ ${server}: ${msg}`);
+      return { ok: false, error: msg };
+    }
+    log.info(`blossom mirror ✓ ${server}`);
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.info(`blossom mirror ✗ ${server}: ${msg}`);
+    return { ok: false, error: msg };
+  }
+}
+
+// Register the retry drainer so replication.ts can replay failed mirrors
+// on its own schedule. Returns the ok/failed split per target.
+registerBlossomMirrorDrainer(async (sha256, body, authHeader, urls) => {
+  const ok: string[] = [];
+  const failedUrls: string[] = [];
+  for (const url of urls) {
+    const result = await uploadBlobTo(url, sha256, body, authHeader);
+    if (result.ok) ok.push(url);
+    else failedUrls.push(url);
+  }
+  return { ok, failed: failedUrls };
+});
 
 /**
  * Sign one BUD-02 delete auth and DELETE the blob from every known
@@ -736,6 +772,24 @@ export async function fetchSnapshotBySha(
   let snap: Snapshot;
   try { snap = JSON.parse(plaintext) as Snapshot; }
   catch { log.warn("recover: decrypted blob is not JSON"); return null; }
+
+  // Shape check: a blob encrypted to this same npub by some OTHER app
+  // could decrypt cleanly here (NIP-44 only needs the recipient pubkey,
+  // which is us either way). Reject anything that doesn't have the
+  // planner Snapshot shape so the recovery UI can hide those rows
+  // instead of showing them as "Couldn't decrypt".
+  const looksLikePlannerSnapshot =
+    snap !== null && typeof snap === "object"
+    && snap.version === 1
+    && Array.isArray(snap.events)
+    && Array.isArray(snap.calendars)
+    && Array.isArray(snap.habits)
+    && Array.isArray(snap.lists)
+    && typeof snap.savedAt === "string";
+  if (!looksLikePlannerSnapshot) {
+    log.info(`recover: ${sha256.slice(0, 8)} decrypted but isn't a Planner snapshot — ignoring`);
+    return null;
+  }
 
   if (snap.version !== 1) { log.warn(`recover: unsupported snapshot version ${snap.version}`); return null; }
   for (const e of snap.events) {

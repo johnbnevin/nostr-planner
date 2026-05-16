@@ -1,4 +1,4 @@
-import { Component, useEffect, useRef, useState, type ReactNode } from "react";
+import { Component, useEffect, useState, type ReactNode } from "react";
 import { NostrProvider } from "./contexts/NostrContext";
 import { SettingsProvider } from "./contexts/SettingsContext";
 import { SharingProvider } from "./contexts/SharingContext";
@@ -7,7 +7,9 @@ import { TasksProvider } from "./contexts/TasksContext";
 import { LoginScreen } from "./components/LoginScreen";
 import { CalendarApp } from "./components/CalendarApp";
 import { ReconnectScreen } from "./components/ReconnectScreen";
+import { AuthUrlModal } from "./components/AuthUrlModal";
 import { useNostr } from "./contexts/NostrContext";
+import { initDeepLinks } from "./lib/deepLink";
 
 /**
  * Error boundary that catches unhandled render errors and displays a
@@ -54,47 +56,23 @@ class ErrorBoundary extends Component<
 }
 
 function AppContent() {
-  const { pubkey, hasSavedSession, autoLoginState, retryAutoLogin } = useNostr();
+  const { pubkey, hasSavedSession, autoLoginState } = useNostr();
   const [forceLoginScreen, setForceLoginScreen] = useState(false);
-  // Set to true when the user clicks "Wait longer" — keeps the reconnect
-  // screen visible even after the 60-second bunker window expires, and
-  // silently restarts the attempt each time it times out.
-  const [userWantsToWait, setUserWantsToWait] = useState(false);
-  // Bumped each time autoLoginState transitions TO "attempting" (first load
-  // or after a retry). Used as ReconnectScreen key so its countdown resets
-  // automatically without prop-drilling a "reset" signal.
-  const [attemptKey, setAttemptKey] = useState(0);
-  const prevStateRef = useRef(autoLoginState);
-
-  useEffect(() => {
-    if (autoLoginState === "attempting" && prevStateRef.current !== "attempting") {
-      setAttemptKey((k) => k + 1);
-    }
-    prevStateRef.current = autoLoginState;
-  }, [autoLoginState]);
-
-  // When the user asked to wait and the current 60-second attempt expires,
-  // silently kick off a new attempt. This keeps the screen alive without
-  // the user having to do anything.
-  useEffect(() => {
-    if (userWantsToWait && autoLoginState === "failed") {
-      retryAutoLogin();
-    }
-  }, [userWantsToWait, autoLoginState, retryAutoLogin]);
 
   if (!pubkey) {
+    // Show the reconnect splash whenever we have a saved pubkey and the
+    // ladder is in flight. The ladder retries persistently with backoff
+    // (see reconnectBunkerWithBackoff), so transient mobile/PWA tab kills
+    // no longer drop the user out to the login screen.
     const showReconnect =
       !forceLoginScreen &&
       hasSavedSession &&
-      (autoLoginState === "attempting" ||
-        (userWantsToWait && autoLoginState === "failed"));
+      (autoLoginState === "attempting" || autoLoginState === "reconnecting");
 
     if (showReconnect) {
       return (
         <ReconnectScreen
-          key={attemptKey}
-          onSwitchAccount={() => { setForceLoginScreen(true); setUserWantsToWait(false); }}
-          onWaitLonger={() => setUserWantsToWait(true)}
+          onSwitchAccount={() => { setForceLoginScreen(true); }}
         />
       );
     }
@@ -115,10 +93,16 @@ function AppContent() {
 }
 
 export default function App() {
+  // Register deep-link handlers exactly once for the app's lifetime.
+  // Same wiring covers Amber's nostrconnect:// intent on Android, bunker
+  // URIs from desktop signers (Tauri), and protocol-handler tabs on
+  // browsers that support it. Subscribers attach via onDeepLink.
+  useEffect(() => initDeepLinks(), []);
   return (
     <ErrorBoundary>
       <NostrProvider>
         <AppContent />
+        <AuthUrlModal />
       </NostrProvider>
     </ErrorBoundary>
   );

@@ -26,19 +26,24 @@ import {
   useState,
   useCallback,
   useEffect,
+  useRef,
   type ReactNode,
 } from "react";
 import { DEFAULT_RELAYS, KIND_RELAY_LIST } from "../lib/nostr";
-import { queryEvents, publishToRelays, closePool, parseRelayList, setRelayLists, setPrimaryRelay as relaySetPrimary } from "../lib/relay";
+import { queryEvents, publishToRelays, closePool, parseRelayList, setRelayLists, setPrimaryRelay as relaySetPrimary, setRelayAuthSigner } from "../lib/relay";
+import { clearScores as clearRelayScores } from "../lib/relayScore";
+import { clearReplicationState } from "../lib/replication";
 import type { NostrEvent } from "../lib/relay";
 import type { NostrSigner, UnsignedEvent } from "../lib/signer";
 import { Nip07Signer } from "../lib/signer";
 import { LocalSigner } from "../lib/localSigner";
-import { connectBunkerUri } from "../lib/nip46Signer";
+import { reconnectBunkerWithBackoff, type ReconnectStatus } from "../lib/nip46Signer";
 import { isTauri, isStandalonePWA } from "../lib/platform";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
 import { clearCalendarCache } from "../lib/eventCache";
+import { enqueueOutbox, startOutbox, stopOutbox, scheduleOutboxDrain, flushOutbox, clearOutbox, onOutboxChange, countPending } from "../lib/outbox";
+import { isProbablyOnline } from "../lib/online";
 
 const log = logger("nostr");
 
@@ -87,8 +92,14 @@ interface NostrContextValue {
    *  to distinguish "never logged in" from "returning user whose auto-login
    *  hasn't finished yet" so we can show a reconnect splash. */
   hasSavedSession: boolean;
-  /** Stage of the session-restore pipeline on this tab. */
-  autoLoginState: "idle" | "attempting" | "done" | "failed";
+  /** Stage of the session-restore pipeline on this tab.
+   *  "reconnecting" = ladder is running across multiple attempts; app shell
+   *  is rendered in read-only mode from cached data during this window. */
+  autoLoginState: "idle" | "attempting" | "reconnecting" | "done" | "failed";
+  /** Live status of the bunker reconnect ladder (null when not reconnecting). */
+  reconnectStatus: ReconnectStatus | null;
+  /** Number of events queued in the outbox awaiting relay sync. */
+  outboxDepth: number;
   /** Re-run the auto-login routine manually (e.g. from a retry button). */
   retryAutoLogin: () => void;
   /** Login with NIP-07 browser extension (web only). */
@@ -133,9 +144,11 @@ export function NostrProvider({ children }: { children: ReactNode }) {
   // "done" after success, "failed" if no viable signer was available.
   // The reconnect-splash screen uses this to decide whether to keep waiting
   // or offer the user a retry / fallback login method.
-  const [autoLoginState, setAutoLoginState] = useState<"idle" | "attempting" | "done" | "failed">("idle");
+  const [autoLoginState, setAutoLoginState] = useState<"idle" | "attempting" | "reconnecting" | "done" | "failed">("idle");
   const [autoLoginTrigger, setAutoLoginTrigger] = useState(0);
   const retryAutoLogin = useCallback(() => setAutoLoginTrigger((n) => n + 1), []);
+  const [reconnectStatus, setReconnectStatus] = useState<ReconnectStatus | null>(null);
+  const [outboxDepth, setOutboxDepth] = useState(0);
   const [hasSavedSession, setHasSavedSession] = useState<boolean>(() => {
     try { return !!localStorage.getItem("nostr-planner-pubkey"); } catch { return false; }
   });
@@ -200,7 +213,14 @@ export function NostrProvider({ children }: { children: ReactNode }) {
               // Block URLs with suspicious query params (tracking pixels)
               const suspiciousParams = ["pubkey", "npub", "track", "uid", "id"];
               const hasSuspiciousParams = suspiciousParams.some((p) => picUrl.searchParams.has(p));
-              if (!hasSuspiciousParams) {
+              // Block SVG (can embed JavaScript via <script> / onload) and
+              // anything that isn't an obvious raster image. data: URLs are
+              // already excluded by the https:// scheme check above.
+              const path = picUrl.pathname.toLowerCase();
+              const looksRaster = /\.(png|jpe?g|gif|webp|avif|bmp|ico)(?:$|\?)/.test(path)
+                || !/\.[a-z0-9]+$/.test(path); // CDN paths without extensions get a pass
+              const looksSvg = /\.(svg|svgz)(?:$|\?)/.test(path);
+              if (!hasSuspiciousParams && !looksSvg && looksRaster) {
                 pic = meta.picture.slice(0, 2048);
               }
             } catch {
@@ -235,9 +255,20 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       log.info("login finalized for", pk.slice(0, 8));
       setSigner(s);
       setPubkey(pk);
+      // Wire signer for NIP-42 AUTH — paid relays and some flagged
+      // filters won't return events until the connection is authed.
+      setRelayAuthSigner(s);
       setAutoLoginState("done");
       setHasSavedSession(true);
       lsSet("nostr-planner-pubkey", pk);
+      // Tell other tabs we're now this identity so they can reconcile.
+      if (typeof BroadcastChannel !== "undefined") {
+        try {
+          const ch = new BroadcastChannel("nostr-planner-auth");
+          ch.postMessage({ kind: "login", pubkey: pk });
+          ch.close();
+        } catch { /* ignore */ }
+      }
       // Restore the user's saved primary relay BEFORE we fire any queries
       // below. SettingsContext also restores it on `pubkey` change, but
       // that effect lands after this function returns — the queries here
@@ -248,6 +279,12 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       // access); avoids the module-init read that broke the UI in 1.16.0b.
       const saved = readSavedPrimaryRelay(pk);
       if (saved) relaySetPrimary(saved);
+      // Boot the outbox drainer for this pubkey — replays any writes that
+      // were queued during a previous session/offline window. Also flush
+      // immediately because the signer is fresh and may have been the
+      // gating factor on prior retries.
+      startOutbox(pk);
+      void flushOutbox(pk).catch(err => log.warn("initial outbox flush failed", err));
       // Fire-and-forget: failures are non-fatal (defaults work fine).
       void fetchRelayList(pk, DEFAULT_RELAYS).catch(err =>
         log.warn("relay list fetch failed", err)
@@ -303,8 +340,15 @@ export function NostrProvider({ children }: { children: ReactNode }) {
     // Clear IndexedDB calendar cache for this user
     const savedPk = localStorage.getItem("nostr-planner-pubkey");
     if (savedPk) void clearCalendarCache(savedPk);
+    // Stop outbox drainer and drop any pending writes for this user —
+    // re-publishing under a different signer would be wrong.
+    stopOutbox();
+    if (savedPk) void clearOutbox(savedPk);
+    setOutboxDepth(0);
+    setReconnectStatus(null);
     // Destroy signer (zeroes key material, closes NIP-46 relay subscriptions)
     signer?.destroy?.().catch(err => log.warn("signer cleanup error", err));
+    setRelayAuthSigner(null);
     setSigner(null);
     setPubkey(null);
     setRelays(DEFAULT_RELAYS);
@@ -323,6 +367,19 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       LocalSigner.clearStore().catch(() => {});
     }
     closePool();
+    clearRelayScores();
+    clearReplicationState();
+    // Tell other tabs to reload so they don't keep operating under the
+    // now-gone identity. BroadcastChannel is the only viable transport —
+    // storage events fire on OTHER tabs but not the originating one, and
+    // we want both behaviors.
+    if (typeof BroadcastChannel !== "undefined") {
+      try {
+        const ch = new BroadcastChannel("nostr-planner-auth");
+        ch.postMessage({ kind: "logout" });
+        ch.close();
+      } catch { /* ignore */ }
+    }
   }, [signer]);
 
   /**
@@ -344,39 +401,61 @@ export function NostrProvider({ children }: { children: ReactNode }) {
    */
   const publishEvent = useCallback(
     async (event: NostrEvent) => {
-      try {
-        await publishToRelays(relays, event);
-        log.debug("event published, kind", event.kind);
-      } catch (err) {
-        log.error("publish failed for kind", event.kind, err);
-        // notifyPublishFailure is called internally by publishToRelays on final failure
-        throw err;
+      // Optimistic-by-default semantics: try once, and on failure queue the
+      // event in the IndexedDB outbox for later retry. Callers see a
+      // successful return — their optimistic local edit is durably tracked,
+      // either at the relay or in the outbox. The header pill surfaces
+      // the pending count so the user knows sync is behind.
+      // Skip the network entirely when we already know we're offline.
+      if (isProbablyOnline()) {
+        try {
+          await publishToRelays(relays, event);
+          log.debug("event published, kind", event.kind);
+          return;
+        } catch (err) {
+          log.warn("publish failed for kind", event.kind, "— queuing to outbox:", err instanceof Error ? err.message : err);
+          const pk = pubkey ?? localStorage.getItem("nostr-planner-pubkey");
+          if (pk) await enqueueOutbox(pk, event, err instanceof Error ? err : new Error(String(err)));
+          return;
+        }
+      } else {
+        log.info("offline — queuing publish to outbox, kind", event.kind);
+        const pk = pubkey ?? localStorage.getItem("nostr-planner-pubkey");
+        if (pk) await enqueueOutbox(pk, event, new Error("offline"));
+        return;
       }
     },
-    [relays]
+    [relays, pubkey]
   );
 
   // Auto-login on mount: restore the session from the previous login method.
   // - Extension (web): re-verify with NIP-07 extension
   // - Tauri: NIP-49 encrypted keys require a password — LoginScreen handles unlock
   // nsec is never persisted to localStorage (web sessions are ephemeral for key-owning logins)
+  // Guards against spawning multiple concurrent reconnect ladders if
+  // visibility-change / autoLoginTrigger fire while a ladder is already
+  // mid-flight. Cleared in the ladder's .then/.catch and the effect cleanup.
+  const ladderActiveRef = useRef(false);
+
   useEffect(() => {
     let cancelled = false;
     const saved = localStorage.getItem("nostr-planner-pubkey");
     if (!saved) {
-      setAutoLoginState((prev) => (prev === "idle" ? "idle" : "idle"));
+      // Nothing to restore — leave state at idle. No setState here to
+      // avoid a redundant render (the initial state is already "idle").
       return;
     }
 
     log.debug("found saved pubkey", saved.slice(0, 8), "— attempting auto-login");
+    // These two setStates drive the splash/reconnect UI and MUST land
+    // before the async work below begins — otherwise the user sees a
+    // blank login screen flash during the auto-login attempt. Wrapping
+    // them in a microtask defers a frame (visible flicker) and changes
+    // observable behavior, so the synchronous-setState lint is suppressed
+    // here intentionally.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setHasSavedSession(true);
     setAutoLoginState("attempting");
-
-    if (isTauri()) {
-      log.debug("Tauri environment — skipping auto-login (password required)");
-      setAutoLoginState("failed");
-      return;
-    }
 
     // Clear any legacy stored nsec from localStorage (migration cleanup)
     if (localStorage.getItem("nostr-planner-nsec")) {
@@ -389,29 +468,61 @@ export function NostrProvider({ children }: { children: ReactNode }) {
     const bunkerUrl = localStorage.getItem("nostr-planner-bunker-url");
 
     // Bunker session restore: if the user's last login was via NIP-46 and we
-    // have a saved bunker URL, silently reconnect. Amber/nsec.app will show
-    // their approval prompt but the user doesn't have to re-paste anything.
-    // Skipped on Tauri because Tauri uses the local keychain flow instead.
-    if (!isTauri() && loginType === "bunker" && bunkerUrl) {
-      log.debug("restoring bunker session from saved URL");
-      connectBunkerUri(bunkerUrl, 60_000)
+    // have a saved bunker URL, run the reconnect ladder. The ladder pauses
+    // while offline/hidden and retries with backoff up to 8 attempts, so a
+    // backgrounded PWA waking up on a slow connection will eventually
+    // reconnect without the user having to do anything. While it runs, the
+    // app shell renders read-only from the IndexedDB cache (App.tsx).
+    if (loginType === "bunker" && bunkerUrl) {
+      // Validate the saved bunker URL before handing it to the SDK.
+      // A corrupt or stale localStorage entry shouldn't be able to make
+      // us dial arbitrary URLs — `bunker://` is the only valid scheme.
+      if (!/^bunker:\/\//i.test(bunkerUrl)) {
+        log.warn("ignoring saved bunker URL with invalid scheme; clearing");
+        localStorage.removeItem("nostr-planner-bunker-url");
+        localStorage.removeItem("nostr-planner-login-type");
+        setAutoLoginState("failed");
+        return;
+      }
+      if (ladderActiveRef.current) {
+        log.debug("reconnect ladder already running — not spawning another");
+        return;
+      }
+      log.debug("restoring bunker session via reconnect ladder");
+      setAutoLoginState("reconnecting");
+      const ac = new AbortController();
+      ladderActiveRef.current = true;
+      reconnectBunkerWithBackoff({
+        bunkerUrl,
+        expectedPubkey: saved,
+        signal: ac.signal,
+        onStatus: (s) => { if (!cancelled) setReconnectStatus(s); },
+      })
         .then(async ({ signer: s, pubkey: pk }) => {
+          ladderActiveRef.current = false;
           if (cancelled) { await s.destroy?.(); return; }
-          if (pk !== saved) {
-            log.warn("bunker pubkey mismatch; not restoring session");
-            await s.destroy?.();
-            setAutoLoginState("failed");
-            return;
-          }
+          setReconnectStatus(null);
           await finalizeLogin(pk, s);
         })
         .catch((err) => {
-          if (!cancelled) {
-            log.warn("bunker auto-reconnect failed", err);
-            setAutoLoginState("failed");
+          ladderActiveRef.current = false;
+          if (cancelled) return;
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn("bunker reconnect ladder exhausted", err);
+          // Pubkey mismatch is a security signal — never trust a bunker
+          // that returns a different identity. Wipe the bunker URL so
+          // the user is forced to re-pair on a fresh login. Same for
+          // any other terminal failure: a stale URL is worth nothing to
+          // leave lying around on a shared device.
+          if (/different pubkey/i.test(msg) || /invalid/i.test(msg)) {
+            localStorage.removeItem("nostr-planner-bunker-url");
+            localStorage.removeItem("nostr-planner-login-type");
           }
+          setReconnectStatus(null);
+          setAutoLoginState("failed");
         });
-      return () => { cancelled = true; };
+      return () => { cancelled = true; ac.abort(); ladderActiveRef.current = false; };
     }
 
     if (window.nostr) {
@@ -462,9 +573,14 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       if (document.visibilityState !== "visible") return;
       const saved = localStorage.getItem("nostr-planner-pubkey");
       if (!saved) return;
-      // If we already have a signer and pubkey, nothing to restore.
-      if (pubkey && signer) return;
-      // Nudge the auto-login effect by bumping its trigger dependency.
+      // If we already have a signer and pubkey, just nudge the outbox so
+      // any pending writes get a fresh attempt.
+      if (pubkey && signer) {
+        scheduleOutboxDrain(pubkey);
+        return;
+      }
+      // Otherwise, bump the auto-login trigger — the effect above will run
+      // the reconnect ladder, which itself pauses on offline/hidden.
       setAutoLoginTrigger((n) => n + 1);
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -474,6 +590,59 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("focus", onVisible);
     };
   }, [pubkey, signer]);
+
+  // Cross-tab sync: if the user logs out (or logs in as someone else) in
+  // another tab, mirror that state into this one. Without this, two tabs
+  // can hold conflicting sessions — second tab keeps signing/publishing
+  // under the old identity while localStorage already reflects the new
+  // one. BroadcastChannel works in all modern browsers, including the
+  // WebView2 / WKWebView surfaces Tauri uses, so this applies to every
+  // platform identically. Safe degradation: where it's unavailable (some
+  // old Android WebView builds) the user just doesn't get cross-tab
+  // sync — single-tab UX is unaffected.
+  useEffect(() => {
+    if (typeof BroadcastChannel === "undefined") return;
+    const ch = new BroadcastChannel("nostr-planner-auth");
+    const handler = (e: MessageEvent) => {
+      const data = e.data as { kind?: string; pubkey?: string | null } | null;
+      if (!data || typeof data.kind !== "string") return;
+      if (data.kind === "logout") {
+        log.info("cross-tab logout — clearing local session");
+        // Don't re-emit (avoid loops) — call the local cleanup directly.
+        // We can't call logout() here because it would dispatch another
+        // message; trigger the same teardown inline by clearing state.
+        // Safer: just reload, which re-runs auto-login against the now-
+        // empty localStorage and lands on LoginScreen.
+        window.location.reload();
+      } else if (data.kind === "login" && data.pubkey && pubkey && data.pubkey !== pubkey) {
+        // Only reload on a real identity conflict: THIS tab has a pubkey
+        // and the other tab just became a different one. If this tab is
+        // empty (pubkey === null), it's either logging in itself (the
+        // broadcast might be its own, depending on browser BroadcastChannel
+        // semantics) or it'll pick up the new identity on its next
+        // auto-login pass. Reloading in either case would cause a loop.
+        log.info("cross-tab login as different identity — reloading");
+        window.location.reload();
+      }
+    };
+    ch.addEventListener("message", handler);
+    return () => {
+      ch.removeEventListener("message", handler);
+      ch.close();
+    };
+  }, [pubkey]);
+
+  // Subscribe to outbox depth changes for the header pill.
+  useEffect(() => {
+    if (!pubkey) {
+      // Use microtask so we never call setState synchronously in the effect body.
+      void Promise.resolve().then(() => setOutboxDepth(0));
+      return;
+    }
+    void countPending(pubkey).then(setOutboxDepth);
+    const off = onOutboxChange(setOutboxDepth);
+    return () => off();
+  }, [pubkey]);
 
   return (
     <NostrContext.Provider
@@ -485,6 +654,8 @@ export function NostrProvider({ children }: { children: ReactNode }) {
         signer,
         hasSavedSession,
         autoLoginState,
+        reconnectStatus,
+        outboxDepth,
         retryAutoLogin,
         loginWithExtension,
         loginWithSigner,

@@ -8,8 +8,13 @@
  *
  * - **Entities keyed by a stable id** (`dTag` for calendars/events, `id`
  *   for habits/lists) are unioned. When the same id appears on both
- *   sides, the one with the later `updatedAt` wins; ties break toward
- *   the remote side (it's the newer pointer by definition).
+ *   sides, we attempt a **per-field last-write-wins (LWW)** merge using
+ *   the optional `fieldUpdatedAt: Record<string, number>` map on each
+ *   side. Each field independently takes the side whose `fieldUpdatedAt`
+ *   timestamp for that key is larger. If a field timestamp is missing
+ *   on one side we fall back to whole-entity LWW (top-level `updatedAt`)
+ *   for that field. This avoids the classic "device A renamed, device B
+ *   moved → only the later edit survives" data-loss pattern.
  * - **Tombstones** (`deleted: true` entries) survive the merge so a
  *   stale peer can't resurrect a deleted item. They stay in the snapshot
  *   but are filtered out of the UI by the applySnapshot path.
@@ -20,18 +25,115 @@
  *
  * The function is pure: given the same two snapshots it always returns
  * the same output. Idempotent: `merge(merge(a,b), b) === merge(a, b)`.
+ *
+ * ## Backward compatibility
+ *
+ * Older snapshots written before this code shipped have no
+ * `fieldUpdatedAt` map; their entities still merge correctly because the
+ * code falls back to whole-entity LWW when both sides lack per-field
+ * metadata. Mutator code that wants finer-grained conflict resolution
+ * can start populating `fieldUpdatedAt[fieldName] = Date.now()` on each
+ * edit without coordinating a schema migration.
  */
 
 import type { Snapshot } from "./backup";
 import type { CalendarEvent, CalendarCollection } from "./nostr";
 import type { DailyHabit, UserList } from "../contexts/TasksContext";
 
-/** Later `updatedAt` wins. Missing fields coerce to 0 (always loses). */
-function pickNewer<T extends { updatedAt?: number }>(local: T, remote: T): T {
-  return (remote.updatedAt ?? 0) >= (local.updatedAt ?? 0) ? remote : local;
+/** Optional per-field LWW timestamp map. Keys are field names of the
+ *  containing entity; values are unix-ms timestamps. Entities that omit
+ *  this fall back to whole-entity LWW. */
+type WithFieldTs = { fieldUpdatedAt?: Record<string, number> };
+
+/**
+ * Stamp the given fields with the current time on `entity`'s
+ * `fieldUpdatedAt` map and return a shallow-cloned entity with
+ * `updatedAt` and `fieldUpdatedAt` refreshed.
+ *
+ * Use from mutators so per-field LWW has real timestamp data to work
+ * with — without this call, the merge code falls back to whole-entity
+ * LWW (correct but coarser, the bug we're trying to fix).
+ *
+ *     setCalendars(prev => prev.map(c => c.dTag === id
+ *       ? withFieldStamps(c, ["title"], { title: newName })
+ *       : c));
+ */
+export function withFieldStamps<T extends WithFieldTs & { updatedAt?: number }>(
+  entity: T,
+  fields: readonly string[],
+  patch: Partial<T>,
+  now: number = Date.now(),
+): T {
+  const stamps: Record<string, number> = { ...(entity.fieldUpdatedAt ?? {}) };
+  for (const f of fields) stamps[f] = now;
+  return { ...entity, ...patch, updatedAt: now, fieldUpdatedAt: stamps };
 }
 
-function mergeById<T extends { updatedAt?: number }>(
+/**
+ * Merge two snapshots of the same entity field-by-field. Returns a new
+ * object whose fields are chosen from whichever side has the higher
+ * `fieldUpdatedAt[field]` timestamp. Falls back to whole-entity
+ * `updatedAt` for fields that lack per-field metadata on either side.
+ *
+ * `id`/`dTag` fields are never merged (they're the identity); they're
+ * taken from `local` (the two sides are identical by construction).
+ */
+function mergeEntityFields<T extends { updatedAt?: number } & WithFieldTs>(
+  local: T, remote: T
+): T {
+  const localTs = local.updatedAt ?? 0;
+  const remoteTs = remote.updatedAt ?? 0;
+  const fieldL = local.fieldUpdatedAt ?? {};
+  const fieldR = remote.fieldUpdatedAt ?? {};
+  // If neither side has any per-field metadata, fall through to the
+  // simple whole-entity LWW path for maximal predictability.
+  if (Object.keys(fieldL).length === 0 && Object.keys(fieldR).length === 0) {
+    return remoteTs >= localTs ? remote : local;
+  }
+
+  // Pick the side that wins on a given field name.
+  //
+  // Asymmetry that matters: if a side has *any* per-field metadata but no
+  // entry for THIS field, that's a deliberate signal "I didn't touch this
+  // field" — so we use a sentinel of -Infinity for it instead of falling
+  // back to the entity-level updatedAt. Without this, a side that bumped
+  // entity.updatedAt for an unrelated edit would silently take ownership
+  // of every field, which is exactly the data-loss bug we're trying to
+  // fix. The fallback to entity-level updatedAt only applies to sides
+  // that have *no* per-field metadata at all (older snapshots).
+  const localHasAny = Object.keys(fieldL).length > 0;
+  const remoteHasAny = Object.keys(fieldR).length > 0;
+  const pick = (k: string): T => {
+    const tL = fieldL[k] ?? (localHasAny ? -Infinity : localTs);
+    const tR = fieldR[k] ?? (remoteHasAny ? -Infinity : remoteTs);
+    return tR >= tL ? remote : local;
+  };
+
+  // Build the output: identity from local, every other field from the
+  // appropriate side. We deliberately enumerate union(keys(local) +
+  // keys(remote)) so a field that exists on only one side still appears
+  // in the merged result.
+  const allKeys = new Set([...Object.keys(local), ...Object.keys(remote)]);
+  const out = { ...local };
+  for (const k of allKeys) {
+    if (k === "fieldUpdatedAt" || k === "updatedAt") continue;
+    const src = pick(k);
+    (out as Record<string, unknown>)[k] = (src as Record<string, unknown>)[k];
+  }
+
+  // Merge the per-field timestamp maps so future merges have full context.
+  const mergedFieldTs: Record<string, number> = { ...fieldL };
+  for (const [k, v] of Object.entries(fieldR)) {
+    mergedFieldTs[k] = Math.max(mergedFieldTs[k] ?? 0, v);
+  }
+  out.fieldUpdatedAt = mergedFieldTs;
+  // Top-level updatedAt reflects the latest field write across either
+  // side, so a subsequent whole-entity LWW comparison stays accurate.
+  out.updatedAt = Math.max(localTs, remoteTs);
+  return out;
+}
+
+function mergeById<T extends { updatedAt?: number } & WithFieldTs>(
   local: T[], remote: T[], keyOf: (t: T) => string
 ): T[] {
   const out = new Map<string, T>();
@@ -39,7 +141,7 @@ function mergeById<T extends { updatedAt?: number }>(
   for (const item of remote) {
     const key = keyOf(item);
     const existing = out.get(key);
-    out.set(key, existing ? pickNewer(existing, item) : item);
+    out.set(key, existing ? mergeEntityFields(existing, item) : item);
   }
   return Array.from(out.values());
 }

@@ -17,6 +17,8 @@
     "notification:allow-notify",
     "notification:allow-send-notification",
     "notification:allow-cancel",
-    "notification:allow-cancel-all"
+    "notification:allow-cancel-all",
+    "deep-link:default",
+    "deep-link:allow-get-current"
   ]
 }
