@@ -288,6 +288,11 @@ export function useAutoBackup(): {
         void doBackup();
       }
     }
+    // doBackup reads from stateRef and ref-stored helpers, and re-calls
+    // scheduleSave which itself reads from the same closure. Recreating
+    // doBackup on every render would defeat the pendingRef coalescing,
+    // since concurrent invocations would have different identities.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** User pressed "Save anyway" in the ShrinkGuardModal. Sets the
@@ -331,8 +336,13 @@ export function useAutoBackup(): {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable setters
   }, [applyCalendarSnapshot, applyTasksSnapshot, restoreSettings]);
 
-  // Change detection — runs every render; cheap enough.
-  // NO cleanup that clears the timer: that was the autosave-never-fires bug.
+  // Change detection — intentionally runs every render. Adding a deps
+  // array re-introduces the autosave-never-fires regression: deps would
+  // include scheduleSave (which the linter wants), but scheduleSave is
+  // recreated on every render of the parent and the timer would never
+  // fire reliably. The effect is cheap (fingerprint compare + setState
+  // only when changed) so running each render is the safer choice.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!pubkey || !autoBackup || eventsLoading || tasksLoading) return;
     if (!initialLoadDone.current) {

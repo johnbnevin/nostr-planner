@@ -38,6 +38,14 @@ import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
 import { verifyEvent } from "nostr-tools/pure";
 import { SUGGESTED_RELAYS } from "./nostr";
 import { logger } from "./logger";
+import { recordSuccess, recordFailure, sortRelaysByScore } from "./relayScore";
+import {
+  recordReplication,
+  enqueueRelayMirrorRetry,
+  registerRelayMirrorDrainer,
+  type MirrorOutcome,
+} from "./replication";
+import type { NostrSigner } from "./signer";
 
 const log = logger("relay");
 
@@ -50,6 +58,12 @@ const log = logger("relay");
 
 /** Max relay operations (query or publish) per relay per second. */
 const MAX_OPS_PER_SEC = 3;
+
+/** Hard cap on queued operations per relay. Excess callers fail fast
+ *  rather than letting the queue grow unbounded — a pathological burst
+ *  (e.g. thousands of effects firing during a state thrash) shouldn't be
+ *  able to leak megabytes of resolve callbacks held by setTimeout. */
+const MAX_QUEUE_DEPTH = 200;
 
 /** Sliding-window timestamps of recent operations per relay URL. */
 const relayCalls = new Map<string, number[]>();
@@ -85,6 +99,15 @@ function acquireSlot(url: string): Promise<void> {
     if (!queue) {
       queue = [];
       relayQueue.set(url, queue);
+    }
+    if (queue.length >= MAX_QUEUE_DEPTH) {
+      // Overflow: drop the OLDEST entry so the queue stays bounded.
+      // Existing callers are non-blocking (the calls are recorded for
+      // rate-limit accounting, not awaited), so dropping is a safe
+      // memory-protection signal rather than a correctness regression.
+      const dropped = queue.shift();
+      try { dropped?.(); } catch { /* ignore */ }
+      log.warn(`relay queue saturated for ${url} (>${MAX_QUEUE_DEPTH}) — releasing oldest`);
     }
     queue.push(resolve);
     // Schedule drain: the oldest timestamp expires in (oldest + 1000 - now) ms
@@ -150,6 +173,46 @@ function drainQueue(url: string): void {
 /** The single shared pool instance. Null when logged out or after the
  *  primary relay changes (next getPool call will recreate). */
 let pool: NPool | null = null;
+
+/** Signer used to answer NIP-42 AUTH challenges. Set by NostrContext on
+ *  login; cleared on logout. Some relays (relay.damus.io, relay.nostr.band
+ *  on certain filters, paid relays generally) won't return events until
+ *  the connection is authenticated. */
+let authSigner: NostrSigner | null = null;
+
+/**
+ * Inject (or clear) the signer used for NIP-42 AUTH responses.
+ * The relay pool reads from this at AUTH time — no need to recreate
+ * connections when the signer changes; the next challenge will use the
+ * latest value. Pass null on logout so we don't accidentally sign auth
+ * events under a stale identity.
+ */
+export function setRelayAuthSigner(signer: NostrSigner | null): void {
+  authSigner = signer;
+}
+
+/** Build a NIP-42 AUTH response event for the given challenge.
+ *  Kind 22242 (NIP-42), tags `relay` and `challenge`, no content. */
+async function buildAuthEvent(relayUrl: string, challenge: string): Promise<NostrEvent | null> {
+  const signer = authSigner;
+  if (!signer) {
+    log.debug("AUTH challenge received but no signer wired — declining");
+    return null;
+  }
+  try {
+    const signed = await signer.signEvent({
+      kind: 22242,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [["relay", relayUrl], ["challenge", challenge]],
+      content: "",
+    });
+    log.info(`NIP-42 AUTH → ${relayUrl}`);
+    return signed;
+  } catch (err) {
+    log.warn(`NIP-42 AUTH sign failed for ${relayUrl}:`, err);
+    return null;
+  }
+}
 
 /** URL of the current primary relay — the only relay used on the hot path.
  *  Defaults to the first suggested relay; SettingsContext replaces this on
@@ -301,7 +364,19 @@ export function getPool(_relays: string[] = []): NPool {
     // backoff: false — NRelay1 reconnection is managed implicitly; we don't
     // need its built-in backoff here since failed idle publishes are
     // silently dropped and primary failures surface through retry logic.
-    open: (url) => new NRelay1(url, { backoff: false }),
+    // auth: handle NIP-42 challenges by signing a kind-22242 event with
+    // the active signer. Required for paid/AUTH-gated relays. If no
+    // signer is wired (logged out, or operation runs before login),
+    // returning null causes the connection to remain unauthenticated —
+    // free relays still serve filters they don't gate behind AUTH.
+    open: (url) => new NRelay1(url, {
+      backoff: false,
+      auth: async (challenge: string) => {
+        const ev = await buildAuthEvent(url, challenge);
+        if (!ev) throw new Error("auth declined: no signer");
+        return ev;
+      },
+    }),
     reqRouter: (filters) => new Map([[primaryRelay, [...filters]]]),
     eventRouter: () => [primaryRelay],
   });
@@ -409,10 +484,12 @@ export async function queryEvents(
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     log.time("query");
 
+    const startedAt = Date.now();
     try {
       log.info(`relay query → ${primaryRelay} kinds=${filter.kinds?.join(",") ?? "*"}`);
       const events = await p.query([filter], { signal: controller.signal });
       log.info(`relay query ✓ ${primaryRelay} ${events.length} event(s)`);
+      recordSuccess(primaryRelay, Date.now() - startedAt);
 
       // Verify Schnorr signatures — don't trust relays. Process in batches
       // and yield to the main thread between batches to avoid blocking UI.
@@ -435,11 +512,50 @@ export async function queryEvents(
       log.debug(`query returned ${verified.length}/${events.length} events`, filter.kinds);
       return verified;
     } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
+      recordFailure(primaryRelay);
+      const isTimeout = err instanceof DOMException && err.name === "AbortError";
+      if (isTimeout) {
         log.warn("query timed out after", timeoutMs, "ms, kinds:", filter.kinds);
-        return [];
+      } else {
+        log.error("query failed:", err);
       }
-      log.error("query failed:", err);
+      // Read fallback: when the primary fails (timeout or error), try the
+      // redundancy set. The user may have data on another relay we know
+      // about; querying primary-only would make the app behave as if
+      // they have no data at all. Best-quality redundancy relays first.
+      // Tighter per-attempt budget than the original so a string of dead
+      // relays doesn't blow past the caller's expected timeout window.
+      const fallbackBudgetMs = Math.min(5_000, timeoutMs);
+      const fallbackTargets = sortRelaysByScore(redundancyRelays);
+      for (const fbUrl of fallbackTargets) {
+        try {
+          acquireSlot(fbUrl);
+          const fbCtrl = new AbortController();
+          const fbTimer = setTimeout(() => fbCtrl.abort(), fallbackBudgetMs);
+          const fbStarted = Date.now();
+          try {
+            log.info(`relay query (fallback) → ${fbUrl} kinds=${filter.kinds?.join(",") ?? "*"}`);
+            const fbEvents = await p.query([filter], { signal: fbCtrl.signal, relays: [fbUrl] });
+            recordSuccess(fbUrl, Date.now() - fbStarted);
+            if (fbEvents.length > 0) {
+              log.info(`relay query (fallback) ✓ ${fbUrl} ${fbEvents.length} event(s)`);
+              const verified: NostrEvent[] = [];
+              for (const e of fbEvents) {
+                try {
+                  if (verifyEvent(e as Parameters<typeof verifyEvent>[0])) verified.push(e);
+                } catch { /* drop */ }
+              }
+              return verified;
+            }
+            log.debug(`relay query (fallback) ${fbUrl}: 0 events, trying next`);
+          } finally {
+            clearTimeout(fbTimer);
+          }
+        } catch (fbErr) {
+          recordFailure(fbUrl);
+          log.debug(`relay query (fallback) ✗ ${fbUrl}: ${fbErr instanceof Error ? fbErr.message : String(fbErr)}`);
+        }
+      }
       return [];
     } finally {
       clearTimeout(timer);
@@ -497,15 +613,18 @@ export async function publishToRelays(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+    const startedAt = Date.now();
     try {
       log.info(`relay publish → ${primaryRelay} kind=${event.kind} id=${event.id?.slice(0, 8)}`);
       await p.event(event, { signal: controller.signal });
       log.info(`relay publish ✓ ${primaryRelay} kind=${event.kind}`);
+      recordSuccess(primaryRelay, Date.now() - startedAt);
       // Queue for background redundancy publish. Never awaited — caller
       // returns immediately once primary has accepted the event.
       scheduleRedundancy(event);
       return;
     } catch (err) {
+      recordFailure(primaryRelay);
       if (attempt < MAX_RETRIES) {
         const delay = RETRY_DELAY_MS * (attempt + 1);
         log.warn(`publish attempt ${attempt + 1}/${MAX_RETRIES + 1} failed, retrying in ${delay}ms...`);
@@ -549,7 +668,13 @@ let redundancyDraining = false;
  *  the hot path, so a slow relay can have time without harming UX). */
 const REDUNDANCY_TIMEOUT_MS = 15_000;
 
-/** Enqueue an event for idle-time broadcast to redundancy relays. */
+/** Enqueue an event for idle-time broadcast to redundancy relays.
+ *  Privacy note: private personal events never reach the relays at all
+ *  (CalendarContext skips publish for them — they live only in the
+ *  Blossom snapshot). Encrypted shared-calendar events use kind 30078
+ *  (NIP-78 app-data) and are opaque ciphertext, safe to mirror. Public
+ *  NIP-52 calendar events (31922/31923/31924/31925) are user-opted-in
+ *  and SHOULD reach the redundancy set so other clients can index them. */
 function scheduleRedundancy(event: NostrEvent): void {
   if (redundancyRelays.length === 0) return;
   redundancyQueue.push(event);
@@ -570,6 +695,27 @@ function requestIdleRun(fn: () => void): void {
   }
 }
 
+/** Publish a single event to a single relay URL, recording per-target
+ *  quality scores. Returns { ok: boolean, error?: Error } so the caller
+ *  can build a structured per-mirror outcome report. */
+async function publishToOne(event: NostrEvent, url: string): Promise<{ ok: boolean; error?: Error }> {
+  if (!pool) return { ok: false, error: new Error("pool closed") };
+  acquireSlot(url);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REDUNDANCY_TIMEOUT_MS);
+  const startedAt = Date.now();
+  try {
+    await pool.event(event, { signal: controller.signal, relays: [url] });
+    recordSuccess(url, Date.now() - startedAt);
+    return { ok: true };
+  } catch (err) {
+    recordFailure(url);
+    return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Drain the redundancy queue, publishing each event to every redundancy
  *  relay. Runs serially to avoid saturating the browser's WebSocket budget,
  *  and yields between events so it never blocks the main thread for long. */
@@ -580,21 +726,34 @@ async function drainRedundancy(): Promise<void> {
   try {
     while (redundancyQueue.length > 0 && redundancyRelays.length > 0) {
       const event = redundancyQueue.shift()!;
-      const targets = [...redundancyRelays];
-      for (const url of targets) acquireSlot(url);
+      // Score-bias the redundancy order: relays that have been reliable
+      // for this user go first. The downside relays still get mirrored
+      // (this isn't a filter), but they queue up after the good ones so
+      // the user-perceived latency for completion is lower.
+      const targets = sortRelaysByScore(redundancyRelays);
+      log.info(`relay mirror → [${targets.join(", ")}] kind=${event.kind} id=${event.id?.slice(0, 8)}`);
 
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), REDUNDANCY_TIMEOUT_MS);
-      try {
-        log.info(`relay mirror → [${targets.join(", ")}] kind=${event.kind} id=${event.id?.slice(0, 8)}`);
-        // pool.event with explicit `relays` bypasses the primary-only router.
-        await pool.event(event, { signal: controller.signal, relays: targets });
-        log.info(`relay mirror ✓ kind=${event.kind}`);
-      } catch (err) {
-        log.info(`relay mirror ✗ (best-effort): ${err instanceof Error ? err.message : String(err)}`);
-      } finally {
-        clearTimeout(timer);
+      // Publish to each target individually so we know per-target which
+      // ones accepted. Aggregate the result into a ReplicationReport for
+      // the UI and enqueue failed targets for retry.
+      const mirrors: MirrorOutcome[] = [];
+      const failed: string[] = [];
+      for (const url of targets) {
+        const result = await publishToOne(event, url);
+        mirrors.push(result.ok
+          ? { url, status: "ok" }
+          : { url, status: "failed", error: result.error?.message ?? "unknown" });
+        if (!result.ok) failed.push(url);
       }
+      log.info(`relay mirror complete: ${mirrors.filter((m) => m.status === "ok").length}/${mirrors.length} ok`);
+
+      recordReplication({
+        kind: "relay",
+        primary: primaryRelay,
+        mirrors,
+        at: Date.now(),
+      });
+      if (failed.length > 0) enqueueRelayMirrorRetry(event, failed);
 
       // Yield to the event loop between events so UI stays responsive.
       await new Promise((r) => setTimeout(r, 0));
@@ -603,6 +762,20 @@ async function drainRedundancy(): Promise<void> {
     redundancyDraining = false;
   }
 }
+
+// Register the retry drainer: mirror-retry.ts calls this when its
+// background timer fires for a relay task. Returns the per-target ok/fail
+// split so the retry queue can prune satisfied targets.
+registerRelayMirrorDrainer(async (event, urls) => {
+  const ok: string[] = [];
+  const failedUrls: string[] = [];
+  for (const url of urls) {
+    const result = await publishToOne(event, url);
+    if (result.ok) ok.push(url);
+    else failedUrls.push(url);
+  }
+  return { ok, failed: failedUrls };
+});
 
 // ── Publish failure observation ─────────────────────────────────────
 

@@ -19,6 +19,9 @@ export interface Config {
   /** When true, trust the X-Forwarded-For header for client IP detection.
    *  Only enable if the daemon is behind a trusted reverse proxy. */
   trustProxy: boolean;
+  /** FCM legacy server key. Required to deliver pushes to Android Tauri
+   *  builds. Optional — Web Push works without it. */
+  fcmServerKey: string;
 }
 
 /**
@@ -85,5 +88,6 @@ export function loadConfig(): Config {
     maxStaleHours: parseIntEnv("MAX_STALE_HOURS", 36, 1, 720),
     caldavPort: parseIntEnv("CALDAV_PORT", 0, 0, 65535), // 0 = disabled
     trustProxy: process.env.TRUST_PROXY === "1",
+    fcmServerKey: process.env.FCM_SERVER_KEY ?? "",
   };
 }

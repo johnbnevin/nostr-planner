@@ -328,6 +328,8 @@ export function CalendarApp() {
   // the manifest shortcuts (Upcoming / Calendar / Daily / Lists) rely on
   // this to open at the right view on mobile.
   const [mobileTab, setMobileTab] = useState<MobileTab>(() => {
+    // Hash params take precedence (manifest shortcuts launch from the
+    // homescreen with a specific tab pre-selected).
     const parsed = parseViewHash(window.location.hash);
     if (parsed.focus === "daily") return "daily";
     if (parsed.focus === "lists") return "todos";
@@ -335,8 +337,22 @@ export function CalendarApp() {
     if (parsed.focus === "calendar") return "calendar";
     if (parsed.view === "upcoming") return "upcoming";
     if (parsed.view === "month") return "calendar";
+    // Otherwise restore the last-used mobile tab so reloads land where
+    // the user left off. Identical across web / Tauri desktop / Tauri
+    // mobile — localStorage is the shared substrate.
+    try {
+      const saved = localStorage.getItem("nostr-planner-mobile-tab");
+      if (saved === "upcoming" || saved === "calendar" || saved === "daily" || saved === "todos") {
+        return saved;
+      }
+    } catch { /* localStorage unavailable */ }
     return viewMode === "upcoming" ? "upcoming" : "calendar";
   });
+
+  // Persist mobileTab across reloads.
+  useEffect(() => {
+    try { localStorage.setItem("nostr-planner-mobile-tab", mobileTab); } catch { /* ignore */ }
+  }, [mobileTab]);
   // Global Ctrl/Cmd+Z (undo) and Ctrl/Cmd+Shift+Z / Ctrl+Y (redo) keybindings.
   // Skips when focus is in a text input or textarea so users can still
   // undo their typing natively.

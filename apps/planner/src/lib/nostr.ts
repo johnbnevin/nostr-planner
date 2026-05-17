@@ -230,6 +230,11 @@ export interface CalendarCollection {
   ownerPubkey?: string;
   /** Unix ms of last local mutation; used by multi-device merge to pick a winner. */
   updatedAt?: number;
+  /** Optional per-field LWW timestamps. When present, the snapshot merge
+   *  resolves conflicts field-by-field instead of taking the whole
+   *  entity from the side with the later top-level `updatedAt`. Keys are
+   *  field names of this interface; values are unix-ms timestamps. */
+  fieldUpdatedAt?: Record<string, number>;
   /** Tombstone marker kept in the snapshot so a stale peer can't resurrect a deleted calendar. */
   deleted?: boolean;
 }
@@ -261,6 +266,11 @@ export interface CalendarEvent {
   createdAt: number;
   /** Unix ms of last local mutation; used by multi-device merge to pick a winner. */
   updatedAt?: number;
+  /** Optional per-field LWW timestamps. When present, the snapshot merge
+   *  resolves conflicts field-by-field instead of taking the whole
+   *  entity from the side with the later top-level `updatedAt`. Keys are
+   *  field names of this interface; values are unix-ms timestamps. */
+  fieldUpdatedAt?: Record<string, number>;
   /** Tombstone marker — present for deleted events so stale peers can't resurrect them. */
   deleted?: boolean;
 }

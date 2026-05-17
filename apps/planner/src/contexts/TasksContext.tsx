@@ -27,6 +27,7 @@ import {
 import { useNostr } from "./NostrContext";
 import { useCalendar } from "./CalendarContext";
 import { generateDTag } from "../lib/nostr";
+import { withFieldStamps } from "../lib/merge";
 import { logger } from "../lib/logger";
 
 const log = logger("tasks");
@@ -39,6 +40,8 @@ export interface DailyHabit {
   createdAt: number; // unix seconds
   /** Unix ms of last local mutation; used by multi-device merge. */
   updatedAt?: number;
+  /** Optional per-field LWW timestamps for fine-grained merge. See merge.ts. */
+  fieldUpdatedAt?: Record<string, number>;
   /** Tombstone marker. */
   deleted?: boolean;
 }
@@ -57,6 +60,8 @@ export interface UserList {
   createdAt: number; // unix seconds
   /** Unix ms of last local mutation; used by multi-device merge. */
   updatedAt?: number;
+  /** Optional per-field LWW timestamps for fine-grained merge. See merge.ts. */
+  fieldUpdatedAt?: Record<string, number>;
   /** Tombstone marker. */
   deleted?: boolean;
 }
@@ -306,7 +311,9 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   );
   const renameHabitRaw = useCallback(
     (id: string, title: string) => {
-      setHabits(habitsRef.current.map((h) => (h.id === id ? { ...h, title } : h)));
+      setHabits(habitsRef.current.map((h) =>
+        h.id === id ? withFieldStamps(h, ["title"], { title }) : h
+      ));
       scheduleDailyPublish();
     },
     [scheduleDailyPublish]
@@ -533,7 +540,9 @@ export function TasksProvider({ children }: { children: ReactNode }) {
 
   const renameListRaw = useCallback(
     (id: string, name: string) => {
-      setLists(listsRef.current.map((l) => (l.id === id ? { ...l, name } : l)));
+      setLists(listsRef.current.map((l) =>
+        l.id === id ? withFieldStamps(l, ["name"], { name }) : l
+      ));
       scheduleListsPublish();
     },
     [scheduleListsPublish]
@@ -572,7 +581,7 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     (listId: string, item: ListItem) => {
       const next = listsRef.current.map((l) =>
         l.id === listId && !l.items.some((i) => i.id === item.id)
-          ? { ...l, items: [...l.items, item] }
+          ? withFieldStamps(l, ["items"], { items: [...l.items, item] })
           : l
       );
       setLists(next);
@@ -584,7 +593,7 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   const removeListItemRaw = useCallback(
     (listId: string, itemId: string) => {
       const next = listsRef.current.map((l) =>
-        l.id === listId ? { ...l, items: l.items.filter((i) => i.id !== itemId) } : l
+        l.id === listId ? withFieldStamps(l, ["items"], { items: l.items.filter((i) => i.id !== itemId) }) : l
       );
       setLists(next);
       scheduleListsPublish();
@@ -629,7 +638,9 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     (listId: string, itemId: string, done: boolean) => {
       const next = listsRef.current.map((l) =>
         l.id === listId
-          ? { ...l, items: l.items.map((i) => (i.id === itemId ? { ...i, done } : i)) }
+          ? withFieldStamps(l, ["items"], {
+              items: l.items.map((i) => (i.id === itemId ? { ...i, done } : i)),
+            })
           : l
       );
       setLists(next);
@@ -662,7 +673,7 @@ export function TasksProvider({ children }: { children: ReactNode }) {
         const items = [...l.items];
         const [moved] = items.splice(fromIndex, 1);
         items.splice(toIndex, 0, moved);
-        return { ...l, items };
+        return withFieldStamps(l, ["items"], { items });
       });
       setLists(next);
       scheduleListsPublish();

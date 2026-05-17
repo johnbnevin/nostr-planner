@@ -1,56 +1,380 @@
 client:789 [vite] connecting...
 client:912 [vite] connected.
-react-dom_client.js?v=e958626c:20103 Download the React DevTools for a better development experience: https://react.dev/link/react-devtools
-[Violation] 'message' handler took <N>ms
-[Violation] 'message' handler took <N>ms
-[Violation] 'message' handler took <N>ms
-[Violation] 'message' handler took <N>ms
-[Violation] 'message' handler took <N>ms
-[Violation] 'message' handler took <N>ms
-[Violation] 'message' handler took <N>ms
-[Violation] Forced reflow while executing JavaScript took 39ms
-logger.ts:67 [nip46] waiting for signer to scan QR...
-logger.ts:67 [nip46] handshake complete, bunker: 798159cef38e
-logger.ts:67 [nip46] calling get_public_key...
-logger.ts:67 [nip46] got pubkey: 61cb31a85d31
+react-dom_client.js?v=59056eda:20103 Download the React DevTools for a better development experience: https://react.dev/link/react-devtools
+nostr-provider.js:41 [nos2x:4291] calling getPublicKey with {}
+nostr-provider.js:89 [nos2x:4291] result: "61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15"
 logger.ts:67 [nostr] login finalized for 61cb31a8
-logger.ts:67 [tasks] fetched 2 app-data events, d-tags: nostr-planner-lists, nostr-planner-daily
-logger.ts:67 [tasks] fetched 2 app-data events, d-tags: nostr-planner-lists, nostr-planner-daily
-logger.ts:67 [tasks] fetched 0 app-data events, d-tags: (none)
-logger.ts:68 [calendar] clearing eventsLoading after safety timeout
-warn @ logger.ts:68
-(anonymous) @ CalendarContext.tsx:1175
-basicStateReducer @ react-dom_client.js?v=e958626c:5854
-dispatchSetStateInternal @ react-dom_client.js?v=e958626c:6822
-dispatchSetState @ react-dom_client.js?v=e958626c:6803
-(anonymous) @ CalendarContext.tsx:1174
-logger.ts:68 [calendar] clearing eventsLoading after safety timeout
-warn @ logger.ts:68
-(anonymous) @ CalendarContext.tsx:1175
-basicStateReducer @ react-dom_client.js?v=e958626c:5854
-updateReducerImpl @ react-dom_client.js?v=e958626c:5943
-updateReducer @ react-dom_client.js?v=e958626c:5887
-useState @ react-dom_client.js?v=e958626c:18996
-exports.useState @ chunk-3ANUAJBL.js?v=e958626c:959
-CalendarProvider @ CalendarContext.tsx:277
-react_stack_bottom_frame @ react-dom_client.js?v=e958626c:18509
-renderWithHooks @ react-dom_client.js?v=e958626c:5654
-updateFunctionComponent @ react-dom_client.js?v=e958626c:7475
-beginWork @ react-dom_client.js?v=e958626c:8525
-runWithFiberInDEV @ react-dom_client.js?v=e958626c:997
-performUnitOfWork @ react-dom_client.js?v=e958626c:12561
-workLoopSync @ react-dom_client.js?v=e958626c:12424
-renderRootSync @ react-dom_client.js?v=e958626c:12408
-performWorkOnRoot @ react-dom_client.js?v=e958626c:11766
-performWorkOnRootViaSchedulerTask @ react-dom_client.js?v=e958626c:13505
-performWorkUntilDeadline @ react-dom_client.js?v=e958626c:36
-logger.ts:67 [calendar] looking for backup ref…
-logger.ts:67 [calendar] found backup ref 7a1cbdddf88314948b0e7b376b4081f9936537306066a6af3df9dff3b5fdfab6
+logger.ts:67 [relay] relay query → wss://relay.damus.io kinds=10002
+logger.ts:67 [relay] relay query → wss://relay.damus.io kinds=0
+logger.ts:67 [relay] relay query → wss://relay.damus.io kinds=30078
+logger.ts:67 [relay] relay query → wss://relay.damus.io kinds=30078
+logger.ts:67 [relay] relay query → wss://relay.damus.io kinds=30078
+logger.ts:67 [relay] relay query ✓ wss://relay.damus.io 1 event(s)
+logger.ts:67 [relay] relay query ✓ wss://relay.damus.io 1 event(s)
+logger.ts:67 [relay] relay query ✓ wss://relay.damus.io 1 event(s)
+logger.ts:67 [backup] fetching snapshot f6449d28 from 2 servers
+logger.ts:67 [backup] blossom fetch → https://nostr.download f6449d28
+logger.ts:67 [backup] blossom fetch → https://blossom.f7z.io f6449d28
+logger.ts:67 [backup] blossom fetch → https://nostr.download f6449d28
+logger.ts:67 [backup] blossom fetch → https://blossom.f7z.io f6449d28
+logger.ts:67 [backup] blossom fetch ✓ https://nostr.download
+nostr-provider.js:41 [nos2x:3384] calling nip44.decrypt with {"peer":"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15","ciphertext":"AuPuA5rQowCkBQ8mAb6AqXECIsh0YEWiuffSL18WNM8X9IopUWS0WAFHDk28ACAdapCyWLjkdw36hpalXkJ6LYkGUufXdgoSP+Po5+CDjx5gK4kEbhslKpCOiSN6JyGmBZKySZ/vNf+zRMytVMVw+K5cTmTsRh57r1csNgyFpxDDb1E="}
+logger.ts:67 [backup] blossom fetch ✓ https://nostr.download
+nostr-provider.js:89 [nos2x:3384] result: "59c8d1e0aed51e818569051930bdc2f66d06f72064144226b7f786dcad1a1e8e"
+logger.ts:67 [backup] restored: 389 events, 3 calendars, 21 habits, 4 lists
 logger.ts:67 [settings] restoring settings from backup snapshot
-logger.ts:67 [tasks] fetched 2 app-data events, d-tags: nostr-planner-daily, nostr-planner-lists
-react-dom_client.js?v=e958626c:13527 [Violation] 'click' handler took 177ms
-react-dom_client.js?v=e958626c:13527 [Violation] 'click' handler took 178ms
-logger.ts:67 [settings] restoring settings from backup snapshot
-logger.ts:67 [tasks] fetched 2 app-data events, d-tags: nostr-planner-daily, nostr-planner-lists
-react-dom_client.js?v=e958626c:13527 [Violation] 'click' handler took 191ms
-react-dom_client.js?v=e958626c:13527 [Violation] 'click' handler took 172ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+[Violation] 'message' handler took <N>ms
+backup.ts:763 WebSocket is already in CLOSING or CLOSED state.
+(anonymous) @ nostr-tools_pool.js?v=59056eda:389
+Promise.then
+send @ nostr-tools_pool.js?v=59056eda:387
+close @ nostr-tools_pool.js?v=59056eda:636
+closeAllSubscriptions @ nostr-tools_pool.js?v=59056eda:227
+close @ nostr-tools_pool.js?v=59056eda:474
+(anonymous) @ nostr-tools_pool.js?v=59056eda:716
+close @ nostr-tools_pool.js?v=59056eda:714
+(anonymous) @ backup.ts:763
+react_stack_bottom_frame @ react-dom_client.js?v=59056eda:18573
+runWithFiberInDEV @ react-dom_client.js?v=59056eda:997
+commitHookEffectListUnmount @ react-dom_client.js?v=59056eda:9449
+commitHookPassiveUnmountEffects @ react-dom_client.js?v=59056eda:9468
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11490
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11498
+flushPassiveEffects @ react-dom_client.js?v=59056eda:13146
+(anonymous) @ react-dom_client.js?v=59056eda:12776
+performWorkUntilDeadline @ react-dom_client.js?v=59056eda:36
+CalendarContext.tsx:1881 WebSocket is already in CLOSING or CLOSED state.
+(anonymous) @ nostr-tools_pool.js?v=59056eda:389
+Promise.then
+send @ nostr-tools_pool.js?v=59056eda:387
+close @ nostr-tools_pool.js?v=59056eda:636
+closeAllSubscriptions @ nostr-tools_pool.js?v=59056eda:227
+close @ nostr-tools_pool.js?v=59056eda:474
+(anonymous) @ nostr-tools_pool.js?v=59056eda:716
+close @ nostr-tools_pool.js?v=59056eda:714
+(anonymous) @ CalendarContext.tsx:1881
+react_stack_bottom_frame @ react-dom_client.js?v=59056eda:18573
+runWithFiberInDEV @ react-dom_client.js?v=59056eda:997
+commitHookEffectListUnmount @ react-dom_client.js?v=59056eda:9449
+commitHookPassiveUnmountEffects @ react-dom_client.js?v=59056eda:9468
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11490
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11498
+flushPassiveEffects @ react-dom_client.js?v=59056eda:13146
+(anonymous) @ react-dom_client.js?v=59056eda:12776
+performWorkUntilDeadline @ react-dom_client.js?v=59056eda:36
+backup.ts:154  GET https://blossom.f7z.io/f6449d28e31e396d76392d35ed248edb276617e9f8a6cb627632c1f964a3843a 404 (Not Found)
+fetchWithTimeout @ backup.ts:154
+fetchAndVerify @ backup.ts:574
+(anonymous) @ backup.ts:603
+raceFetch @ backup.ts:598
+loadSnapshot @ backup.ts:507
+await in loadSnapshot
+(anonymous) @ CalendarApp.tsx:86
+(anonymous) @ CalendarApp.tsx:98
+react_stack_bottom_frame @ react-dom_client.js?v=59056eda:18567
+runWithFiberInDEV @ react-dom_client.js?v=59056eda:997
+commitHookEffectListMount @ react-dom_client.js?v=59056eda:9411
+commitHookPassiveMountEffects @ react-dom_client.js?v=59056eda:9465
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11040
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11055
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11066
+flushPassiveEffects @ react-dom_client.js?v=59056eda:13150
+(anonymous) @ react-dom_client.js?v=59056eda:12776
+performWorkUntilDeadline @ react-dom_client.js?v=59056eda:36
+<CalendarApp>
+exports.jsxDEV @ react_jsx-dev-runtime.js?v=59056eda:247
+AppContent @ App.tsx:86
+react_stack_bottom_frame @ react-dom_client.js?v=59056eda:18509
+renderWithHooksAgain @ react-dom_client.js?v=59056eda:5729
+renderWithHooks @ react-dom_client.js?v=59056eda:5665
+updateFunctionComponent @ react-dom_client.js?v=59056eda:7475
+beginWork @ react-dom_client.js?v=59056eda:8525
+runWithFiberInDEV @ react-dom_client.js?v=59056eda:997
+performUnitOfWork @ react-dom_client.js?v=59056eda:12561
+workLoopSync @ react-dom_client.js?v=59056eda:12424
+renderRootSync @ react-dom_client.js?v=59056eda:12408
+performWorkOnRoot @ react-dom_client.js?v=59056eda:11766
+performWorkOnRootViaSchedulerTask @ react-dom_client.js?v=59056eda:13505
+performWorkUntilDeadline @ react-dom_client.js?v=59056eda:36
+<AppContent>
+exports.jsxDEV @ react_jsx-dev-runtime.js?v=59056eda:247
+App @ App.tsx:98
+react_stack_bottom_frame @ react-dom_client.js?v=59056eda:18509
+renderWithHooksAgain @ react-dom_client.js?v=59056eda:5729
+renderWithHooks @ react-dom_client.js?v=59056eda:5665
+updateFunctionComponent @ react-dom_client.js?v=59056eda:7475
+beginWork @ react-dom_client.js?v=59056eda:8525
+runWithFiberInDEV @ react-dom_client.js?v=59056eda:997
+performUnitOfWork @ react-dom_client.js?v=59056eda:12561
+workLoopSync @ react-dom_client.js?v=59056eda:12424
+renderRootSync @ react-dom_client.js?v=59056eda:12408
+performWorkOnRoot @ react-dom_client.js?v=59056eda:11766
+performWorkOnRootViaSchedulerTask @ react-dom_client.js?v=59056eda:13505
+performWorkUntilDeadline @ react-dom_client.js?v=59056eda:36
+<App>
+exports.jsxDEV @ react_jsx-dev-runtime.js?v=59056eda:247
+(anonymous) @ main.tsx:20
+logger.ts:67 [backup] blossom fetch ✗ https://blossom.f7z.io: HTTP 404
+backup.ts:154  GET https://blossom.f7z.io/f6449d28e31e396d76392d35ed248edb276617e9f8a6cb627632c1f964a3843a 404 (Not Found)
+fetchWithTimeout @ backup.ts:154
+fetchAndVerify @ backup.ts:574
+(anonymous) @ backup.ts:603
+raceFetch @ backup.ts:598
+processPointer @ backup.ts:680
+pollOnce @ backup.ts:734
+await in pollOnce
+watchPointer @ backup.ts:753
+(anonymous) @ CalendarApp.tsx:156
+react_stack_bottom_frame @ react-dom_client.js?v=59056eda:18567
+runWithFiberInDEV @ react-dom_client.js?v=59056eda:997
+commitHookEffectListMount @ react-dom_client.js?v=59056eda:9411
+commitHookPassiveMountEffects @ react-dom_client.js?v=59056eda:9465
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11040
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11055
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11033
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11201
+recursivelyTraversePassiveMountEffects @ react-dom_client.js?v=59056eda:11010
+commitPassiveMountOnFiber @ react-dom_client.js?v=59056eda:11066
+flushPassiveEffects @ react-dom_client.js?v=59056eda:13150
+(anonymous) @ react-dom_client.js?v=59056eda:12776
+performWorkUntilDeadline @ react-dom_client.js?v=59056eda:36
+<CalendarApp>
+exports.jsxDEV @ react_jsx-dev-runtime.js?v=59056eda:247
+AppContent @ App.tsx:86
+react_stack_bottom_frame @ react-dom_client.js?v=59056eda:18509
+renderWithHooksAgain @ react-dom_client.js?v=59056eda:5729
+renderWithHooks @ react-dom_client.js?v=59056eda:5665
+updateFunctionComponent @ react-dom_client.js?v=59056eda:7475
+beginWork @ react-dom_client.js?v=59056eda:8525
+runWithFiberInDEV @ react-dom_client.js?v=59056eda:997
+performUnitOfWork @ react-dom_client.js?v=59056eda:12561
+workLoopSync @ react-dom_client.js?v=59056eda:12424
+renderRootSync @ react-dom_client.js?v=59056eda:12408
+performWorkOnRoot @ react-dom_client.js?v=59056eda:11766
+performWorkOnRootViaSchedulerTask @ react-dom_client.js?v=59056eda:13505
+performWorkUntilDeadline @ react-dom_client.js?v=59056eda:36
+<AppContent>
+exports.jsxDEV @ react_jsx-dev-runtime.js?v=59056eda:247
+App @ App.tsx:98
+react_stack_bottom_frame @ react-dom_client.js?v=59056eda:18509
+renderWithHooksAgain @ react-dom_client.js?v=59056eda:5729
+renderWithHooks @ react-dom_client.js?v=59056eda:5665
+updateFunctionComponent @ react-dom_client.js?v=59056eda:7475
+beginWork @ react-dom_client.js?v=59056eda:8525
+runWithFiberInDEV @ react-dom_client.js?v=59056eda:997
+performUnitOfWork @ react-dom_client.js?v=59056eda:12561
+workLoopSync @ react-dom_client.js?v=59056eda:12424
+renderRootSync @ react-dom_client.js?v=59056eda:12408
+performWorkOnRoot @ react-dom_client.js?v=59056eda:11766
+performWorkOnRootViaSchedulerTask @ react-dom_client.js?v=59056eda:13505
+performWorkUntilDeadline @ react-dom_client.js?v=59056eda:36
+<App>
+exports.jsxDEV @ react_jsx-dev-runtime.js?v=59056eda:247
+(anonymous) @ main.tsx:20
+logger.ts:67 [backup] blossom fetch ✗ https://blossom.f7z.io: HTTP 404
+logger.ts:67 [relay] relay query ✓ wss://relay.jbnco.co 44 event(s)
+logger.ts:67 [relay] relay query ✓ wss://relay.jbnco.co 0 event(s)
+logger.ts:67 [calendar] doRefresh: no public or shared calendars — skipping relay event queries (Blossom snapshot is authoritative)
+[Violation] 'click' handler took <N>ms
+[Violation] 'click' handler took <N>ms
+[Violation] 'click' handler took <N>ms
+[Violation] 'click' handler took <N>ms
+[Violation] 'click' handler took <N>ms
+nostr-provider.js:41 [nos2x:1151] calling nip44.encrypt with {"peer":"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15","plaintext":"{\"version\":1,\"savedAt\":\"2026-04-21T13:46:14.233Z\",\"calendars\":[{\"dTag\":\"0b80f781b43048f5\",\"title\":\"Dad\",\"eventRefs\":[],\"color\":\"#4c6ef5\"},{\"dTag\":\"e068d34254f347c7\",\"title\":\"Kids\",\"eventRefs\":[],\"color\":\"#12b886\"},{\"dTag\":\"4d2705c0957ba37c135414cc37cd7bd0\",\"title\":\"Repeating\",\"eventRefs\":[],\"color\":\"#fd7e14\"}],\"events\":[{\"id\":\"283eb02bc51d2b341df16c49ce5cb486\",\"pubkey\":\"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15\",\"kind\":31923,\"dTag\":\"283eb02bc51d2b341df16c49ce5cb486\",\"title\":\"frill\",\"content\":\"desc\",\"start\":\"2026-04-24T12:40:00.000Z\",\"allDay\":false,\"hashtags\":[],\"calendarRefs\":[\"b85596c3a478be721b0a169cae6bf16f\"],\"seriesId\":\"a8bd591fc541d1f9534c369b77b6c470\",\"notify\":true,\"tags\":[[\"d\",\"283eb02bc51d2b341df16c49ce5cb486\"],[\"title\",\"frill\"],[\"start\",\"1777034400\"],[\"D\",\"20567\"],[\"start_tzid\",\"America/Chicago\"],[\"calendar\",\"b85596c3a478be721b0a169cae6bf16f\"],[\"series\",\"a8bd591fc541d1f9534c369b77b6c470\"],[\"notify\",\"true\"]],\"createdAt\":1776429833},{\"id\":\"d17bbeea1f520e4208c4c6180fd824fd\",\"pubkey\":\"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15\",\"kind\":31923,\"dTag\":\"d17bbeea1f520e4208c4c6180fd824fd\",\"title\":\"frill\",\"content\":\"desc\",\"start\":\"2026-04-17T12:40:00.000Z\",\"allDay\":false,\"hashtags\":[],\"calendarRefs\":[\"b85596c3a478be721b0a169cae6bf16f\"],\"notify\":true,\"tags\":[[\"d\",\"d17bbeea1f520e4208c4c6180fd824fd\"],[\"title\",\"frill\"],[\"start\",\"1776429600\"],[\"D\",\"20560\"],[\"start_tzid\",\"America/Chicago\"],[\"t\",\"frpc\"],[\"calendar\",\"b85596c3a478be721b0a169cae6bf16f\"],[\"notify\",\"true\"]],\"createdAt\":1776429898},{\"id\":\"8a0b43ff754ea2628f68eab3fa0341c6\",\"pubkey\":\"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15\",\"kind\":31923,\"dTag\":\"8a0b43ff754ea2628f68eab3fa0341c6\",\"title\":\"AA Aurora\",\"content\":\"\",\"start\":\"2026-05-06T00:00:00.000Z\",\"allDay\":false,\"hashtags\":[],\"calendarRefs\":[\"0b80f781b43048f5\"],\"seriesId\":\"3bbed0024ba5ff07cf8ba7f2493a0001\",\"notify\":true,\"tags\":[[\"d\",\"8a0b43ff754ea2628f68eab3fa0341c6\"],[\"title\",\"AA Aurora\"],[\"start\",\"1778025600\"],[\"D\",\"20579\"],[\"start_tzid\",\"America/Chicago\"],[\"calendar\",\"0b80f781b43048f5\"],[\"series\",\"3bbed0024ba5ff07cf8ba7f2493a0001\"],[\"notify\",\"true\"]],\"createdAt\":1776453004},{\"id\":\"a7f3d6e785e5ddcccdcea37923e78dca\",\"pubkey\":\"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15\",\"kind\":31923,\"dTag\":\"a7f3d6e785e5ddcccdcea37923e78dca\",\"title\":\"AA Aurora\",\"content\":\"\",\"start\":\"2026-05-13T00:00:00.000Z\",\"allDay\":false,\"hashtags\":[],\"calendarRefs\":[\"0b80f781b43048f5\"],\"seriesId\":\"3bbed0024ba5ff07cf8ba7f2493a0001\",\"notify\":true,\"tags\":[[\"d\",\"a7f3d6e785e5ddcccdcea37923e78dca\"],[\"title\",\"AA Aurora\"],[\"start\",\"1778630400\"],[\"D\",\"20586\"],[\"start_tzid\",\"America/Chicago\"],[\"calendar\",\"0b80f781b43048f5\"],[\"series\",\"3bbed0024ba5ff07cf8ba7f2493a0001\"],[\"notify\",\"true\"]],\"createdAt\":1776453004},{\"id\":\"0747a1441b9dfe5cfc9fb17af3f0ea65\",\"pubkey\":\"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15\",\"kind\":31923,\"dTag\":\"0747a1441b9dfe5cfc9fb17af3f0ea65\",\"title\":\"AA Aurora\",\"content\":\"\",\"start\":\"2026-05-20T00:00:00.000Z\",\"allDay\":false,\"hashtags\":[],\"calendarRefs\":[\"0b80f781b43048f5\"],\"seriesId\":\"3bbed0024ba5ff07cf8ba7f2493a0001\",\"notify\":true,\"tags\":[[\"d\",\"0747a1441b9dfe5cfc9fb17af3f0ea65\"],[\"title\",\"AA Aurora\"],[\"start\",\"1779235200\"],[\"D\",\"20593\"],[\"start_tzid\",\"America/Chicago\"],[\"calendar\",\"0b80f781b43048f5\"],[\"series\",\"3bbed0024ba5ff07cf8ba7f2493a0001\"],[\"notify\",\"true\"]],\"createdAt\":1776453004},{\"id\":\"ee63c7521a6bd06695346f8563a7c6a7\",\"pubkey\":\"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15\",\"kind\":31923,\"dTag\":\"ee63c7521a6bd06695346f8563a7c6a7\",\"title\":\"AA Aurora\",\"content\":\"\",\"start\":\"2026-05-27T00:00:00.000Z\",\"allDay\":false,\"hashtags\":[],\"calendarRefs\":[\"0b80f781b43048f5\"],\"seriesId\":\"3bbed0024ba5ff07cf8ba7f2493a0001\",\"notify\":true,\"tags\":[[\"d\",\"ee63c7521a6bd06695346f8563a7c6a7\"],[\"title\",\"AA Aurora\"],[\"start\",\"1779840000\"],[\"D\",\"20600\"],[\"start_tzid\",\"America/Chicago\"],[\"calendar\",\"0b80f781b43048f5\"],[\"series\",\"3bbed0024ba5ff07cf8ba7f2493a0001\"],[\"notify\",\"true\"]],\"createdAt\":1776453004},{\"id\":\"7639947ffc25186f70bff392620c8816\",\"pubkey\":\"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15\",\"kind\":31923,\"dTag\":\"7639947ffc25186f70bff392620c8816\",\"title\":\"AA Aurora\",\"content\":\"\",\"start\":\"2026-06-03T00:00:00.000Z\",\"allDay\":false,\"hashtags\":[],\"calendarRefs\":[\"0b80f781b43048f5\"],\"series
+nostr-provider.js:89 [nos2x:1151] result: {"error":{"message":"invalid plaintext size: must be between 1 and 65535 bytes","stack":"Error: invalid plaintext size: must be between 1 and 65535 bytes\n    at writeU16BE (chrome-extension://kpgefcfmnafjgpblomihpgmejjdanjjp/background.build.js:5485:13)\n    at pad (chrome-extension://kpgefcfmnafjgpblomihpgmejjdanjjp/background.build.js:5493:20)\n    at Object.encrypt3 [as encrypt] (chrome-extension://kpgefcfmnafjgpblomihpgmejjdanjjp/background.build.js:5538:20)\n    at performOperation (chrome-extension://kpgefcfmnafjgpblomihpgmejjdanjjp/background.build.js:6016:21)\n    at async handleContentScriptMessage (chrome-extension://kpgefcfmnafjgpblomihpgmejjdanjjp/background.build.js:5940:27)"}}
+logger.ts:67 [relay] relay query → wss://relay.jbnco.co kinds=30078
+backup.ts:763 WebSocket is already in CLOSING or CLOSED state.
+(anonymous) @ nostr-tools_pool.js?v=59056eda:389
+Promise.then
+send @ nostr-tools_pool.js?v=59056eda:387
+close @ nostr-tools_pool.js?v=59056eda:636
+closeAllSubscriptions @ nostr-tools_pool.js?v=59056eda:227
+close @ nostr-tools_pool.js?v=59056eda:474
+(anonymous) @ nostr-tools_pool.js?v=59056eda:716
+close @ nostr-tools_pool.js?v=59056eda:714
+(anonymous) @ backup.ts:763
+react_stack_bottom_frame @ react-dom_client.js?v=59056eda:18573
+runWithFiberInDEV @ react-dom_client.js?v=59056eda:997
+commitHookEffectListUnmount @ react-dom_client.js?v=59056eda:9449
+commitHookPassiveUnmountEffects @ react-dom_client.js?v=59056eda:9468
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11490
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11489
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11516
+recursivelyTraversePassiveUnmountEffects @ react-dom_client.js?v=59056eda:11481
+commitPassiveUnmountOnFiber @ react-dom_client.js?v=59056eda:11498
+flushPassiveEffects @ react-dom_client.js?v=59056eda:13146
+flushPendingEffects @ react-dom_client.js?v=59056eda:13088
+flushSpawnedWork @ react-dom_client.js?v=59056eda:13062
+commitRoot @ react-dom_client.js?v=59056eda:12804
+commitRootWhenReady @ react-dom_client.js?v=59056eda:12016
+performWorkOnRoot @ react-dom_client.js?v=59056eda:11950
+performSyncWorkOnRoot @ react-dom_client.js?v=59056eda:13517
+flushSyncWorkAcrossRoots_impl @ react-dom_client.js?v=59056eda:13414
+processRootScheduleInMicrotask @ react-dom_client.js?v=59056eda:13437
+(anonymous) @ react-dom_client.js?v=59056eda:13531
+logger.ts:67 [relay] relay query ✓ wss://relay.jbnco.co 1 event(s)
+logger.ts:67 [relay] relay query → wss://relay.jbnco.co kinds=30078
+logger.ts:67 [relay] relay query ✓ wss://relay.jbnco.co 1 event(s)
+logger.ts:67 [backup] encrypting snapshot — 282169 bytes plaintext
+nostr-provider.js:41 [nos2x:5407] calling nip44.encrypt with {"peer":"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15","plaintext":"0b0855ef35d60432370c5f0dfd1ee69195e8df905cdc02ae57ada5a59a0399a1"}
+nostr-provider.js:89 [nos2x:5407] result: "AtdaDn2bcFLgvs9OL8ULR7taasi8hHxzLbKhMg+Cur5C9+EZ1W8E4w80y2FqJfWQepy8Pd1E/RskZgyEWshv1ggSffc2ifPJyEX8YV/NrimhuG8CGxZjdW9UmgbRK3PibaOfCS7J6EcbWLx3/hPfIbONisq9OcmpWogZwxNo5p52iz4="
+logger.ts:67 [backup] snapshot cb481aac — 376478 bytes encrypted
+nostr-provider.js:41 [nos2x:3643] calling signEvent with {"event":{"kind":24242,"content":"Planner snapshot","created_at":1776779220,"tags":[["t","upload"],["expiration","1776782820"],["x","cb481aac09e4f0a37f41c405e842730a95c46dec45c9ab473e51547f8375d965"]]}}
+nostr-provider.js:89 [nos2x:3643] result: {"kind":24242,"content":"Planner snapshot","created_at":1776779220,"tags":[["t","upload"],["expiration","1776782820"],["x","cb481aac09e4f0a37f41c405e842730a95c46dec45c9ab473e51547f8375d965"]],"pubkey":"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15","id":"10e1fd41359c3693a56fa04c68bfd1cf6300ae5fd5060c220463b7b352ad33ca","sig":"737bb577d72be386c151fc837a8cfc471b38980e61131b1b7e500162bfcc8b257f5ac6dd922c74fffce8b7480e5dde738ff283e854fcf3ac31d8e2088369ad74"}
+logger.ts:67 [backup] blossom upload → https://relay.jbnco.co/blossom
+logger.ts:67 [backup] blossom upload ✓ https://relay.jbnco.co/blossom
+nostr-provider.js:41 [nos2x:3847] calling signEvent with {"event":{"kind":30078,"created_at":1776779222,"tags":[["d","nostr-planner-backup"],["x","cb481aac09e4f0a37f41c405e842730a95c46dec45c9ab473e51547f8375d965"],["server","https://relay.jbnco.co/blossom"],["server","https://nostr.download"],["server","https://blossom.f7z.io"]],"content":"{\"type\":\"nostr-planner-snapshot\",\"savedAt\":\"2026-04-21T13:46:59.727Z\",\"events\":389,\"calendars\":3,\"habits\":21,\"lists\":4}"}}
+nostr-provider.js:89 [nos2x:3847] result: {"kind":30078,"created_at":1776779222,"tags":[["d","nostr-planner-backup"],["x","cb481aac09e4f0a37f41c405e842730a95c46dec45c9ab473e51547f8375d965"],["server","https://relay.jbnco.co/blossom"],["server","https://nostr.download"],["server","https://blossom.f7z.io"]],"content":"{\"type\":\"nostr-planner-snapshot\",\"savedAt\":\"2026-04-21T13:46:59.727Z\",\"events\":389,\"calendars\":3,\"habits\":21,\"lists\":4}","pubkey":"61cb31a85d31f297e324e15797c24403233cbbb1c9d5b78db5b1331cdb24bb15","id":"a07aa1df37d4d9263da8fed286e86e67d37b9cd7f10574df26e7193d6a1b4872","sig":"7011841f2c543f120de0906750bd38f021f1baceaa17452eb83088c2016488568d7c0199978ff6caf42ce34a98e195a1bcb5edc47ca943cbf1bb0f476afb50d4"}
+logger.ts:67 [relay] relay publish → wss://relay.jbnco.co kind=30078 id=a07aa1df
+logger.ts:67 [relay] relay publish ✓ wss://relay.jbnco.co kind=30078
+logger.ts:67 [backup] pointer published in 2622ms
+logger.ts:67 [relay] relay mirror → [wss://relay.damus.io, wss://relay.ditto.pub, wss://nos.lol, wss://relay.primal.net, wss://theforest.nostr1.com] kind=30078 id=a07aa1df
+logger.ts:67 [backup] blossom mirror → https://nostr.download
+logger.ts:67 [calendar] doRefresh: no public or shared calendars — skipping relay event queries (Blossom snapshot is authoritative)
+logger.ts:67 [relay] relay mirror ✓ kind=30078
+logger.ts:67 [backup] blossom mirror ✓ https://nostr.download
+logger.ts:67 [backup] blossom mirror → https://blossom.f7z.io

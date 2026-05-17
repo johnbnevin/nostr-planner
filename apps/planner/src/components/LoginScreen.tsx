@@ -19,6 +19,7 @@ import {
 import { useNostr } from "../contexts/NostrContext";
 import { LocalSigner } from "../lib/localSigner";
 import { connectNostrSigner, connectBunkerUri } from "../lib/nip46Signer";
+import { onDeepLink } from "../lib/deepLink";
 import { DEFAULT_RELAYS } from "../lib/nostr";
 import { isTauri, isStandalonePWA } from "../lib/platform";
 import { queryEvents } from "../lib/relay";
@@ -39,6 +40,11 @@ interface SignerRec {
   url?: string;
 }
 
+// Signer apps we recommend on each mobile platform. We link to them
+// because the user being on iOS Safari is not the project's choice and
+// we want them to have a working signer option. Linking to App Store
+// listings is *compatibility*, not *dependency* — the project itself
+// needs no Apple credentials to point users at these third-party apps.
 const MOBILE_SIGNERS: Record<string, SignerRec[]> = {
   iPhone: [
     { name: "Alby Go", note: "Nostr signer and Lightning wallet", url: "https://apps.apple.com/us/app/alby-go/id6471335774" },
@@ -453,7 +459,10 @@ export function LoginScreen() {
         // becomes a no-op and the user needs the QR flow instead.
         window.location.href = uri;
       });
-      if (!inTauri) lsSet("nostr-planner-login-type", "bunker");
+      // Bunker URLs are not private keys; persist on all platforms so
+      // auto-reconnect on next launch works identically across web,
+      // Tauri desktop, and Tauri mobile.
+      lsSet("nostr-planner-login-type", "bunker");
       connectAbortRef.current = null;
       await loginWithSigner(signer);
     } catch (e: unknown) {
@@ -463,7 +472,7 @@ export function LoginScreen() {
     } finally {
       if (!controller.signal.aborted) setConnectWaiting(false);
     }
-  }, [loginWithSigner, inTauri]);
+  }, [loginWithSigner]);
 
   /* ── NIP-46 QR code login ──────────────────────────────────────── */
 
@@ -483,7 +492,9 @@ export function LoginScreen() {
           if (!controller.signal.aborted) setQrDataUrl(dataUrl);
         } catch { /* QR generation failed */ }
       });
-      if (!inTauri) lsSet("nostr-planner-login-type", "bunker");
+      // Persist bunker login type on all platforms so auto-reconnect
+      // works identically across web, Tauri desktop, and Tauri mobile.
+      lsSet("nostr-planner-login-type", "bunker");
       connectAbortRef.current = null;
       await loginWithSigner(signer);
     } catch (e: unknown) {
@@ -493,12 +504,12 @@ export function LoginScreen() {
     } finally {
       if (!controller.signal.aborted) setConnectWaiting(false);
     }
-  }, [loginWithSigner, inTauri]);
+  }, [loginWithSigner]);
 
   /* ── Bunker URI login ──────────────────────────────────────────── */
 
-  const handleBunkerLogin = async () => {
-    const trimmed = bunkerUrl.trim();
+  const handleBunkerLogin = useCallback(async (overrideUrl?: string) => {
+    const trimmed = (overrideUrl ?? bunkerUrl).trim();
     if (!trimmed) { setBunkerError("Please enter a bunker or nostrconnect URL"); return; }
     if (!trimmed.startsWith("bunker://") && !trimmed.startsWith("nostrconnect://")) {
       setBunkerError("Invalid URL — must start with bunker:// or nostrconnect://");
@@ -508,12 +519,10 @@ export function LoginScreen() {
     setBunkerError(null);
     try {
       const { signer } = await connectBunkerUri(trimmed, 120_000);
-      if (!inTauri) {
-        lsSet("nostr-planner-login-type", "bunker");
-        // Save the URL so the next page load can try to re-connect without
-        // making the user paste it again.
-        lsSet("nostr-planner-bunker-url", trimmed);
-      }
+      // Bunker URLs aren't private keys — same persistence on every
+      // platform so auto-reconnect works identically.
+      lsSet("nostr-planner-login-type", "bunker");
+      lsSet("nostr-planner-bunker-url", trimmed);
       await loginWithSigner(signer);
     } catch (e: unknown) {
       const errMsg = (e as Error).message || "Bunker login failed";
@@ -529,7 +538,18 @@ export function LoginScreen() {
     } finally {
       setBunkerLoading(false);
     }
-  };
+  }, [bunkerUrl, loginWithSigner]);
+
+  // Deep-link inbound: an external app (Amber on Android, system browser
+  // on desktop, another tab via protocol handler) sent us a bunker:// or
+  // nostrconnect:// URI. Fill the input and auto-connect — saves the
+  // user from a copy-paste round trip.
+  useEffect(() => {
+    return onDeepLink((uri) => {
+      setBunkerUrl(uri);
+      void handleBunkerLogin(uri);
+    });
+  }, [handleBunkerLogin]);
 
   /* ── Tauri stored key unlock ───────────────────────────────────── */
 
@@ -1103,7 +1123,7 @@ export function LoginScreen() {
                   onKeyDown={(e) => { if (e.key === "Enter") handleBunkerLogin(); }}
                 />
                 <button
-                  onClick={handleBunkerLogin}
+                  onClick={() => void handleBunkerLogin()}
                   disabled={bunkerLoading}
                   className="bg-primary-600 hover:bg-primary-700 text-white font-semibold px-4 py-2 rounded-xl text-sm transition-colors disabled:opacity-50"
                 >

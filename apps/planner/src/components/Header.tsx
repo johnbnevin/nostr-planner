@@ -1,6 +1,8 @@
 import type { NostrProfile } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useSettings } from "../contexts/SettingsContext";
+import { SyncStatusPill } from "./SyncStatusPill";
+import { useReplicationStatus, formatReplicationTooltip } from "../hooks/useReplicationStatus";
 import {
   ChevronLeft,
   ChevronRight,
@@ -103,6 +105,8 @@ export function Header({
     redoPreview,
   } = useCalendar();
   const { autoBackup, setAutoBackup } = useSettings();
+  const replication = useReplicationStatus();
+  const replicationSummary = formatReplicationTooltip(replication);
 
   const npubShort = `${pubkey.slice(0, 8)}...${pubkey.slice(-4)}`;
 
@@ -292,13 +296,14 @@ export function Header({
                 : "bg-red-50 hover:bg-red-100"
               }`}
               title={
-                !autoBackup ? "Auto-backup off"
-                : backupPhase === "blocked" ? "Save blocked: the new snapshot would drop a lot of data. Click to review."
-                : backupPhase === "saving" ? "Saving backup…"
-                : backupPhase === "error"
-                  ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
-                : backupPhase === "dirty" && saveCountdown !== null ? `Unsaved — autosave in ${saveCountdown}s`
-                : "Auto-backup on"
+                (!autoBackup ? "Auto-backup off"
+                  : backupPhase === "blocked" ? "Save blocked: the new snapshot would drop a lot of data. Click to review."
+                  : backupPhase === "saving" ? "Saving backup…"
+                  : backupPhase === "error"
+                    ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
+                  : backupPhase === "dirty" && saveCountdown !== null ? `Unsaved — autosave in ${saveCountdown}s`
+                  : "Auto-backup on")
+                + (replicationSummary ? `\n${replicationSummary}` : "")
               }
             >
               {!autoBackup ? (
@@ -330,6 +335,8 @@ export function Header({
             >
               <Settings className="w-4 h-4 text-gray-500" />
             </button>
+
+            <SyncStatusPill />
 
             <div className="flex items-center gap-2 ml-1 pl-2 border-l border-gray-200">
               {profile?.picture ? (
@@ -366,6 +373,7 @@ export function Header({
             <h1 className="text-base font-bold text-primary-700">Planner</h1>
           </div>
           <div className="flex items-center gap-0.5">
+            <SyncStatusPill compact />
             <button
               onClick={onCalendars}
               className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
@@ -403,13 +411,14 @@ export function Header({
                 : "bg-red-50 hover:bg-red-100"
               }`}
               title={
-                !autoBackup ? "Auto-backup off"
-                : backupPhase === "blocked" ? "Save blocked: the new snapshot would drop a lot of data. Click to review."
-                : backupPhase === "saving" ? "Saving backup…"
-                : backupPhase === "error"
-                  ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
-                : backupPhase === "dirty" && saveCountdown !== null ? `Unsaved — autosave in ${saveCountdown}s`
-                : "Auto-backup on"
+                (!autoBackup ? "Auto-backup off"
+                  : backupPhase === "blocked" ? "Save blocked: the new snapshot would drop a lot of data. Click to review."
+                  : backupPhase === "saving" ? "Saving backup…"
+                  : backupPhase === "error"
+                    ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
+                  : backupPhase === "dirty" && saveCountdown !== null ? `Unsaved — autosave in ${saveCountdown}s`
+                  : "Auto-backup on")
+                + (replicationSummary ? `\n${replicationSummary}` : "")
               }
             >
               {!autoBackup ? (

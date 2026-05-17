@@ -35,8 +35,11 @@ function swVersionInjector(): Plugin {
 export default defineConfig({
   test: {
     globals: true,
+    // Default to node — lib/ tests are pure and don't need a DOM.
+    // Hook tests opt into jsdom via a `// @vitest-environment jsdom`
+    // pragma at the top of the file (see hooks/useUndoRedo.test.tsx).
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
   },
   // Use a relative base for every build (Tauri + web). Web absolute paths
   // ("/assets/...") break sub-path deploys like noobstr.me/planner/: the

@@ -11,8 +11,9 @@
  * - No-ops on web builds.
  * - Only active when notifications are enabled AND method === "push".
  * - Reschedules when the event set or timing settings change (debounced).
- * - Caps the upcoming window to 30 days / 64 notifications to stay under
- *   iOS's 64-pending-notification limit.
+ * - Caps the upcoming window to 30 days / 64 notifications — a
+ *   conservative limit that keeps the pending-notification queue small
+ *   on every supported OS (Android, Windows, macOS, Linux desktop).
  */
 
 import { useEffect, useRef } from "react";
