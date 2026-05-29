@@ -7,8 +7,9 @@
  *  - Export the current in-memory state to a local file.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { X, Check, AlertCircle, HardDrive, Lock, Cloud, Trash2, Download, History } from "lucide-react";
+import { useModalA11y } from "../hooks/useModalA11y";
 import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useTasks } from "../contexts/TasksContext";
@@ -32,6 +33,8 @@ interface BackupPanelProps { onClose: () => void; }
 
 export function BackupPanel({ onClose }: BackupPanelProps) {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
   const { events, calendars, applySnapshot: applyCalendarSnapshot, eventTombstones, setLastRemoteSha } = useCalendar();
   const { habits, completions, lists, applySnapshot: applyTasksSnapshot, habitTombstones, listTombstones } = useTasks();
   const { getSettings, restoreSettings } = useSettings();
@@ -245,7 +248,13 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Backup & restore"
+        className="bg-white rounded-2xl shadow-2xl max-w-md w-full"
+      >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold">Backup &amp; Restore</h2>
           <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors">

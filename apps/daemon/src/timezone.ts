@@ -7,6 +7,23 @@
  */
 
 /**
+ * Validate that a string is a usable IANA timezone. `Intl.DateTimeFormat`
+ * throws a RangeError for unknown zones, so we probe once and report the
+ * result. Used to reject malformed/hostile `timezone` values at ingest —
+ * a bad zone reaching getMidnightInZone/getDatePartsInZone would otherwise
+ * throw deep inside the push loop and crash the daemon for every user.
+ */
+export function isValidTimeZone(tz: unknown): tz is string {
+  if (typeof tz !== "string" || tz.length === 0 || tz.length > 64) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Get date/time parts for the current moment in a specific IANA timezone.
  * Returns year/month/day/hour and a YYYY-MM-DD dateKey for comparisons.
  */

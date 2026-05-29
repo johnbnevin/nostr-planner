@@ -96,6 +96,24 @@ interface RelayMirrorTask {
 
 const relayTasks = new Map<string, RelayMirrorTask>(); // keyed by event.id
 
+/** Hard cap on distinct pending mirror tasks per channel. A long editing
+ *  session against a flaky mirror could otherwise accumulate one task
+ *  (holding a full event / blob body) per save without bound. When over
+ *  cap we drop the OLDEST task — the primary copy is already durable, so
+ *  dropping a mirror retry only forgoes best-effort redundancy. */
+const MAX_MIRROR_TASKS = 500;
+
+/** Evict the oldest entries from a task map until it's under the cap.
+ *  Maps iterate in insertion order, so the first key is the oldest. */
+function capTaskMap(map: Map<string, unknown>, label: string): void {
+  while (map.size > MAX_MIRROR_TASKS) {
+    const oldest = map.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+    log.debug(`${label} retry queue at cap — dropped oldest ${oldest.slice(0, 8)}`);
+  }
+}
+
 /** Schedule of retry delays (ms). After exhausting, the task is dropped. */
 const RETRY_DELAYS_MS = [10_000, 30_000, 60_000, 300_000, 600_000];
 
@@ -120,6 +138,7 @@ export function enqueueRelayMirrorRetry(event: NostrEvent, failedUrls: string[])
     });
     log.debug(`relay mirror retry: ${event.id.slice(0, 8)} queued for [${failedUrls.join(", ")}]`);
   }
+  capTaskMap(relayTasks, "relay mirror");
   ensureTickerRunning();
 }
 
@@ -164,6 +183,7 @@ export function enqueueBlossomMirrorRetry(
     });
     log.debug(`blossom mirror retry: ${sha256.slice(0, 8)} queued for [${failedServers.join(", ")}]`);
   }
+  capTaskMap(blossomTasks, "blossom mirror");
   ensureTickerRunning();
 }
 

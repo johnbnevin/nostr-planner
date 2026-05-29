@@ -78,17 +78,28 @@ export function withFieldStamps<T extends WithFieldTs & { updatedAt?: number }>(
  * `id`/`dTag` fields are never merged (they're the identity); they're
  * taken from `local` (the two sides are identical by construction).
  */
-function mergeEntityFields<T extends { updatedAt?: number } & WithFieldTs>(
+function mergeEntityFields<T extends { updatedAt?: number; deleted?: boolean } & WithFieldTs>(
   local: T, remote: T
 ): T {
+  // Tombstones are monotonic: once either side has deleted an entity, the
+  // merged result stays deleted regardless of field timestamps. The app has
+  // no un-delete, and treating `deleted` as ordinary LWW lets a peer that
+  // edited an unrelated field after a delete silently resurrect the item —
+  // the exact data-loss this module exists to prevent.
+  const tombstoned = local.deleted === true || remote.deleted === true;
+  const finalize = (merged: T): T => (tombstoned ? { ...merged, deleted: true } : merged);
+
   const localTs = local.updatedAt ?? 0;
   const remoteTs = remote.updatedAt ?? 0;
   const fieldL = local.fieldUpdatedAt ?? {};
   const fieldR = remote.fieldUpdatedAt ?? {};
   // If neither side has any per-field metadata, fall through to the
-  // simple whole-entity LWW path for maximal predictability.
+  // simple whole-entity LWW path. On an exact timestamp tie, break it
+  // deterministically (by serialized content) so the merge is commutative —
+  // merge(a,b) and merge(b,a) agree even when two devices stamp the same ms.
   if (Object.keys(fieldL).length === 0 && Object.keys(fieldR).length === 0) {
-    return remoteTs >= localTs ? remote : local;
+    if (remoteTs !== localTs) return finalize(remoteTs > localTs ? remote : local);
+    return finalize(stablePick(local, remote));
   }
 
   // Pick the side that wins on a given field name.
@@ -130,7 +141,14 @@ function mergeEntityFields<T extends { updatedAt?: number } & WithFieldTs>(
   // Top-level updatedAt reflects the latest field write across either
   // side, so a subsequent whole-entity LWW comparison stays accurate.
   out.updatedAt = Math.max(localTs, remoteTs);
-  return out;
+  return finalize(out);
+}
+
+/** Deterministic tiebreak for two entities with equal timestamps: pick the
+ *  one with the lexicographically smaller JSON serialization. Independent of
+ *  argument order, so the containing merge stays commutative on exact ties. */
+function stablePick<T>(a: T, b: T): T {
+  return JSON.stringify(a) <= JSON.stringify(b) ? a : b;
 }
 
 function mergeById<T extends { updatedAt?: number } & WithFieldTs>(
@@ -160,13 +178,22 @@ function mergeCompletions(
 }
 
 export function mergeSnapshots(local: Snapshot, remote: Snapshot): Snapshot {
-  // If remote is wholesale newer (later savedAt), use it as the base for
-  // scalar settings; per-entity merge still runs below.
-  const newer = Date.parse(remote.savedAt) >= Date.parse(local.savedAt) ? remote : local;
+  const localMs = Date.parse(local.savedAt);
+  const remoteMs = Date.parse(remote.savedAt);
+  // Pick the base for scalar settings by savedAt; on an exact tie break
+  // deterministically by content so merge(a,b).settings === merge(b,a).settings.
+  let newer: Snapshot;
+  if (remoteMs !== localMs) {
+    newer = remoteMs > localMs ? remote : local;
+  } else {
+    newer = JSON.stringify(local.settings) <= JSON.stringify(remote.settings) ? local : remote;
+  }
 
   return {
     version: 1,
-    savedAt: new Date().toISOString(),
+    // Deterministic & pure: the merged snapshot's savedAt is the later of the
+    // two inputs, never wall-clock-now (which broke purity/idempotency).
+    savedAt: remoteMs >= localMs ? remote.savedAt : local.savedAt,
     calendars: mergeById<CalendarCollection>(local.calendars, remote.calendars, (c) => c.dTag),
     events: mergeById<CalendarEvent>(local.events, remote.events, (e) => e.dTag),
     habits: mergeById<DailyHabit>(local.habits, remote.habits, (h) => h.id),

@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useRef, useState, useEffect } from "react";
+import { useModalA11y } from "../hooks/useModalA11y";
 import {
   X,
   Users,
@@ -14,6 +15,7 @@ import {
 import { useCalendar } from "../contexts/CalendarContext";
 import { useSharing } from "../contexts/SharingContext";
 import { lookupNip05 } from "../lib/sharing";
+import { copyToClipboard } from "../lib/clipboard";
 import { nip19 } from "nostr-tools";
 
 /** @see {@link SharingModal} */
@@ -86,6 +88,8 @@ function shortNpub(pubkey: string): string {
  *   an AES-256-GCM key and publishing the key envelope.
  */
 export function SharingModal({ calDTag, onClose }: SharingModalProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
   const {
     calendars,
     removeMember,
@@ -192,9 +196,13 @@ export function SharingModal({ calDTag, onClose }: SharingModalProps) {
 
   const handleCopyLink = async () => {
     if (!inviteLink) return;
-    await navigator.clipboard.writeText(inviteLink);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    // copyToClipboard falls back to execCommand and never throws, so a denied
+    // clipboard (non-secure context / some webviews) doesn't break the handler.
+    const ok = await copyToClipboard(inviteLink);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const handleLeave = async () => {
@@ -210,7 +218,13 @@ export function SharingModal({ calDTag, onClose }: SharingModalProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] flex flex-col">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Share calendar"
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] flex flex-col"
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
           <div className="flex items-center gap-2">

@@ -396,6 +396,10 @@ export function closePool(): void {
   nip65Write = [];
   redundancyRelays = computeRedundancy();
   redundancyQueue.length = 0;
+  // Cancel any pending idle-time redundancy drain so it doesn't fire (with
+  // its 30s timeout) after logout against a freshly-nulled pool.
+  idleHandle?.cancel();
+  idleHandle = null;
   log.debug("pool closed");
 }
 
@@ -435,6 +439,29 @@ export function filterKey(filter: NostrFilter): string {
 /** Prune lastQueryTime entries older than this threshold to prevent unbounded growth. */
 const QUERY_TIME_TTL_MS = 60_000;
 
+/**
+ * Verify Schnorr signatures on a batch of events — never trust relays.
+ * Processes in chunks and yields to the main thread between chunks so a
+ * large result set can't block the UI. Events with invalid signatures are
+ * dropped (logged at warn). Used by both the primary and fallback read paths.
+ */
+async function verifyEventsBatched(events: NostrEvent[]): Promise<NostrEvent[]> {
+  const VERIFY_BATCH = 50;
+  const verified: NostrEvent[] = [];
+  for (let i = 0; i < events.length; i += VERIFY_BATCH) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 0)); // yield
+    const batch = events.slice(i, i + VERIFY_BATCH);
+    for (const e of batch) {
+      try {
+        if (verifyEvent(e as Parameters<typeof verifyEvent>[0])) verified.push(e);
+      } catch {
+        log.warn("invalid signature, dropping event", e.id?.slice(0, 8));
+      }
+    }
+  }
+  return verified;
+}
+
 // ── Query ───────────────────────────────────────────────────────────
 
 /**
@@ -465,8 +492,10 @@ export async function queryEvents(
     return existing;
   }
 
-  // Throttle: skip if an identical query completed very recently and is no longer in-flight.
-  // Only suppress when there's no in-flight promise — never return empty when we could wait.
+  // Throttle: skip if an identical query *succeeded* very recently and is no
+  // longer in-flight. We only record the timestamp on success (see the
+  // finally below), so a transient timeout/error never pins an empty result
+  // for 2s — the next caller is free to retry immediately.
   const lastTime = lastQueryTime.get(key);
   if (lastTime && Date.now() - lastTime < MIN_QUERY_INTERVAL_MS) {
     log.debug("query throttled (duplicate within 2s)", filter.kinds);
@@ -474,77 +503,74 @@ export async function queryEvents(
   }
 
   const doQuery = async (): Promise<NostrEvent[]> => {
-    const p = getPool(relays);
-
-    // Record the call for rate-limit tracking (non-blocking).
-    // Router sends queries to primary only, so only primary's slot is used.
-    acquireSlot(primaryRelay);
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    log.time("query");
-
-    const startedAt = Date.now();
+    let succeeded = false;
     try {
-      log.info(`relay query → ${primaryRelay} kinds=${filter.kinds?.join(",") ?? "*"}`);
-      const events = await p.query([filter], { signal: controller.signal });
-      log.info(`relay query ✓ ${primaryRelay} ${events.length} event(s)`);
-      recordSuccess(primaryRelay, Date.now() - startedAt);
+      const p = getPool(relays);
 
-      // Verify Schnorr signatures — don't trust relays. Process in batches
-      // and yield to the main thread between batches to avoid blocking UI.
-      const VERIFY_BATCH = 50;
-      const verified: NostrEvent[] = [];
-      for (let i = 0; i < events.length; i += VERIFY_BATCH) {
-        if (i > 0) await new Promise((r) => setTimeout(r, 0)); // yield
-        const batch = events.slice(i, i + VERIFY_BATCH);
-        for (const e of batch) {
-          try {
-            if (verifyEvent(e as Parameters<typeof verifyEvent>[0])) {
-              verified.push(e);
-            }
-          } catch {
-            log.warn("invalid signature, dropping event", e.id?.slice(0, 8));
-          }
+      // Enforce the per-relay rate limit before issuing the call. Router sends
+      // queries to primary only, so only primary's slot is consumed. Awaiting
+      // here means a burst of effects is actually throttled (queued) rather
+      // than hammering the relay and risking a ban. The timeout budget below
+      // starts only once we hold a slot, so queued time doesn't eat into it.
+      await acquireSlot(primaryRelay);
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      log.time("query");
+
+      const startedAt = Date.now();
+      try {
+        log.info(`relay query → ${primaryRelay} kinds=${filter.kinds?.join(",") ?? "*"}`);
+        // NPool.query swallows errors (including AbortSignal aborts) and
+        // returns partial results, so a timeout surfaces as a *resolved*
+        // promise with controller.signal.aborted === true — NOT a throw.
+        // Check the signal explicitly to decide whether the primary actually
+        // answered or whether we need to fail over to the redundancy set.
+        const events = await p.query([filter], { signal: controller.signal });
+        if (!controller.signal.aborted) {
+          log.info(`relay query ✓ ${primaryRelay} ${events.length} event(s)`);
+          recordSuccess(primaryRelay, Date.now() - startedAt);
+          const verified = await verifyEventsBatched(events);
+          log.debug(`query returned ${verified.length}/${events.length} events`, filter.kinds);
+          succeeded = true;
+          return verified;
         }
+        // Aborted (timeout) — fall through to the redundancy failover below.
+        recordFailure(primaryRelay);
+        log.warn("query timed out after", timeoutMs, "ms, kinds:", filter.kinds);
+      } catch (err) {
+        recordFailure(primaryRelay);
+        log.error("query failed:", err);
+      } finally {
+        clearTimeout(timer);
       }
 
-      log.debug(`query returned ${verified.length}/${events.length} events`, filter.kinds);
-      return verified;
-    } catch (err) {
-      recordFailure(primaryRelay);
-      const isTimeout = err instanceof DOMException && err.name === "AbortError";
-      if (isTimeout) {
-        log.warn("query timed out after", timeoutMs, "ms, kinds:", filter.kinds);
-      } else {
-        log.error("query failed:", err);
-      }
-      // Read fallback: when the primary fails (timeout or error), try the
-      // redundancy set. The user may have data on another relay we know
-      // about; querying primary-only would make the app behave as if
-      // they have no data at all. Best-quality redundancy relays first.
-      // Tighter per-attempt budget than the original so a string of dead
-      // relays doesn't blow past the caller's expected timeout window.
+      // Read fallback: the primary timed out or errored. Try the redundancy
+      // set — the user may have data on another relay we know about, and
+      // querying primary-only would make the app behave as if they have no
+      // data at all. Best-quality redundancy relays first; tighter per-attempt
+      // budget so a string of dead relays can't blow past the caller's window.
       const fallbackBudgetMs = Math.min(5_000, timeoutMs);
       const fallbackTargets = sortRelaysByScore(redundancyRelays);
       for (const fbUrl of fallbackTargets) {
         try {
-          acquireSlot(fbUrl);
+          await acquireSlot(fbUrl);
           const fbCtrl = new AbortController();
           const fbTimer = setTimeout(() => fbCtrl.abort(), fallbackBudgetMs);
           const fbStarted = Date.now();
           try {
             log.info(`relay query (fallback) → ${fbUrl} kinds=${filter.kinds?.join(",") ?? "*"}`);
             const fbEvents = await p.query([filter], { signal: fbCtrl.signal, relays: [fbUrl] });
+            if (fbCtrl.signal.aborted) {
+              recordFailure(fbUrl);
+              log.debug(`relay query (fallback) ${fbUrl}: timed out, trying next`);
+              continue;
+            }
             recordSuccess(fbUrl, Date.now() - fbStarted);
             if (fbEvents.length > 0) {
               log.info(`relay query (fallback) ✓ ${fbUrl} ${fbEvents.length} event(s)`);
-              const verified: NostrEvent[] = [];
-              for (const e of fbEvents) {
-                try {
-                  if (verifyEvent(e as Parameters<typeof verifyEvent>[0])) verified.push(e);
-                } catch { /* drop */ }
-              }
+              const verified = await verifyEventsBatched(fbEvents);
+              succeeded = true;
               return verified;
             }
             log.debug(`relay query (fallback) ${fbUrl}: 0 events, trying next`);
@@ -558,17 +584,21 @@ export async function queryEvents(
       }
       return [];
     } finally {
-      clearTimeout(timer);
       log.timeEnd("query");
       inflight.delete(key);
-      const now = Date.now();
-      lastQueryTime.set(key, now);
-      // Prune stale entries to prevent unbounded growth — long sessions with
-      // date-range filters that change every render would otherwise accumulate
-      // indefinitely.
-      if (lastQueryTime.size > 200) {
-        for (const [k, ts] of lastQueryTime) {
-          if (now - ts > QUERY_TIME_TTL_MS) lastQueryTime.delete(k);
+      // Only record the throttle timestamp on a *successful* query. Recording
+      // it on timeout/error would suppress retries for 2s and pin an empty
+      // result on a flaky network.
+      if (succeeded) {
+        const now = Date.now();
+        lastQueryTime.set(key, now);
+        // Prune stale entries to prevent unbounded growth — long sessions with
+        // date-range filters that change every render would otherwise
+        // accumulate indefinitely.
+        if (lastQueryTime.size > 200) {
+          for (const [k, ts] of lastQueryTime) {
+            if (now - ts > QUERY_TIME_TTL_MS) lastQueryTime.delete(k);
+          }
         }
       }
     }
@@ -594,21 +624,29 @@ export async function queryEvents(
  *   always to primary regardless of this list).
  * @param event - Signed Nostr event to publish.
  * @param timeoutMs - Timeout per attempt. Default: 10s.
+ * @param opts - `maxRetries` (default 3) caps in-function retries; pass 0 to
+ *   make a single attempt (the outbox drain owns its own backoff and must not
+ *   nest retry loops). `notifyOnFailure` (default true) controls whether
+ *   exhausting attempts fires the publish-failure handlers — the outbox sets
+ *   this false so a re-drain doesn't re-toast an already-reported failure.
  * @throws Error if all retry attempts to the primary are exhausted.
  */
 export async function publishToRelays(
   relays: string[],
   event: NostrEvent,
-  timeoutMs = 10000
+  timeoutMs = 10000,
+  opts: { maxRetries?: number; notifyOnFailure?: boolean } = {}
 ): Promise<void> {
-  const MAX_RETRIES = 3;
+  const MAX_RETRIES = opts.maxRetries ?? 3;
+  const notifyOnFailure = opts.notifyOnFailure ?? true;
   const RETRY_DELAY_MS = 2000;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const p = getPool(relays);
 
-    // Rate-limit slot for primary (router sends to primary only).
-    acquireSlot(primaryRelay);
+    // Enforce the per-relay rate limit (router sends to primary only). Awaited
+    // so a publish burst is genuinely throttled rather than hammering the relay.
+    await acquireSlot(primaryRelay);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -637,7 +675,7 @@ export async function publishToRelays(
         // knows what's unreachable. The original error is still logged
         // above for debugging.
         const friendly = new Error(`could not reach primary relay (${primaryRelay})`);
-        notifyPublishFailure(friendly, event);
+        if (notifyOnFailure) notifyPublishFailure(friendly, event);
         throw friendly;
       }
     } finally {
@@ -684,14 +722,26 @@ function scheduleRedundancy(event: NostrEvent): void {
   requestIdleRun(() => { void drainRedundancy(); });
 }
 
+/** Handle of the pending idle/timeout callback scheduled by requestIdleRun,
+ *  so closePool() can cancel a drain that would otherwise fire (with its
+ *  30s timeout) long after logout. */
+let idleHandle: { cancel: () => void } | null = null;
+
 /** Run `fn` when the event loop is idle. Falls back to a short setTimeout
- *  on runtimes without requestIdleCallback (Safari, some older WebViews). */
+ *  on runtimes without requestIdleCallback (Safari, some older WebViews).
+ *  Tracks the handle so it can be cancelled on closePool(). */
 function requestIdleRun(fn: () => void): void {
-  const g = globalThis as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void };
+  const wrapped = () => { idleHandle = null; fn(); };
+  const g = globalThis as {
+    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+    cancelIdleCallback?: (handle: number) => void;
+  };
   if (typeof g.requestIdleCallback === "function") {
-    g.requestIdleCallback(fn, { timeout: 30_000 });
+    const h = g.requestIdleCallback(wrapped, { timeout: 30_000 });
+    idleHandle = { cancel: () => g.cancelIdleCallback?.(h) };
   } else {
-    setTimeout(fn, 1000);
+    const h = setTimeout(wrapped, 1000);
+    idleHandle = { cancel: () => clearTimeout(h) };
   }
 }
 
@@ -700,7 +750,7 @@ function requestIdleRun(fn: () => void): void {
  *  can build a structured per-mirror outcome report. */
 async function publishToOne(event: NostrEvent, url: string): Promise<{ ok: boolean; error?: Error }> {
   if (!pool) return { ok: false, error: new Error("pool closed") };
-  acquireSlot(url);
+  await acquireSlot(url);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REDUNDANCY_TIMEOUT_MS);
   const startedAt = Date.now();

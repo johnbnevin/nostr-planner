@@ -692,6 +692,66 @@ export function loadSharedCalOwners(pubkey: string): Map<string, string> {
   }
 }
 
+// ── Invitation consent (localStorage, durable) ─────────────────────────
+//
+// A shared-calendar key envelope encrypted to the user proves only that
+// someone sent it to them — NOT that the user agreed to join. To stop any
+// third party from injecting a calendar into a victim's view, an invitation
+// from a previously-unknown owner is surfaced as a *pending* invite the user
+// must explicitly accept or reject. These two durable sets record that
+// decision so it survives across sessions (unlike the sessionStorage owner
+// mapping, which is rebuilt from relays each login).
+//
+// Keyed by `${ownerPubkey}:${calDTag}` so the decision is owner-specific.
+
+const ACCEPTED_KEY = (pubkey: string) => `nostr-planner-accepted-shares-${pubkey}`;
+const REJECTED_KEY = (pubkey: string) => `nostr-planner-rejected-shares-${pubkey}`;
+
+function shareConsentKey(ownerPubkey: string, calDTag: string): string {
+  return `${ownerPubkey}:${calDTag}`;
+}
+
+function loadConsentSet(storageKey: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw) as string[];
+    return Array.isArray(arr) ? new Set(arr) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function addToConsentSet(storageKey: string, entry: string): void {
+  try {
+    const set = loadConsentSet(storageKey);
+    set.add(entry);
+    localStorage.setItem(storageKey, JSON.stringify([...set]));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+/** True if the user previously consented to this owner's shared calendar. */
+export function isAcceptedShare(pubkey: string, ownerPubkey: string, calDTag: string): boolean {
+  return loadConsentSet(ACCEPTED_KEY(pubkey)).has(shareConsentKey(ownerPubkey, calDTag));
+}
+
+/** True if the user previously rejected this owner's shared-calendar invite. */
+export function isRejectedShare(pubkey: string, ownerPubkey: string, calDTag: string): boolean {
+  return loadConsentSet(REJECTED_KEY(pubkey)).has(shareConsentKey(ownerPubkey, calDTag));
+}
+
+/** Record durable consent to an owner's shared calendar (accept). */
+export function acceptShare(pubkey: string, ownerPubkey: string, calDTag: string): void {
+  addToConsentSet(ACCEPTED_KEY(pubkey), shareConsentKey(ownerPubkey, calDTag));
+}
+
+/** Record a durable rejection of an owner's shared-calendar invite. */
+export function rejectShare(pubkey: string, ownerPubkey: string, calDTag: string): void {
+  addToConsentSet(REJECTED_KEY(pubkey), shareConsentKey(ownerPubkey, calDTag));
+}
+
 // ── NIP-05 lookup ───────────────────────────────────────────────────────
 
 /**
@@ -800,6 +860,12 @@ export async function lookupNip05(identifier: string): Promise<string | null> {
   const name = identifier.slice(0, atIdx);
   const domain = identifier.slice(atIdx + 1);
   if (!name || !domain) return null;
+  // Reject embedded userinfo / path / query so a crafted "evil.com@localhost"
+  // can't pass the blocklist check (which would see "evil.com") while the
+  // actual fetch resolves to "localhost". The domain must be a bare host.
+  if (/[@/\\?#\s]/.test(domain)) return null;
+  // Name must match NIP-05 grammar — no slashes or other URL meta-chars.
+  if (!/^[a-z0-9_.-]+$/i.test(name)) return null;
   // Extract hostname (strip port if present)
   const hostname = domain.split(":")[0];
   if (isBlockedHostname(hostname)) return null;
@@ -900,7 +966,17 @@ const HEX_PUBKEY_RE = /^[0-9a-f]{64}$/;
 // reject anything with path-traversal or control characters.
 const SAFE_DTAG_RE = /^[a-zA-Z0-9_\-]{1,128}$/;
 
+/** Hard cap on the encoded blob (the whole base64 string comes from an
+ *  attacker-controlled URL fragment). A legitimate invite is well under 1KB;
+ *  reject anything larger before we even atob/parse it, so a multi-megabyte
+ *  fragment can't be a cheap DoS. */
+const MAX_INVITE_ENCODED_LEN = 4096;
+
+/** Cap on the human-readable title; it's displayed in the accept banner. */
+const MAX_INVITE_TITLE_LEN = 200;
+
 export function decodeInvitePayload(encoded: string): InvitePayload | null {
+  if (typeof encoded !== "string" || encoded.length > MAX_INVITE_ENCODED_LEN) return null;
   try {
     // Decode UTF-8 bytes from base64 (backward-compatible: ASCII links still parse correctly)
     const bytes = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0));
@@ -916,6 +992,10 @@ export function decodeInvitePayload(encoded: string): InvitePayload | null {
     // Validate pubkey and dTag format to prevent injection / path traversal
     if (!HEX_PUBKEY_RE.test(parsed.o)) return null;
     if (!SAFE_DTAG_RE.test(parsed.c)) return null;
+    // Bound the title and strip control characters — it's untrusted display
+    // text. React escapes it, but an unbounded/control-char title is still a
+    // UI-spoofing / cheap-DoS vector.
+    parsed.t = parsed.t.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, MAX_INVITE_TITLE_LEN);
     return parsed as InvitePayload;
   } catch {
     return null;

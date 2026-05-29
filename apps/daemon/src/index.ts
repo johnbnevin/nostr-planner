@@ -9,7 +9,7 @@
 
 import { loadConfig } from "./config.js";
 import { createPool } from "./relay.js";
-import { UserRegistry } from "./digest.js";
+import { UserRegistry, pushDedupKey } from "./digest.js";
 import { initWebPush, sendPushNotification } from "./push.js";
 import { startCaldavServer } from "./caldav.js";
 
@@ -80,8 +80,8 @@ async function main() {
       if (pending.length === 0) return;
 
       for (const { user, sub, event } of pending) {
-        // Key format must match getPendingPushNotifications dedup key exactly
-        const eventKey = `${event.start}\x00${event.title}\x00${event.location ?? ""}`;
+        // Shared key so mark-sent matches the pending-scan dedup exactly.
+        const eventKey = pushDedupKey(event);
 
         const ok = await sendPushNotification(sub, event);
         if (ok) {
@@ -132,6 +132,17 @@ async function main() {
 
   console.log("[daemon] running. Press Ctrl+C to stop.");
 }
+
+// Last-resort safety net: a stray rejection or throw from a background task
+// (e.g. the recurring push interval, the live-sub loop, or a relay socket
+// callback) must NOT silently take the whole daemon down for every user.
+// Log it and keep running — the periodic checks will recover on the next tick.
+process.on("unhandledRejection", (reason) => {
+  console.error("[daemon] unhandled rejection (continuing):", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[daemon] uncaught exception (continuing):", err);
+});
 
 main().catch((err) => {
   console.error("[daemon] fatal:", err);

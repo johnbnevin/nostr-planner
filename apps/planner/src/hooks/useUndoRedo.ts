@@ -66,6 +66,10 @@ export function useUndoRedo(cap: number = DEFAULT_CAP): UseUndoRedoReturn {
 
   const suppressUndoPushRef = useRef(false);
   const replayingRef = useRef(false);
+  // Bumped by clear(). undo()/redo() capture it before their await and bail if
+  // it changed — so a logout/identity-switch mid-replay can't repopulate the
+  // freshly-cleared stacks (which would resurrect the previous user's ops).
+  const generationRef = useRef(0);
 
   const pushUndo = useCallback((op: UndoableOperation) => {
     if (suppressUndoPushRef.current) return;
@@ -86,15 +90,18 @@ export function useUndoRedo(cap: number = DEFAULT_CAP): UseUndoRedoReturn {
     undoStackRef.current = nextStack;
     setUndoStack(nextStack);
 
+    const gen = generationRef.current;
     replayingRef.current = true;
     suppressUndoPushRef.current = true;
     try {
       await op.undo();
+      if (generationRef.current !== gen) return; // cleared mid-replay — drop result
       const nextRedo = [...redoStackRef.current, op];
       redoStackRef.current = nextRedo;
       setRedoStack(nextRedo);
     } catch (err) {
       log.warn("undo failed:", err);
+      if (generationRef.current !== gen) return; // don't resurrect a cleared stack
       // Restore the popped op so the user can retry.
       undoStackRef.current = stack;
       setUndoStack(stack);
@@ -113,16 +120,19 @@ export function useUndoRedo(cap: number = DEFAULT_CAP): UseUndoRedoReturn {
     redoStackRef.current = nextStack;
     setRedoStack(nextStack);
 
+    const gen = generationRef.current;
     replayingRef.current = true;
     suppressUndoPushRef.current = true;
     try {
       await op.redo();
+      if (generationRef.current !== gen) return; // cleared mid-replay — drop result
       const nextUndo = [...undoStackRef.current, op];
       const capped = nextUndo.length > cap ? nextUndo.slice(nextUndo.length - cap) : nextUndo;
       undoStackRef.current = capped;
       setUndoStack(capped);
     } catch (err) {
       log.warn("redo failed:", err);
+      if (generationRef.current !== gen) return; // don't resurrect a cleared stack
       redoStackRef.current = stack;
       setRedoStack(stack);
     } finally {
@@ -132,6 +142,7 @@ export function useUndoRedo(cap: number = DEFAULT_CAP): UseUndoRedoReturn {
   }, [cap]);
 
   const clear = useCallback(() => {
+    generationRef.current += 1; // invalidate any in-flight undo/redo replay
     undoStackRef.current = [];
     redoStackRef.current = [];
     setUndoStack([]);

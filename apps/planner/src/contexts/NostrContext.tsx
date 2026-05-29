@@ -136,6 +136,10 @@ export function useNostr() {
  */
 export function NostrProvider({ children }: { children: ReactNode }) {
   const [pubkey, setPubkey] = useState<string | null>(null);
+  // Mirror of `pubkey` for async callbacks to check identity-staleness after
+  // an await — so a slow profile/relay fetch that resolves after logout (or an
+  // account switch) doesn't repopulate state for the wrong/no identity.
+  const pubkeyRef = useRef<string | null>(null);
   const [relays, setRelays] = useState<string[]>(DEFAULT_RELAYS);
   const [nip65Relays, setNip65Relays] = useState<{ read: string[]; write: string[] }>({ read: [], write: [] });
   const [profile, setProfile] = useState<NostrProfile | null>(null);
@@ -164,6 +168,7 @@ export function NostrProvider({ children }: { children: ReactNode }) {
           limit: 1,
         });
 
+        if (pubkeyRef.current !== pk) return; // logged out / switched mid-fetch
         if (events.length > 0) {
           const parsed = parseRelayList(events[0]);
           if (parsed.all.length > 0) {
@@ -201,6 +206,7 @@ export function NostrProvider({ children }: { children: ReactNode }) {
           authors: [pk],
           limit: 1,
         });
+        if (pubkeyRef.current !== pk) return; // logged out / switched mid-fetch
         if (events.length > 0) {
           const meta = JSON.parse(events[0].content);
           // Validate picture URL: must be HTTPS, must look like an image path,
@@ -255,6 +261,7 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       log.info("login finalized for", pk.slice(0, 8));
       setSigner(s);
       setPubkey(pk);
+      pubkeyRef.current = pk;
       // Wire signer for NIP-42 AUTH — paid relays and some flagged
       // filters won't return events until the connection is authed.
       setRelayAuthSigner(s);
@@ -351,6 +358,7 @@ export function NostrProvider({ children }: { children: ReactNode }) {
     setRelayAuthSigner(null);
     setSigner(null);
     setPubkey(null);
+    pubkeyRef.current = null;
     setRelays(DEFAULT_RELAYS);
     setNip65Relays({ read: [], write: [] });
     setProfile(null);
@@ -525,28 +533,60 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       return () => { cancelled = true; ac.abort(); ladderActiveRef.current = false; };
     }
 
-    if (window.nostr) {
-      // Extension: re-verify with NIP-07
-      window.nostr
-        .getPublicKey()
-        .then(async (pk) => {
+    // NIP-07 auto-login path. Only attempt when the user actually logged in
+    // via an extension last time (loginType === "extension"), or when no
+    // loginType is recorded but an extension is present (legacy sessions
+    // pre-dating the loginType flag — still safe because the saved pubkey
+    // has to match what the extension returns).
+    //
+    // Importantly: do NOT call window.nostr.getPublicKey() for a user who
+    // logged in via nsec/seed on web. They may have an extension installed
+    // for an entirely different identity; asking it returns a mismatch and
+    // we'd kick them to LoginScreen even though their current cached data
+    // is fine (and the session is unrecoverable on web anyway — see below).
+    const isExtensionRestore =
+      window.nostr && (loginType === "extension" || !loginType);
+    if (isExtensionRestore) {
+      // Extensions can take a moment to inject window.nostr and respond to
+      // the first getPublicKey() call (especially on cold tab open). One
+      // retry after a short wait covers the injection race without making
+      // a real failure (user dismissed prompt, different identity) any
+      // slower than it already is — the second attempt still fails fast.
+      const tryExtensionRestore = async () => {
+        const attempt = async (): Promise<{ ok: boolean; pk?: string; mismatch?: boolean }> => {
+          if (!window.nostr) return { ok: false };
+          try {
+            const pk = await window.nostr.getPublicKey();
+            if (pk === saved) return { ok: true, pk };
+            return { ok: false, mismatch: true, pk };
+          } catch {
+            return { ok: false };
+          }
+        };
+        let result = await attempt();
+        if (cancelled) return;
+        // Only retry on a thrown error / not-yet-injected state. A real
+        // pubkey mismatch (user switched identities) shouldn't trigger
+        // another extension prompt — that's noise.
+        if (!result.ok && !result.mismatch) {
+          await new Promise((r) => setTimeout(r, 1500));
           if (cancelled) return;
-          if (pk === saved) {
-            log.debug("NIP-07 pubkey matches saved key, restoring session");
-            const s = new Nip07Signer();
-            if (cancelled) return; // re-check after async gap
-            await finalizeLogin(pk, s);
-          } else {
-            log.debug("NIP-07 pubkey mismatch — not auto-logging in");
-            setAutoLoginState("failed");
-          }
-        })
-        .catch(() => {
-          if (!cancelled) {
-            log.debug("NIP-07 auto-login check failed");
-            setAutoLoginState("failed");
-          }
-        });
+          result = await attempt();
+          if (cancelled) return;
+        }
+        if (result.ok && result.pk) {
+          log.debug("NIP-07 pubkey matches saved key, restoring session");
+          const s = new Nip07Signer();
+          if (cancelled) return;
+          await finalizeLogin(result.pk, s);
+        } else {
+          log.debug(result.mismatch
+            ? "NIP-07 pubkey mismatch — not auto-logging in"
+            : "NIP-07 auto-login check failed");
+          setAutoLoginState("failed");
+        }
+      };
+      void tryExtensionRestore();
     } else if (loginType === "extension" && isStandalonePWA()) {
       // Installed-PWA edge case: the user logged in via a browser extension
       // in their normal browser, then launched from the homescreen where no
@@ -556,8 +596,22 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       // auto-login there.
       log.info("standalone PWA without NIP-07 — user must re-login with bunker/nsec");
       setAutoLoginState("failed");
+    } else if (isTauri() && !loginType) {
+      // Tauri with a saved pubkey but no loginType — the LocalSigner unlock
+      // screen will appear via LoginScreen because it gates on hasStoredKey().
+      // Don't clean up; the user just needs to enter their password.
+      log.debug("Tauri with stored key — awaiting password unlock");
+      setAutoLoginState("failed");
     } else {
-      log.debug("no auto-login method available");
+      // Orphan pubkey: a saved pubkey from a non-restorable web session
+      // (nsec or seed login — nsec is intentionally never persisted on
+      // web). There's no signer to revive. Clear the saved pubkey so the
+      // user lands cleanly on LoginScreen instead of seeing a confusing
+      // "attempting → failed" splash flash, and so hasSavedSession
+      // accurately reflects "no recoverable session".
+      log.debug("no auto-login method available — clearing orphan saved pubkey");
+      localStorage.removeItem("nostr-planner-pubkey");
+      setHasSavedSession(false);
       setAutoLoginState("failed");
     }
 

@@ -134,6 +134,15 @@ export interface RecurrenceRule {
   freq: RecurrenceFreq;
   /** Total number of occurrences to generate (including the first). */
   count: number;
+  /** RRULE INTERVAL multiplier (e.g. every-3-days = interval 3). Defaults to
+   *  1 when absent. `bi-weekly` is modeled via the `freq` enum (weekly×2), so
+   *  this is only populated for intervals the enum can't express — chiefly
+   *  recurrence rules imported from external ICS files. */
+  interval?: number;
+  /** Optional RRULE UNTIL boundary as unix **seconds** (inclusive). When set,
+   *  expansion stops once an instance's start passes it. Imported from ICS;
+   *  the in-app editor only produces COUNT-based rules. */
+  until?: number;
 }
 
 const FREQ_TO_RRULE: Record<RecurrenceFreq, string> = {
@@ -158,8 +167,36 @@ const RRULE_TO_FREQ: Record<string, RecurrenceFreq> = {
  */
 export function toRRule(rule: RecurrenceRule): string {
   const freqStr = FREQ_TO_RRULE[rule.freq];
-  const interval = rule.freq === "bi-weekly" ? ";INTERVAL=2" : "";
+  const intervalNum =
+    rule.freq === "bi-weekly" ? 2 : rule.interval && rule.interval > 1 ? rule.interval : 1;
+  const interval = intervalNum > 1 ? `;INTERVAL=${intervalNum}` : "";
+  // RFC 5545: COUNT and UNTIL are mutually exclusive. Prefer UNTIL when the
+  // rule carries one (preserves an imported boundary on re-export).
+  if (rule.until) {
+    const d = new Date(rule.until * 1000);
+    const p = (n: number) => String(n).padStart(2, "0");
+    const until = `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}T${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`;
+    return `FREQ=${freqStr}${interval};UNTIL=${until}`;
+  }
   return `FREQ=${freqStr}${interval};COUNT=${rule.count}`;
+}
+
+/** Parse an RRULE UNTIL value (`YYYYMMDD` or `YYYYMMDDTHHMMSSZ`) into unix
+ *  seconds. Date-only values resolve to end-of-day UTC so an event ON the
+ *  UNTIL date is still included. Returns null on malformed input. */
+function parseRRuleUntil(raw: string): number | null {
+  const digits = raw.replace(/[^0-9]/g, "");
+  if (digits.length < 8) return null;
+  const y = +digits.slice(0, 4);
+  const mo = +digits.slice(4, 6) - 1;
+  const d = +digits.slice(6, 8);
+  const hasTime = digits.length >= 14;
+  const h = hasTime ? +digits.slice(8, 10) : 23;
+  const mi = hasTime ? +digits.slice(10, 12) : 59;
+  const s = hasTime ? +digits.slice(12, 14) : 59;
+  const ms = Date.UTC(y, mo, d, h, mi, s);
+  if (isNaN(ms)) return null;
+  return Math.floor(ms / 1000);
 }
 
 /**
@@ -180,34 +217,37 @@ export function fromRRule(rrule: string): RecurrenceRule | null {
   }
   let freq = parts.FREQ ? RRULE_TO_FREQ[parts.FREQ] : undefined;
   if (!freq) return null;
-  // INTERVAL=2 on a weekly rule means bi-weekly.
-  if (freq === "weekly" && parts.INTERVAL === "2") freq = "bi-weekly";
+  // Parse INTERVAL generically. INTERVAL=2 on a weekly rule is our
+  // first-class "bi-weekly"; any other interval is preserved on the rule so
+  // expansion uses the correct cadence instead of silently collapsing to 1.
+  const intervalRaw = parts.INTERVAL ? parseInt(parts.INTERVAL) : 1;
+  const interval = Number.isFinite(intervalRaw) && intervalRaw > 0 ? intervalRaw : 1;
+  if (freq === "weekly" && interval === 2) freq = "bi-weekly";
   const MAX_RECURRENCE = 365;
 
-  let count: number;
+  const rule: RecurrenceRule = { freq, count: 52 };
+  // Only attach a non-trivial interval the freq enum can't already express.
+  if (freq !== "bi-weekly" && interval > 1) rule.interval = interval;
+
   if (parts.COUNT) {
     const raw = parseInt(parts.COUNT);
-    count = Math.min(Math.max(1, raw || 52), MAX_RECURRENCE);
+    rule.count = Math.min(Math.max(1, raw || 52), MAX_RECURRENCE);
   } else if (parts.UNTIL) {
-    // UNTIL=YYYYMMDD or UNTIL=YYYYMMDDTHHMMSSZ — estimate count from the UNTIL date.
-    // We don't have the event's start date here, so we use a generous estimate
-    // based on the span from epoch to UNTIL. The caller (expandRecurringEvent)
-    // will cap the actual expansion anyway.
-    const untilStr = parts.UNTIL.replace(/[^0-9]/g, "").slice(0, 8);
-    const untilDate = new Date(`${untilStr.slice(0, 4)}-${untilStr.slice(4, 6)}-${untilStr.slice(6, 8)}`);
-    if (!isNaN(untilDate.getTime())) {
-      // Use a generous default: enough recurrences to cover ~2 years of the
-      // given frequency, capped by MAX_RECURRENCE.
-      const freqDefaults: Record<RecurrenceFreq, number> = { daily: 365, weekly: 104, "bi-weekly": 52, monthly: 24, yearly: 5 };
-      count = Math.min(freqDefaults[freq], MAX_RECURRENCE);
+    // Honor the actual UNTIL boundary instead of fabricating a frequency-based
+    // count. expandRecurringEvent stops generating instances once it passes
+    // `until`; count is just the safety cap.
+    const until = parseRRuleUntil(parts.UNTIL);
+    if (until !== null) {
+      rule.until = until;
+      rule.count = MAX_RECURRENCE;
     } else {
-      count = 52;
+      rule.count = 52;
     }
   } else {
-    count = 52; // default: ~1 year of weekly
+    rule.count = 52; // default: ~1 year of weekly
   }
 
-  return { freq, count };
+  return rule;
 }
 
 /**
@@ -453,16 +493,25 @@ export function parseCalendarCollection(event: {
   content: string;
 }): CalendarCollection | null {
   const dTag = event.tags.find((t) => t[0] === "d")?.[1];
+  // Bound the title like parseCalendarEvent does — relay strings are
+  // untrusted and an unbounded title is a memory / UI-spoofing vector.
   const title =
-    event.tags.find((t) => t[0] === "title")?.[1] || "Untitled Calendar";
+    safeStr(event.tags.find((t) => t[0] === "title")?.[1], 300) || "Untitled Calendar";
   const ATAG_RE = /^\d+:[0-9a-f]{64}:.{1,256}$/;
   // Cap to 1000 refs to prevent memory abuse from maliciously crafted events
-  // (relay size limits keep this well below 1000 in practice).
-  const eventRefs = event.tags
-    .filter((t) => t[0] === "a" && ATAG_RE.test(t[1]))
-    .slice(0, 1000)
-    .map((t) => t[1]);
-  const color = event.tags.find((t) => t[0] === "color")?.[1];
+  // (relay size limits keep this well below 1000 in practice). Dedupe so a
+  // padded event can't inflate the list with repeats.
+  const eventRefs = [
+    ...new Set(
+      event.tags
+        .filter((t) => t[0] === "a" && ATAG_RE.test(t[1]))
+        .map((t) => t[1])
+    ),
+  ].slice(0, 1000);
+  // Only accept a well-formed hex color; anything else is dropped so it
+  // can't be injected into a downstream style attribute.
+  const rawColor = event.tags.find((t) => t[0] === "color")?.[1];
+  const color = rawColor && /^#[0-9a-fA-F]{3,8}$/.test(rawColor) ? rawColor : undefined;
 
   if (!dTag) return null;
   return { dTag, title, eventRefs, color };
@@ -633,17 +682,22 @@ export function advanceDate(base: Date, freq: RecurrenceFreq, count: number): Da
 export function expandRecurringEvent(event: CalendarEvent): CalendarEvent[] {
   if (!event.recurrence) return [event];
 
-  const { freq, count } = event.recurrence;
+  const { freq, count, interval = 1, until } = event.recurrence;
   const instances: CalendarEvent[] = [];
-  const duration = event.end
-    ? event.end.getTime() - event.start.getTime()
-    : 0;
   const MAX_EXPANSION = 365;
   const safeCount = Math.min(count, MAX_EXPANSION);
+  const untilMs = until ? until * 1000 : null;
 
   for (let i = 0; i < safeCount; i++) {
-    const start = advanceDate(event.start, freq, i);
-    const end = duration ? new Date(start.getTime() + duration) : undefined;
+    const step = i * interval;
+    const start = advanceDate(event.start, freq, step);
+    // Honor the UNTIL boundary: stop once an instance starts after it.
+    if (untilMs !== null && start.getTime() > untilMs) break;
+    // Recompute `end` by advancing the original end by the same step, rather
+    // than adding a fixed millisecond duration. This preserves wall-clock
+    // across DST transitions (a 9-10am meeting stays 9-10am even when the
+    // clocks change), which start+duration gets wrong by an hour.
+    const end = event.end ? advanceDate(event.end, freq, step) : undefined;
 
     instances.push({
       ...event,

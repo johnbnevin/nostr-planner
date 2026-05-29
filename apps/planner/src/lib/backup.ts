@@ -841,9 +841,20 @@ export async function gcBlobsOnLogin(
   if (toDelete.length === 0) {
     log.info(`gc: nothing to prune (${blobs.length} blobs, all within keep window)`);
   } else {
-    log.info(`gc: pruning ${toDelete.length} blob(s); keeping ${keepShas.size}`);
+    log.info(`gc: ${toDelete.length} candidate(s) outside keep window; keeping ${keepShas.size}`);
     // Sequential so we don't flood a single signer with parallel delete-auth calls.
     for (const sha of toDelete) {
+      // Confirm each candidate is actually one of OUR snapshots before
+      // deleting. listUserBlobs enumerates every blob the pubkey owns —
+      // including blobs written by other Nostr apps under the same identity.
+      // Deleting one of those just because it's older than our keep window
+      // would be a destructive cross-app side effect.
+      const handle = blobs.find((b) => b.sha256 === sha);
+      const server = handle?.server;
+      if (!server || !(await confirmPlannerBlob(server, sha))) {
+        log.debug(`gc: skipping ${sha.slice(0, 8)} — not a confirmed planner snapshot`);
+        continue;
+      }
       try { await deletePreviousBlob(sha, signEvent); }
       catch (err) { log.info(`gc: delete of ${sha.slice(0, 8)} failed (best-effort):`, err); }
     }
@@ -856,6 +867,45 @@ export async function gcBlobsOnLogin(
     .filter((sha) => keepShas.has(sha) && sha !== currentSha)
     .slice(0, 2);
   return priorKept;
+}
+
+/**
+ * Cheap structural check: does this blob body look like a planner backup
+ * envelope? Planner snapshots are JSON of exactly `{ v:1, key, iv, data }`
+ * (see {@link wrapEnvelope}). We never DELETE a blob during login GC unless
+ * it matches — {@link listUserBlobs} returns EVERY blob the pubkey owns on a
+ * server, including ones written by *other* Nostr apps under the same
+ * identity (avatars, notes, other backups). Blanket-deleting by recency
+ * would silently destroy that unrelated data.
+ */
+function looksLikePlannerEnvelope(body: string): boolean {
+  try {
+    const o = JSON.parse(body) as Record<string, unknown>;
+    return !!o &&
+      o.v === 1 &&
+      typeof o.key === "string" &&
+      typeof o.iv === "string" &&
+      typeof o.data === "string";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fetch a candidate blob and confirm it's a planner envelope before we'd
+ * ever delete it. Best-effort: any fetch/parse failure returns false — we
+ * never delete what we can't positively confirm as ours.
+ */
+async function confirmPlannerBlob(server: string, sha256: string): Promise<boolean> {
+  try {
+    const res = await fetchWithTimeout(`${server}/${sha256}`, {}, 10_000);
+    if (!res.ok) return false;
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength > MAX_BLOB_BYTES) return false;
+    return looksLikePlannerEnvelope(new TextDecoder().decode(buf));
+  } catch {
+    return false;
+  }
 }
 
 async function findPointer(
@@ -878,7 +928,14 @@ async function findPointer(
   const evt = events[0];
   const sha256 = evt.tags.find((t) => t[0] === "x")?.[1];
   if (!sha256) return null; // cleared pointer
-  const servers = evt.tags.filter((t) => t[0] === "server").map((t) => t[1]);
+  // The pointer is signature-verified as self-authored (queryEvents drops
+  // bad sigs), but defense-in-depth: only keep http(s) server URLs so a
+  // malformed/spoofed tag can't make raceFetch dial a javascript:/file:/
+  // data: URL.
+  const servers = evt.tags
+    .filter((t) => t[0] === "server")
+    .map((t) => t[1])
+    .filter((s) => typeof s === "string" && /^https?:\/\//i.test(s));
   return { sha256, servers };
 }
 

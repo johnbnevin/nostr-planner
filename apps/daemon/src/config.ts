@@ -19,9 +19,6 @@ export interface Config {
   /** When true, trust the X-Forwarded-For header for client IP detection.
    *  Only enable if the daemon is behind a trusted reverse proxy. */
   trustProxy: boolean;
-  /** FCM legacy server key. Required to deliver pushes to Android Tauri
-   *  builds. Optional — Web Push works without it. */
-  fcmServerKey: string;
 }
 
 /**
@@ -75,6 +72,13 @@ export function loadConfig(): Config {
             console.warn(`[config] ignoring invalid relay URL (must start with wss:// or ws://): ${r}`);
             return false;
           }
+          // Plaintext ws:// exposes the bot↔relay traffic (bot pubkey + the
+          // pubkeys it converses with — the social graph) to network
+          // observers. Allow it only for loopback (local dev); warn loudly
+          // for any non-local ws:// host.
+          if (r.startsWith("ws://") && !/^ws:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(r)) {
+            console.warn(`[config] WARNING: plaintext ws:// relay exposes traffic metadata — use wss:// in production: ${r}`);
+          }
           return true;
         })
       : [
@@ -88,6 +92,5 @@ export function loadConfig(): Config {
     maxStaleHours: parseIntEnv("MAX_STALE_HOURS", 36, 1, 720),
     caldavPort: parseIntEnv("CALDAV_PORT", 0, 0, 65535), // 0 = disabled
     trustProxy: process.env.TRUST_PROXY === "1",
-    fcmServerKey: process.env.FCM_SERVER_KEY ?? "",
   };
 }

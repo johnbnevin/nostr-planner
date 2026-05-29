@@ -1,6 +1,8 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { useModalA11y } from "../hooks/useModalA11y";
 import { Check, Copy, Share2, X, Smartphone } from "lucide-react";
 import { useBuildShareUrl } from "../hooks/useViewShare";
+import { copyToClipboard } from "../lib/clipboard";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useSettings } from "../contexts/SettingsContext";
 
@@ -17,18 +19,25 @@ interface ShareViewModalProps {
  */
 export function ShareViewModal({ onClose }: ShareViewModalProps) {
   const build = useBuildShareUrl();
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
   const { calendars, activeCalendarIds, activeTags, viewMode } = useCalendar();
   const { showDaily, showLists } = useSettings();
 
   const url = useMemo(() => build(), [build]);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const copyUrl = async () => {
-    try {
-      await navigator.clipboard.writeText(url);
+    const ok = await copyToClipboard(url);
+    if (ok) {
+      setCopyFailed(false);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch { /* clipboard denied */ }
+    } else {
+      // Surface a manual-copy fallback rather than appearing to do nothing.
+      setCopyFailed(true);
+    }
   };
 
   const share = async () => {
@@ -52,8 +61,15 @@ export function ShareViewModal({ onClose }: ShareViewModalProps) {
     .map((c) => c.title);
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[85vh] overflow-y-auto">
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Share view"
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[85vh] overflow-y-auto"
+      >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
             <Share2 className="w-5 h-5" />
@@ -122,6 +138,11 @@ export function ShareViewModal({ onClose }: ShareViewModalProps) {
                 {copied ? "Copied" : "Copy"}
               </button>
             </div>
+            {copyFailed && (
+              <p className="text-xs text-amber-600 mt-1">
+                Couldn’t copy automatically — tap the link above to select it, then copy manually.
+              </p>
+            )}
           </div>
 
           {/* How-to */}

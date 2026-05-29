@@ -1,11 +1,11 @@
-import type { CalendarEvent } from "./nostr";
-import { toRRule } from "./nostr";
+import { addDays } from "date-fns";
+import type { CalendarEvent, RecurrenceRule } from "./nostr";
+import { toRRule, fromRRule } from "./nostr";
 import { saveFile } from "./fileSave";
 import {
   escapeIcal,
-  sanitizeRRule,
   foldLine,
-  formatIcalDate,
+  buildVEvent,
 } from "@nostr-planner/ical-utils";
 
 // ── Export ─────────────────────────────────────────────────────────────
@@ -21,47 +21,24 @@ export function exportToIcal(events: CalendarEvent[], calendarName = "Planner"):
   ];
 
   for (const event of events) {
-    lines.push("BEGIN:VEVENT");
-    lines.push(foldLine(`UID:${event.dTag}@nostr-planner`));
-
-    // DTSTAMP from created_at (UTC)
-    const dtstamp = formatIcalDate(new Date(event.createdAt * 1000), false);
-    lines.push(`DTSTAMP:${dtstamp}`);
-
-    if (event.allDay) {
-      // All-day dates stored as local midnight — use local accessors
-      lines.push(`DTSTART;VALUE=DATE:${formatIcalDate(event.start, true, true)}`);
-      if (event.end) {
-        lines.push(`DTEND;VALUE=DATE:${formatIcalDate(event.end, true, true)}`);
-      }
-    } else {
-      lines.push(`DTSTART:${formatIcalDate(event.start, false)}`);
-      if (event.end) {
-        lines.push(`DTEND:${formatIcalDate(event.end, false)}`);
-      }
-    }
-
-    lines.push(foldLine(`SUMMARY:${escapeIcal(event.title)}`));
-
-    if (event.content) {
-      lines.push(foldLine(`DESCRIPTION:${escapeIcal(event.content)}`));
-    }
-    if (event.location) {
-      lines.push(foldLine(`LOCATION:${escapeIcal(event.location)}`));
-    }
-    if (event.link && /^https?:\/\//i.test(event.link)) {
-      // Only include http(s) URLs; strip bare CR/LF to prevent injection
-      lines.push(foldLine(`URL:${event.link.replace(/[\r\n]/g, "")}`));
-    }
-    if (event.hashtags.length > 0) {
-      lines.push(foldLine(`CATEGORIES:${event.hashtags.map(escapeIcal).join(",")}`));
-    }
-    if (event.recurrence) {
-      const rrule = sanitizeRRule(toRRule(event.recurrence));
-      if (rrule) lines.push(foldLine(`RRULE:${rrule}`));
-    }
-
-    lines.push("END:VEVENT");
+    // VEVENT assembly is shared with the daemon's CalDAV feed via ical-utils
+    // so the two feeds can't drift. `end` is our inclusive last day; buildVEvent
+    // emits the exclusive DTEND RFC 5545 requires. Local date accessors because
+    // all-day events are stored at local midnight.
+    lines.push(...buildVEvent({
+      uid: event.dTag,
+      dtstamp: new Date(event.createdAt * 1000),
+      allDay: event.allDay,
+      start: event.start,
+      end: event.end,
+      summary: event.title,
+      description: event.content || undefined,
+      location: event.location || undefined,
+      url: event.link || undefined,
+      categories: event.hashtags.length > 0 ? event.hashtags : undefined,
+      rrule: event.recurrence ? toRRule(event.recurrence) : undefined,
+      useLocalDates: true,
+    }));
   }
 
   lines.push("END:VCALENDAR");
@@ -83,6 +60,43 @@ export interface ParsedIcalEvent {
   end?: Date;
   allDay: boolean;
   hashtags: string[];
+  /** Recurrence rule parsed from an RRULE property, if present. The importer
+   *  materializes individual instances from this. */
+  recurrence?: RecurrenceRule;
+}
+
+/**
+ * Convert wall-clock components in an IANA timezone to the corresponding UTC
+ * instant. Uses the standard Intl offset-probe: format a UTC guess in the
+ * target zone, measure how far the zone's wall clock is from UTC at that
+ * instant, and correct. Returns null for an unknown timezone. (Off by an hour
+ * only for the rare ambiguous/nonexistent local times exactly at a DST
+ * transition — acceptable for import.)
+ */
+function zonedWallClockToUtc(
+  y: number, mo: number, d: number, h: number, min: number, s: number, tz: string
+): Date | null {
+  try {
+    const guess = Date.UTC(y, mo, d, h, min, s);
+    const dtf = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz, hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+    const parts = dtf.formatToParts(new Date(guess));
+    const get = (t: string) => parseInt(parts.find((p) => p.type === t)!.value, 10);
+    const zoneView = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+    const offset = zoneView - guess; // how far ahead of UTC the zone is
+    return new Date(guess - offset);
+  } catch {
+    return null; // invalid TZID
+  }
+}
+
+/** Extract a `TZID=...` parameter value from a property's params string. */
+function extractTzid(params: string): string | null {
+  const m = params.match(/TZID=([^;:]+)/i);
+  return m ? m[1] : null;
 }
 
 function parseIcalDate(value: string, params: string): { date: Date; allDay: boolean } {
@@ -100,7 +114,12 @@ function parseIcalDate(value: string, params: string): { date: Date; allDay: boo
     const mo = parseInt(clean.slice(4, 6));
     const d = parseInt(clean.slice(6, 8));
     if (y < 1 || y > 9999 || mo < 1 || mo > 12 || d < 1 || d > 31) return { date: new Date(NaN), allDay: true };
-    return { date: new Date(y, mo - 1, d), allDay: true };
+    const date = new Date(y, mo - 1, d);
+    // Reject impossible calendar dates (e.g. Feb 31 rolls over to Mar 3).
+    if (date.getFullYear() !== y || date.getMonth() !== mo - 1 || date.getDate() !== d) {
+      return { date: new Date(NaN), allDay: true };
+    }
+    return { date, allDay: true };
   }
 
   // YYYYMMDDTHHmmss[Z]
@@ -114,11 +133,25 @@ function parseIcalDate(value: string, params: string): { date: Date; allDay: boo
     return { date: new Date(NaN), allDay: false };
   }
   const m = mo - 1;
+  // Reject impossible calendar dates before they silently roll over.
+  const probe = new Date(y, m, d);
+  if (probe.getFullYear() !== y || probe.getMonth() !== m || probe.getDate() !== d) {
+    return { date: new Date(NaN), allDay: false };
+  }
 
   if (isUtc) {
     return { date: new Date(Date.UTC(y, m, d, h, min, s)), allDay: false };
   }
-  // Floating / local time — use local timezone (TZID handling not implemented)
+  // Zoned time: convert the wall-clock from the declared TZID to a UTC instant
+  // so e.g. an America/New_York event imports at the correct moment regardless
+  // of the importer's own timezone.
+  const tzid = extractTzid(params);
+  if (tzid) {
+    const zoned = zonedWallClockToUtc(y, m, d, h, min, s, tzid);
+    if (zoned) return { date: zoned, allDay: false };
+    // Unknown TZID — fall through to floating/local interpretation.
+  }
+  // Floating / local time — interpret in the importer's local timezone.
   return { date: new Date(y, m, d, h, min, s), allDay: false };
 }
 
@@ -148,16 +181,25 @@ export function parseIcalFile(icalText: string): ParsedIcalEvent[] {
 
     if (line === "END:VEVENT") {
       inEvent = false;
-      if (current.title && current.start) {
+      // A Date(NaN) is still truthy — require a *valid* start so events with
+      // an impossible/malformed DTSTART are dropped rather than emitted with
+      // an invalid date.
+      if (current.title && current.start && !isNaN(current.start.getTime())) {
+        // Drop a non-sensical end that landed before the start (can happen
+        // after the all-day exclusive→inclusive −1 conversion on a degenerate
+        // single-day DTEND), so downstream span math stays well-formed.
+        let end = current.end;
+        if (end && end.getTime() < current.start.getTime()) end = undefined;
         events.push({
           title: current.title,
           description: current.description || "",
           location: current.location,
           link: current.link,
           start: current.start,
-          end: current.end,
+          end,
           allDay: current.allDay ?? false,
           hashtags: current.hashtags || [],
+          recurrence: current.recurrence,
         });
       }
       continue;
@@ -199,7 +241,21 @@ export function parseIcalFile(icalText: string): ParsedIcalEvent[] {
       }
       case "DTEND": {
         const parsed = parseIcalDate(value, params);
-        current.end = parsed.date;
+        // RFC 5545 DATE DTEND is exclusive; convert to our inclusive internal
+        // end by subtracting a day. Timed (DATE-TIME) ends are instants and
+        // need no adjustment.
+        if (parsed.allDay && !isNaN(parsed.date.getTime())) {
+          current.end = addDays(parsed.date, -1);
+        } else {
+          current.end = parsed.date;
+        }
+        break;
+      }
+      case "RRULE": {
+        // Preserve recurrence so export→import round-trips (and external
+        // recurring events) don't silently collapse to a single occurrence.
+        const rule = fromRRule(value);
+        if (rule) current.recurrence = rule;
         break;
       }
       case "CATEGORIES":

@@ -14,8 +14,10 @@
  *      when the user legitimately deleted data and wants it published.
  */
 
+import { useRef } from "react";
 import { ShieldAlert, X, AlertTriangle } from "lucide-react";
 import type { BlockedDetails } from "../hooks/useAutoBackup";
+import { useModalA11y } from "../hooks/useModalA11y";
 
 interface Props {
   details: BlockedDetails;
@@ -32,6 +34,8 @@ const KIND_LABEL: Record<BlockedDetails["kind"], string> = {
 };
 
 export function ShrinkGuardModal({ details, onClose, onProceedAnyway, onDiscardLocal }: Props) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
   const r = details.remote;
   const w = details.working;
   const row = (label: string, remoteN: number, workingN: number) => {
@@ -48,8 +52,15 @@ export function ShrinkGuardModal({ details, onClose, onProceedAnyway, onDiscardL
   };
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Backup safety warning"
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-2xl max-w-md w-full"
+      >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold flex items-center gap-2">
             <ShieldAlert className="w-5 h-5 text-amber-600" /> Save blocked

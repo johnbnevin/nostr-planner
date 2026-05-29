@@ -37,6 +37,32 @@ function snap(events: CalendarEvent[], savedAt = "2026-05-15T12:00:00Z"): Snapsh
   };
 }
 
+describe("mergeSnapshots — determinism & tombstones", () => {
+  it("is pure: savedAt is the later input, never wall-clock-now", () => {
+    const local = snap([baseEvent({ updatedAt: 100 })], "2026-05-15T10:00:00.000Z");
+    const remote = snap([baseEvent({ updatedAt: 200 })], "2026-05-15T11:00:00.000Z");
+    const a = mergeSnapshots(local, remote);
+    const b = mergeSnapshots(local, remote);
+    expect(a.savedAt).toBe("2026-05-15T11:00:00.000Z");
+    expect(a.savedAt).toBe(b.savedAt); // deterministic across calls
+  });
+
+  it("is commutative on the merged event set", () => {
+    const local = snap([baseEvent({ title: "L", updatedAt: 200 })]);
+    const remote = snap([baseEvent({ title: "R", updatedAt: 200 })]);
+    const ab = mergeSnapshots(local, remote);
+    const ba = mergeSnapshots(remote, local);
+    expect(ab.events[0].title).toBe(ba.events[0].title); // same winner either order
+  });
+
+  it("keeps a tombstone even when the other side edited later (monotonic)", () => {
+    const deleted = snap([baseEvent({ deleted: true, updatedAt: 100 })]);
+    const edited = snap([baseEvent({ title: "resurrected", updatedAt: 999 })]);
+    expect(mergeSnapshots(deleted, edited).events[0].deleted).toBe(true);
+    expect(mergeSnapshots(edited, deleted).events[0].deleted).toBe(true);
+  });
+});
+
 describe("mergeSnapshots — whole-entity LWW (backward compat)", () => {
   it("picks the entity with the later top-level updatedAt", () => {
     const local = snap([baseEvent({ title: "Lunch (local)", updatedAt: 100 })]);

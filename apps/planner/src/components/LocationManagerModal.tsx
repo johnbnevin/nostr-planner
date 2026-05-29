@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { useModalA11y } from "../hooks/useModalA11y";
 import { X, Pencil, Trash2, Check, Loader2 } from "lucide-react";
 import { useCalendar } from "../contexts/CalendarContext";
 
@@ -13,6 +14,8 @@ interface LocationManagerModalProps {
  */
 export function LocationManagerModal({ onClose }: LocationManagerModalProps) {
   const { events, renameLocation, deleteLocation } = useCalendar();
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
 
   const locationRows = useMemo(() => {
     const counts = new Map<string, { display: string; count: number }>();
@@ -71,8 +74,15 @@ export function LocationManagerModal({ onClose }: LocationManagerModalProps) {
   };
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[85vh] flex flex-col">
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Manage locations"
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[85vh] flex flex-col"
+      >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">Manage locations</h2>
           <button

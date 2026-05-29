@@ -56,7 +56,7 @@ class ErrorBoundary extends Component<
 }
 
 function AppContent() {
-  const { pubkey, hasSavedSession, autoLoginState } = useNostr();
+  const { pubkey, hasSavedSession, autoLoginState, reconnectStatus } = useNostr();
   const [forceLoginScreen, setForceLoginScreen] = useState(false);
 
   if (!pubkey) {
@@ -64,10 +64,20 @@ function AppContent() {
     // ladder is in flight. The ladder retries persistently with backoff
     // (see reconnectBunkerWithBackoff), so transient mobile/PWA tab kills
     // no longer drop the user out to the login screen.
+    //
+    // Also keep the splash up when the bunker ladder has exhausted — the
+    // user gets the "Couldn't reconnect" UI with explicit "use different
+    // login" / "sign out" options, rather than being silently dumped at
+    // LoginScreen as if they'd logged out. The exhausted phase only
+    // appears for bunker sessions; for NIP-07 (failed-without-status) we
+    // still drop to LoginScreen because the extension itself is the
+    // recovery affordance.
     const showReconnect =
       !forceLoginScreen &&
       hasSavedSession &&
-      (autoLoginState === "attempting" || autoLoginState === "reconnecting");
+      (autoLoginState === "attempting" ||
+        autoLoginState === "reconnecting" ||
+        (autoLoginState === "failed" && reconnectStatus?.phase === "exhausted"));
 
     if (showReconnect) {
       return (

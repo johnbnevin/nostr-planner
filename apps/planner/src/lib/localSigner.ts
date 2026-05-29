@@ -63,6 +63,46 @@ const STORE_FILE = "planner.json";
 /** Key under which the NIP-49 ncryptsec string is stored in the JSON file. */
 const STORE_KEY = "ncryptsec";
 
+/** Order of the secp256k1 group. A valid secret key is an integer in
+ *  [1, n-1]; 0 and anything ≥ n are not valid scalars. */
+const SECP256K1_N = BigInt(
+  "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+);
+
+/**
+ * Validate that `bytes` is a usable secp256k1 secret key: exactly 32 bytes,
+ * non-zero, and strictly below the group order. Garbage-in (wrong length,
+ * all-zero, or an out-of-range scalar) otherwise yields an undefined/edge
+ * keypair or an opaque low-level throw, so we reject it explicitly with a
+ * clear message. Returns the same array for chaining.
+ */
+function assertValidSecretKey(bytes: Uint8Array): Uint8Array {
+  if (bytes.length !== 32) {
+    throw new Error("Invalid private key: must be exactly 32 bytes");
+  }
+  let value = 0n;
+  let allZero = true;
+  for (const b of bytes) {
+    if (b !== 0) allZero = false;
+    value = (value << 8n) | BigInt(b);
+  }
+  if (allZero) throw new Error("Invalid private key: key is zero");
+  if (value >= SECP256K1_N) {
+    throw new Error("Invalid private key: out of secp256k1 range");
+  }
+  return bytes;
+}
+
+/** Thrown by {@link LocalSigner.loadFromStore} when a stored key exists but
+ *  could not be decrypted (wrong password or tampered/corrupt blob). Lets
+ *  callers distinguish this from "no key stored" (which returns null). */
+export class StoredKeyDecryptError extends Error {
+  constructor(message = "Could not decrypt stored key (wrong password or corrupt data)") {
+    super(message);
+    this.name = "StoredKeyDecryptError";
+  }
+}
+
 /**
  * A {@link NostrSigner} implementation that holds the private key directly
  * in memory and performs all cryptographic operations locally.
@@ -108,14 +148,23 @@ export class LocalSigner implements NostrSigner {
    * @throws {Error} If the bech32 prefix is not `nsec` or the hex is invalid.
    */
   static fromKey(nsecOrHex: string): LocalSigner {
-    if (nsecOrHex.startsWith("nsec")) {
+    const input = nsecOrHex.trim();
+    if (input.startsWith("nsec")) {
       // NIP-19 bech32 decoding — extract the raw 32-byte key
-      const decoded = decode(nsecOrHex);
+      let decoded: ReturnType<typeof decode>;
+      try {
+        decoded = decode(input);
+      } catch {
+        throw new Error("Invalid nsec: not a valid bech32 key");
+      }
       if (decoded.type !== "nsec") throw new Error("Invalid nsec");
-      return new LocalSigner(decoded.data);
+      return new LocalSigner(assertValidSecretKey(decoded.data as Uint8Array));
     }
-    // Assume raw hex — convert to bytes
-    return new LocalSigner(hexToBytes(nsecOrHex));
+    // Assume raw hex — must be exactly 64 hex chars before we touch it.
+    if (!/^[0-9a-fA-F]{64}$/.test(input)) {
+      throw new Error("Invalid private key: expected an nsec1… or 64-character hex key");
+    }
+    return new LocalSigner(assertValidSecretKey(hexToBytes(input)));
   }
 
   /**
@@ -251,23 +300,35 @@ export class LocalSigner implements NostrSigner {
    *    construct a new {@link LocalSigner}.
    *
    * @param password - The same password used during {@link saveToStore}.
-   * @returns A new LocalSigner, or `null` if no stored key exists or
-   *   decryption fails (wrong password, corrupt data, or non-Tauri env).
+   * @returns A new LocalSigner, or `null` if no stored key exists (or not in
+   *   a Tauri runtime).
+   * @throws {StoredKeyDecryptError} If a key IS stored but cannot be
+   *   decrypted — wrong password or a tampered/corrupt blob. Distinguishing
+   *   this from "no key" lets the UI warn about a corrupt store instead of
+   *   silently treating the device as fresh.
    */
   static async loadFromStore(password: string): Promise<LocalSigner | null> {
     if (!isTauri()) return null;
+    let ncryptsec: string | null | undefined;
     try {
       const { Store } = await import("@tauri-apps/plugin-store");
       const store = await Store.load(STORE_FILE);
       // Read the NIP-49 encrypted blob from disk
-      const ncryptsec = await store.get<string>(STORE_KEY);
-      if (!ncryptsec) return null;
+      ncryptsec = await store.get<string>(STORE_KEY);
+    } catch {
+      // Store unreadable (missing Tauri runtime, IO error) — treat as "no key".
+      return null;
+    }
+    if (!ncryptsec) return null;
+    try {
       // NIP-49 decrypt: bech32 decode -> scrypt KDF -> XChaCha20-Poly1305 decrypt
       const secretKey = nip49.decrypt(ncryptsec, password);
-      return new LocalSigner(secretKey);
+      return new LocalSigner(assertValidSecretKey(secretKey));
     } catch {
-      // Wrong password, corrupt store, or missing Tauri runtime
-      return null;
+      // A key exists but decryption/validation failed: wrong password or a
+      // tampered blob. Surface this distinctly so callers don't conflate it
+      // with an empty store.
+      throw new StoredKeyDecryptError();
     }
   }
 

@@ -28,9 +28,6 @@ import { useNostr } from "./NostrContext";
 import { useCalendar } from "./CalendarContext";
 import { generateDTag } from "../lib/nostr";
 import { withFieldStamps } from "../lib/merge";
-import { logger } from "../lib/logger";
-
-const log = logger("tasks");
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -123,11 +120,6 @@ export function useTasks() {
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-/** Debounce delay for the legacy publish timer (ms). Both publishers
- *  are now no-ops (tasks live in the Blossom snapshot only) but the
- *  debounce plumbing stays to preserve call-site semantics. */
-const PUBLISH_DEBOUNCE_MS = 1500;
-
 // ── Provider ───────────────────────────────────────────────────────────
 
 export function TasksProvider({ children }: { children: ReactNode }) {
@@ -148,12 +140,6 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   const habitsRef = useRef(habits);
   const completionsRef = useRef(completions);
   const listsRef = useRef(lists);
-
-  // Tracks in-flight publishes. While > 0, fetchData() skips overwriting
-  // local state — the relay may not have received the latest write yet, so
-  // fetching would clobber the optimistic update and cause green dots to
-  // disappear momentarily.
-  const publishingRef = useRef(0);
 
   // Sync refs on render (effects are too late — rapid sequential operations
   // would read stale ref values between setX() and the next effect cycle).
@@ -186,101 +172,21 @@ export function TasksProvider({ children }: { children: ReactNode }) {
 
   // ── Raw publish helpers (called by debounce, not by actions) ─────
 
-  /**
-   * Serialize and publish the daily habits + completions to relays.
-   * Prunes stale completions and optionally NIP-44 encrypts before signing.
-   */
+  // ── Persistence ─────────────────────────────────────────────────
+  //
   // Daily habits and task lists are strictly single-user, private-personal
-  // data. In v1.16.4b we moved all private calendar data off the relays
-  // (Blossom snapshot is the single source of truth + cross-device sync
-  // channel). These tasks publishers were left on the relay path by
-  // oversight — each edit was firing an immediate kind-30078 publish to
-  // the primary relay, which is exactly the "any change is triggering
-  // upload immediately" symptom the autosave debounce couldn't explain.
+  // data. Since v1.16.4b ALL private data lives in the Blossom snapshot (the
+  // single source of truth + cross-device sync channel), not on relays. State
+  // updates optimistically via setHabits / setLists; the fingerprint in
+  // useAutoBackup picks up the change and the next snapshot upload (≈10s)
+  // carries it to every device.
   //
-  // Now they're intentional no-ops: state still updates optimistically
-  // via setHabits / setLists, the fingerprint in useAutoBackup picks up
-  // the change, and 10 s later the Blossom snapshot upload carries the
-  // new state to every device. Signing + encrypting + publishing per
-  // keystroke was pure overhead.
-  //
-  // Signature preserved so the dozens of callers below don't churn; we
-  // just skip the relay hop entirely. publishingRef still bumps so any
-  // in-flight indicators that watch it behave as before.
-  const publishDaily = useCallback(
-    async (_newHabits: DailyHabit[], _newCompletions: Record<string, string[]>) => {
-      if (!pubkey) return;
-      publishingRef.current++;
-      try {
-        // no relay publish — Blossom snapshot carries the state
-      } finally {
-        publishingRef.current--;
-      }
-    },
-    [pubkey]
-  );
-
-  const publishLists = useCallback(
-    async (_newLists: UserList[]) => {
-      if (!pubkey) return;
-      publishingRef.current++;
-      try {
-        // no relay publish — Blossom snapshot carries the state
-      } finally {
-        publishingRef.current--;
-      }
-    },
-    [pubkey]
-  );
-
-  // ── Debounced publish scheduling ────────────────────────────────
-  //
-  // Actions update React state immediately (optimistic UI), then call
-  // scheduleDailyPublish() / scheduleListsPublish() which resets a
-  // debounce timer. When the timer fires it reads the latest state
-  // from refs and does one publish. Rapid clicks (e.g. checking off
-  // 5 habits) coalesce into a single relay write.
-
-  const dailyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const listsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const flushDaily = useCallback(() => {
-    if (dailyTimerRef.current !== null) {
-      clearTimeout(dailyTimerRef.current);
-      dailyTimerRef.current = null;
-    }
-    publishDaily(habitsRef.current, completionsRef.current).catch((err) =>
-      log.error("debounced daily publish failed", err)
-    );
-  }, [publishDaily]);
-
-  const flushLists = useCallback(() => {
-    if (listsTimerRef.current !== null) {
-      clearTimeout(listsTimerRef.current);
-      listsTimerRef.current = null;
-    }
-    publishLists(listsRef.current).catch((err) =>
-      log.error("debounced lists publish failed", err)
-    );
-  }, [publishLists]);
-
-  const scheduleDailyPublish = useCallback(() => {
-    if (dailyTimerRef.current !== null) clearTimeout(dailyTimerRef.current);
-    dailyTimerRef.current = setTimeout(flushDaily, PUBLISH_DEBOUNCE_MS);
-  }, [flushDaily]);
-
-  const scheduleListsPublish = useCallback(() => {
-    if (listsTimerRef.current !== null) clearTimeout(listsTimerRef.current);
-    listsTimerRef.current = setTimeout(flushLists, PUBLISH_DEBOUNCE_MS);
-  }, [flushLists]);
-
-  // Flush pending writes on unmount (e.g. navigating away)
-  useEffect(() => {
-    return () => {
-      if (dailyTimerRef.current !== null) flushDaily();
-      if (listsTimerRef.current !== null) flushLists();
-    };
-  }, [flushDaily, flushLists]);
+  // So there is nothing to publish here. These schedulers are retained as
+  // stable no-ops purely so the ~20 action call sites (and their useCallback
+  // dependency arrays) don't have to change — the previous debounce/timer/
+  // per-keystroke-publish machinery was pure overhead wrapping no-ops.
+  const scheduleDailyPublish = useCallback(() => {}, []);
+  const scheduleListsPublish = useCallback(() => {}, []);
 
   // ── Daily habit actions ──────────────────────────────────────────
 

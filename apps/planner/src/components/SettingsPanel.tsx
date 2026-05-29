@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useModalA11y } from "../hooks/useModalA11y";
 import { X, Shield, ShieldOff, AlertTriangle, Bell, Archive, Share2, Radio, Cloud } from "lucide-react";
 import { useSettings, type NotifyMethod } from "../contexts/SettingsContext";
 import { useCalendar } from "../contexts/CalendarContext";
@@ -13,6 +14,8 @@ interface SettingsPanelProps {
 }
 
 export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
   const {
     nip44Available,
     publicCalendars,
@@ -70,7 +73,13 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
+        className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto"
+      >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold">Settings</h2>
           <button
@@ -505,21 +514,19 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
                   Individual events can opt out via the notification checkbox when creating or editing.
                 </p>
 
-                {/* Platform note for Tauri Android (push delivery from
-                    the daemon requires an FCM token, which Tauri 2.x
-                    does not expose by default). Web Push works on web
-                    PWAs; Tauri builds currently rely on OS-scheduled
-                    local notifications fired from within the app
-                    process. */}
+                {/* Platform note for native (Tauri) builds: reminders are
+                    OS-level LOCAL scheduled notifications — fully on-device,
+                    no server and no Google Play Services, so they work on
+                    GrapheneOS and any de-Googled device. The web/PWA build
+                    uses standard Web Push instead. */}
                 {isTauri() && notification.method === "push" && (
-                  <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800 space-y-1">
-                    <p className="font-medium">Background push on this build</p>
+                  <div className="rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2 text-xs text-emerald-800 space-y-1">
+                    <p className="font-medium">On-device reminders</p>
                     <p>
-                      Reminders fire while the app is running. Background
-                      delivery from the server (when the app is closed)
-                      requires Android FCM credentials — see
-                      <span className="font-mono"> README</span> for setup. Web Push works
-                      out of the box in the browser version.
+                      Reminders are scheduled with your operating system and
+                      fire on time even when the app is closed — entirely
+                      on-device, with no server and no Google services. The
+                      browser version uses Web Push instead.
                     </p>
                   </div>
                 )}

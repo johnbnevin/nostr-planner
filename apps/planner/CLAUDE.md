@@ -60,13 +60,22 @@ User's events already live on their Nostr relays. Blossom backup adds resilience
 **Web/browser:**
 1. Check `window.nostr` on load (NIP-07 extension)
 2. If present: `getPublicKey()` → user is logged in
-3. If absent: show option to install nos2x/Alby, or connect via NIP-46 remote signer
+3. If absent: offer to install nos2x/Alby, connect via NIP-46 remote signer, OR
+   enter an nsec / seed phrase / generate a new key — the latter behind a
+   "less secure" warning. We **warn rather than hide**: a keys-only,
+   no-accounts app shouldn't lock a web user out of their own key. The nsec is
+   held only in memory for the session and is **never persisted** on web.
 
 **Tauri standalone (desktop/mobile):**
 1. Check `window.__TAURI_INTERNALS__` to detect Tauri environment
-2. Offer: (a) enter nsec/hex private key (stored encrypted in OS keychain via plugin-store), or (b) NIP-46 remote signer connection
-3. nsec input is only shown in the Tauri environment, never in the web build
-4. All signing uses the `NostrSigner` interface (`src/lib/signer.ts`)
+2. Offer the same login methods as web, plus the option to **persist** the
+   nsec encrypted at rest in the OS keychain (NIP-49 via plugin-store) — this
+   keychain persistence is the only login affordance gated by `isTauri()`.
+3. All signing uses the `NostrSigner` interface (`src/lib/signer.ts`)
+
+> Note: web does NOT hide nsec entry. The `isTauri()` check exists to gate
+> OS-integration (keychain persistence, native notifications), not the login
+> methods themselves. See `src/lib/platform.ts`.
 
 ---
 
@@ -85,8 +94,8 @@ User's events already live on their Nostr relays. Blossom backup adds resilience
 
 **NEVER make changes to only one platform without making equivalent changes to all platforms.** Web, Tauri desktop, and mobile must be kept as identical to each other as they can practically be. The only acceptable platform-specific divergences are:
 
-- **Login method availability:** nsec input is Tauri-only (gated by `isTauri()`), NIP-07 extension is web-only (gated by `window.nostr`). NIP-46 remote signer works everywhere.
-- **OS-level integrations:** Tauri plugin-store for encrypted keychain storage, native notifications via Tauri APIs vs. Web Push.
+- **Login method availability:** the NIP-07 extension button is web-only (gated by `window.nostr`); NIP-46 remote signer works everywhere. **nsec / seed-phrase / key-generation are available on ALL platforms, including web** — the web build surfaces them behind a "less secure" warning rather than hiding them ("warn, don't hide"). `isTauri()` does NOT gate the login methods.
+- **OS-level integrations:** Tauri plugin-store for encrypted keychain storage (the only nsec-related Tauri gate — *persisting* a key to the OS keychain), native notifications via Tauri APIs vs. Web Push.
 
 Everything else — UI, encryption, relay logic, backup, sharing, event handling — must be identical across platforms. When modifying any shared code, verify the change works on all platforms. When adding a new feature, implement it for all platforms in the same PR.
 

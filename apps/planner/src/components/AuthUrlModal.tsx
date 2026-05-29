@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, ShieldCheck, X } from "lucide-react";
 import { onAuthUrl } from "../lib/authUrl";
+import { useModalA11y } from "../hooks/useModalA11y";
 
 /**
  * Lightweight modal that surfaces NIP-46 `auth_url` approval requests.
@@ -16,13 +17,22 @@ import { onAuthUrl } from "../lib/authUrl";
  */
 export function AuthUrlModal() {
   const [url, setUrl] = useState<string | null>(null);
+  const dismiss = useCallback(() => setUrl(null), []);
 
   useEffect(() => {
     const off = onAuthUrl((u) => setUrl(u));
     return () => off();
   }, []);
 
+  // Render the dialog as a child that mounts only when a URL is present, so
+  // useModalA11y (which sets up focus/trap on mount) sees the real panel.
   if (!url) return null;
+  return <AuthUrlDialog url={url} onClose={dismiss} />;
+}
+
+function AuthUrlDialog({ url, onClose }: { url: string; onClose: () => void }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
 
   const open = () => {
     // window.open works in both browser PWA and Tauri webviews — the
@@ -36,14 +46,21 @@ export function AuthUrlModal() {
       // return.
       window.location.href = url;
     }
-    setUrl(null);
+    onClose();
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 space-y-4 relative">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Approve in your signer"
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 space-y-4 relative"
+      >
         <button
-          onClick={() => setUrl(null)}
+          onClick={onClose}
           className="absolute top-3 right-3 p-1 rounded-lg hover:bg-gray-100"
           aria-label="Dismiss"
         >
