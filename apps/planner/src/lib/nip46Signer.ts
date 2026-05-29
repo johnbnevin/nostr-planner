@@ -125,7 +125,7 @@ export async function connectNostrSigner(
   log.info("got pubkey:", userPubkey.slice(0, 12));
 
   return {
-    signer: wrapBunkerSigner(bunker, userPubkey, pool),
+    signer: wrapBunkerSigner(bunker, userPubkey, pool, sk),
     pubkey: userPubkey,
   };
 }
@@ -193,7 +193,7 @@ export async function connectBunkerUri(
     log.info("got pubkey:", userPubkey.slice(0, 12));
 
     return {
-      signer: wrapBunkerSigner(bunker, userPubkey, pool),
+      signer: wrapBunkerSigner(bunker, userPubkey, pool, sk),
       pubkey: userPubkey,
     };
   } catch (err) {
@@ -226,8 +226,12 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 
 /** Wrap nostr-tools' BunkerSigner in our NostrSigner interface.
  *  The `pool` is the SimplePool the bunker is talking through — owned by
- *  this signer so destroy() can close its sockets cleanly on logout. */
-function wrapBunkerSigner(bunker: BunkerSigner, pubkey: string, pool?: SimplePool): NostrSigner {
+ *  this signer so destroy() can close its sockets cleanly on logout.
+ *  `clientSk` is the ephemeral NIP-46 client secret key; we zero it on
+ *  destroy() for the same best-effort hygiene as LocalSigner — it's only
+ *  the bunker channel key, not the user's identity key, but a lingering
+ *  copy could let a memory scraper resume the bunker session. */
+function wrapBunkerSigner(bunker: BunkerSigner, pubkey: string, pool?: SimplePool, clientSk?: Uint8Array): NostrSigner {
   return {
     getPublicKey: () => Promise.resolve(pubkey),
     signEvent: async (event: UnsignedEvent): Promise<NostrEvent> => {
@@ -251,6 +255,8 @@ function wrapBunkerSigner(bunker: BunkerSigner, pubkey: string, pool?: SimplePoo
     },
     destroy: async () => {
       try { await bunker.close(); } catch { /* ignore */ }
+      // Best-effort zero of the ephemeral client secret key.
+      try { clientSk?.fill(0); } catch { /* ignore */ }
       // Close the pool's WebSocket connections too. Without this, the
       // sockets linger until GC even after the signer is "destroyed".
       if (pool) {

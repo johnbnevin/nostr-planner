@@ -7,7 +7,18 @@ import type { NPool, NostrEvent } from "@nostrify/nostrify";
 import { verifyEvent } from "nostr-tools/pure";
 import { queryEvents } from "./relay.js";
 import { decryptFromUser } from "./decrypt.js";
-import { getDatePartsInZone, getMidnightInZone } from "./timezone.js";
+import { getDatePartsInZone, getMidnightInZone, isValidTimeZone } from "./timezone.js";
+
+/** Hard caps to bound memory against a spammer minting signature-valid
+ *  events #p-tagged to the bot. Generous enough for any real deployment. */
+const MAX_USERS = 50_000;
+const MAX_SUBS_PER_USER = 20;
+
+/** Per-pubkey identifiers in logs are gated behind this flag so production
+ *  logs don't leak which pubkeys interact with the bot (a mild social-graph
+ *  signal). Counts are always logged; identifiers only when explicitly opted in. */
+const LOG_PUBKEYS = process.env.DAEMON_LOG_PUBKEYS === "true";
+const pk = (pubkey: string): string => (LOG_PUBKEYS ? pubkey.slice(0, 8) : "user");
 
 // ── Payload types (must match client src/lib/digest.ts) ──────────────
 
@@ -18,6 +29,15 @@ export interface DigestEvent {
   allDay: boolean;
   location?: string;
   calendar?: string;
+}
+
+/** Stable per-event dedup/notification key. Includes the calendar so two
+ *  events that coincide on start/title/location but live on different
+ *  calendars each get their own notification. Single source of truth shared
+ *  by the pending-scan, the mark-sent path, and the web-push tag so they
+ *  can't drift. */
+export function pushDedupKey(event: DigestEvent): string {
+  return `${event.start}\x00${event.title}\x00${event.location ?? ""}\x00${event.calendar ?? ""}`;
 }
 
 export interface DigestTodo {
@@ -42,34 +62,26 @@ interface DigestDataPayload {
 
 interface PushSubscriptionPayload {
   v: number;
-  /** Transport identifier. "webpush" is the existing browser path (VAPID
-   *  + endpoint + p256dh/auth). "fcm" is native Android push via Firebase
-   *  Cloud Messaging — the daemon owns those credentials. Apple/iOS
-   *  platforms are deliberately not supported. */
-  platform?: "webpush" | "fcm";
-  /** Web Push endpoint. Required when platform === "webpush" (default). */
+  /** Web Push endpoint (VAPID). */
   endpoint: string;
-  /** Web Push encryption keys. Required when platform === "webpush". */
+  /** Web Push encryption keys. */
   keys: { p256dh: string; auth: string };
-  /** Native device token. Required when platform === "fcm". */
-  token?: string;
   allDayMinsBefore: number;
   timedMinsBefore: number;
   timezone: string;
 }
 
 // ── Push subscription entry ──────────────────────────────────────────
+//
+// Web Push (VAPID) only — there is no FCM/APNs path. Native clients (Tauri,
+// incl. GrapheneOS) schedule local on-device notifications instead of
+// registering for server push, so the daemon never receives a native sub.
 
 export interface PushSubEntry {
-  platform: "webpush" | "fcm";
-  /** Web Push endpoint (platform === "webpush") or stable identifier for
-   *  the FCM token (used as the registry key, since FCM tokens also need
-   *  a unique identity per device). */
+  /** Web Push endpoint. */
   endpoint: string;
-  /** Web Push keys — only populated for platform === "webpush". */
+  /** Web Push keys. */
   keys: { p256dh: string; auth: string };
-  /** Native device token — only populated for "fcm". */
-  token?: string;
   allDayMinsBefore: number;
   timedMinsBefore: number;
   timezone: string;
@@ -160,6 +172,14 @@ export class UserRegistry {
   private ensureUser(pubkey: string): UserEntry {
     let user = this.users.get(pubkey);
     if (!user) {
+      // Bound total tracked users. Map iterates in insertion order, so the
+      // first key is the oldest — evict it to make room. The primary copy of
+      // any evicted user's data still lives on relays; they re-register on
+      // next contact.
+      if (this.users.size >= MAX_USERS) {
+        const oldest = this.users.keys().next().value;
+        if (oldest !== undefined) this.users.delete(oldest);
+      }
       user = {
         pubkey,
         pushSubs: new Map(),
@@ -187,55 +207,47 @@ export class UserRegistry {
   }
 
   private handlePushSub(pubkey: string, sub: PushSubscriptionPayload): void {
-    const platform = sub.platform ?? "webpush";
-
-    // Common-shape validation (delivery prefs + timezone).
+    // Delivery prefs + timezone. The timezone MUST be a real IANA zone — it
+    // flows into Intl.DateTimeFormat in the push loop, where a bad value
+    // throws and (without this guard) would crash the daemon for every user.
     if (
       typeof sub.allDayMinsBefore !== "number" ||
       typeof sub.timedMinsBefore !== "number" ||
-      typeof sub.timezone !== "string"
+      !isValidTimeZone(sub.timezone)
     ) {
-      console.warn(`[registry] malformed push sub from ${pubkey.slice(0, 8)}, ignoring`);
+      console.warn(`[registry] malformed push sub from ${pk(pubkey)}, ignoring`);
       return;
     }
 
-    if (platform === "webpush") {
-      // Web Push needs the VAPID endpoint and encryption keys.
-      if (
-        typeof sub.endpoint !== "string" ||
-        !sub.endpoint.startsWith("https://") ||
-        typeof sub.keys?.p256dh !== "string" ||
-        typeof sub.keys?.auth !== "string"
-      ) {
-        console.warn(`[registry] malformed webpush sub from ${pubkey.slice(0, 8)}, ignoring`);
-        return;
-      }
-    } else if (platform === "fcm") {
-      // Native push needs a device token. The endpoint serves only as
-      // a stable identifier for replacement on re-registration.
-      if (typeof sub.token !== "string" || sub.token.length < 8 ||
-          typeof sub.endpoint !== "string") {
-        console.warn(`[registry] malformed fcm sub from ${pubkey.slice(0, 8)}, ignoring`);
-        return;
-      }
-    } else {
-      console.warn(`[registry] unknown push platform "${platform}" from ${pubkey.slice(0, 8)}, ignoring`);
+    // Web Push needs the VAPID endpoint and encryption keys. (Web Push is the
+    // only transport — native clients use on-device local notifications.)
+    if (
+      typeof sub.endpoint !== "string" ||
+      !sub.endpoint.startsWith("https://") ||
+      typeof sub.keys?.p256dh !== "string" ||
+      typeof sub.keys?.auth !== "string"
+    ) {
+      console.warn(`[registry] malformed webpush sub from ${pk(pubkey)}, ignoring`);
       return;
     }
 
     const user = this.ensureUser(pubkey);
+    // Bound devices per user. If at cap and this endpoint is new, evict the
+    // oldest sub to make room (re-registration restores it).
+    if (!user.pushSubs.has(sub.endpoint) && user.pushSubs.size >= MAX_SUBS_PER_USER) {
+      const oldest = user.pushSubs.keys().next().value;
+      if (oldest !== undefined) user.pushSubs.delete(oldest);
+    }
     user.pushSubs.set(sub.endpoint, {
-      platform,
       endpoint: sub.endpoint,
       keys: sub.keys,
-      token: sub.token,
       allDayMinsBefore: sub.allDayMinsBefore,
       timedMinsBefore: sub.timedMinsBefore,
       timezone: sub.timezone,
       notifiedToday: new Set(),
       notifiedDateKey: "",
     });
-    console.log(`[registry] ${platform} sub for ${pubkey.slice(0, 8)} (${user.pushSubs.size} device(s))`);
+    console.log(`[registry] webpush sub for ${pk(pubkey)} (${user.pushSubs.size} device(s))`);
   }
 
   /** Get push notifications that need to fire right now. */
@@ -254,32 +266,39 @@ export class UserRegistry {
       if (ageHours > maxStaleHours) continue;
 
       for (const sub of user.pushSubs.values()) {
-        // Lazy per-timezone daily reset: clear the dedup set when the user's
-        // local date advances, rather than resetting all users at UTC midnight.
-        const todayKey = getDatePartsInZone(sub.timezone).dateKey;
-        if (sub.notifiedDateKey !== todayKey) {
-          sub.notifiedToday.clear();
-          sub.notifiedDateKey = todayKey;
-        }
-
-        for (const event of user.digestData.events) {
-          const eventKey = `${event.start}\x00${event.title}\x00${event.location ?? ""}`;
-          if (sub.notifiedToday.has(eventKey)) continue;
-
-          let eventStartMs: number;
-          if (event.allDay) {
-            eventStartMs = getMidnightInZone(event.start, sub.timezone);
-          } else {
-            eventStartMs = new Date(event.start).getTime();
+        // Isolate each sub: a bad value (e.g. a timezone that slipped past
+        // validation on an older build) must not abort the whole loop and
+        // starve every other user's notifications.
+        try {
+          // Lazy per-timezone daily reset: clear the dedup set when the user's
+          // local date advances, rather than resetting all users at UTC midnight.
+          const todayKey = getDatePartsInZone(sub.timezone).dateKey;
+          if (sub.notifiedDateKey !== todayKey) {
+            sub.notifiedToday.clear();
+            sub.notifiedDateKey = todayKey;
           }
 
-          const minsBefore = event.allDay ? sub.allDayMinsBefore : sub.timedMinsBefore;
-          const alertTimeMs = eventStartMs - minsBefore * 60_000;
+          for (const event of user.digestData.events) {
+            const eventKey = pushDedupKey(event);
+            if (sub.notifiedToday.has(eventKey)) continue;
 
-          // Fire if: alert time has passed, but event hasn't started + 5min grace
-          if (nowMs >= alertTimeMs && nowMs < eventStartMs + 5 * 60_000) {
-            pending.push({ user, sub, event });
+            let eventStartMs: number;
+            if (event.allDay) {
+              eventStartMs = getMidnightInZone(event.start, sub.timezone);
+            } else {
+              eventStartMs = new Date(event.start).getTime();
+            }
+
+            const minsBefore = event.allDay ? sub.allDayMinsBefore : sub.timedMinsBefore;
+            const alertTimeMs = eventStartMs - minsBefore * 60_000;
+
+            // Fire if: alert time has passed, but event hasn't started + 5min grace
+            if (nowMs >= alertTimeMs && nowMs < eventStartMs + 5 * 60_000) {
+              pending.push({ user, sub, event });
+            }
           }
+        } catch (err) {
+          console.warn(`[registry] skipping sub for ${pk(user.pubkey)}:`, err instanceof Error ? err.message : err);
         }
       }
     }

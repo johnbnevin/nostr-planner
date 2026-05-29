@@ -97,14 +97,9 @@ export function Header({
     setViewMode,
     refreshEvents,
     decryptionErrors,
-    undo,
-    redo,
-    undoDepth,
-    redoDepth,
-    undoPreview,
-    redoPreview,
   } = useCalendar();
-  const { autoBackup, setAutoBackup } = useSettings();
+  // undo/redo + auto-backup state now live in the extracted UndoRedoButtons /
+  // BackupButton components, which read their own context values.
   const replication = useReplicationStatus();
   const replicationSummary = formatReplicationTooltip(replication);
 
@@ -265,68 +260,16 @@ export function Header({
               <span>Event</span>
             </button>
 
-            <button
-              onClick={() => void undo()}
-              disabled={undoDepth === 0}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              title={undoDepth > 0 ? `Undo: ${undoPreview} (Ctrl+Z)` : "Nothing to undo"}
-            >
-              <Undo2 className="w-4 h-4 text-gray-500" />
-            </button>
-            <button
-              onClick={() => void redo()}
-              disabled={redoDepth === 0}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              title={redoDepth > 0 ? `Redo: ${redoPreview} (Ctrl+Shift+Z)` : "Nothing to redo"}
-            >
-              <Redo2 className="w-4 h-4 text-gray-500" />
-            </button>
+            <UndoRedoButtons showShortcuts />
 
-            <button
-              onClick={() => {
-                if (backupPhase === "blocked") { onOpenShrinkGuard(); return; }
-                const next = !autoBackup;
-                setAutoBackup(next);
-                if (next) onBackupNow();
-              }}
-              className={`relative p-1.5 rounded-lg transition-colors ${
-                !autoBackup ? "hover:bg-gray-100"
-                : backupPhase === "blocked" ? "bg-amber-50 hover:bg-amber-100 ring-2 ring-amber-400 animate-pulse"
-                : backupPhase === "idle" ? "bg-emerald-50 hover:bg-emerald-100"
-                : "bg-red-50 hover:bg-red-100"
-              }`}
-              title={
-                (!autoBackup ? "Auto-backup off"
-                  : backupPhase === "blocked" ? "Save blocked: the new snapshot would drop a lot of data. Click to review."
-                  : backupPhase === "saving" ? "Saving backup…"
-                  : backupPhase === "error"
-                    ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
-                  : backupPhase === "dirty" && saveCountdown !== null ? `Unsaved — autosave in ${saveCountdown}s`
-                  : "Auto-backup on")
-                + (replicationSummary ? `\n${replicationSummary}` : "")
-              }
-            >
-              {!autoBackup ? (
-                <CloudOff className="w-4 h-4 text-gray-400" />
-              ) : backupPhase === "blocked" ? (
-                <ShieldAlert className="w-4 h-4 text-amber-600" />
-              ) : backupPhase === "saving" ? (
-                <Loader className="w-4 h-4 animate-spin text-red-600" />
-              ) : backupPhase === "error" ? (
-                <CloudAlert className="w-4 h-4 text-red-600" />
-              ) : backupPhase === "dirty" ? (
-                <CloudUpload className="w-4 h-4 text-red-600" />
-              ) : (
-                <CloudUpload className="w-4 h-4 text-emerald-600" />
-              )}
-
-              {/* Countdown badge in the corner for dirty/error phases. */}
-              {autoBackup && saveCountdown !== null && (backupPhase === "dirty" || backupPhase === "error") && (
-                <span className="absolute -top-0.5 -right-0.5 min-w-[1rem] h-4 px-0.5 rounded-full bg-red-600 text-white text-[9px] font-semibold leading-4 text-center tabular-nums">
-                  {saveCountdown}
-                </span>
-              )}
-            </button>
+            <BackupButton
+              backupPhase={backupPhase}
+              saveCountdown={saveCountdown}
+              backupError={backupError}
+              onBackupNow={onBackupNow}
+              onOpenShrinkGuard={onOpenShrinkGuard}
+              replicationSummary={replicationSummary}
+            />
 
             <button
               onClick={onSettings}
@@ -381,67 +324,16 @@ export function Header({
             >
               <Layers className="w-4 h-4 text-gray-500" />
             </button>
-            <button
-              onClick={() => void undo()}
-              disabled={undoDepth === 0}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              title={undoDepth > 0 ? `Undo: ${undoPreview}` : "Nothing to undo"}
-            >
-              <Undo2 className="w-4 h-4 text-gray-500" />
-            </button>
-            <button
-              onClick={() => void redo()}
-              disabled={redoDepth === 0}
-              className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              title={redoDepth > 0 ? `Redo: ${redoPreview}` : "Nothing to redo"}
-            >
-              <Redo2 className="w-4 h-4 text-gray-500" />
-            </button>
-            <button
-              onClick={() => {
-                if (backupPhase === "blocked") { onOpenShrinkGuard(); return; }
-                const next = !autoBackup;
-                setAutoBackup(next);
-                if (next) onBackupNow();
-              }}
-              className={`relative p-1.5 rounded-lg transition-colors ${
-                !autoBackup ? "hover:bg-gray-100"
-                : backupPhase === "blocked" ? "bg-amber-50 hover:bg-amber-100 ring-2 ring-amber-400 animate-pulse"
-                : backupPhase === "idle" ? "bg-emerald-50 hover:bg-emerald-100"
-                : "bg-red-50 hover:bg-red-100"
-              }`}
-              title={
-                (!autoBackup ? "Auto-backup off"
-                  : backupPhase === "blocked" ? "Save blocked: the new snapshot would drop a lot of data. Click to review."
-                  : backupPhase === "saving" ? "Saving backup…"
-                  : backupPhase === "error"
-                    ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
-                  : backupPhase === "dirty" && saveCountdown !== null ? `Unsaved — autosave in ${saveCountdown}s`
-                  : "Auto-backup on")
-                + (replicationSummary ? `\n${replicationSummary}` : "")
-              }
-            >
-              {!autoBackup ? (
-                <CloudOff className="w-4 h-4 text-gray-400" />
-              ) : backupPhase === "blocked" ? (
-                <ShieldAlert className="w-4 h-4 text-amber-600" />
-              ) : backupPhase === "saving" ? (
-                <Loader className="w-4 h-4 animate-spin text-red-600" />
-              ) : backupPhase === "error" ? (
-                <CloudAlert className="w-4 h-4 text-red-600" />
-              ) : backupPhase === "dirty" ? (
-                <CloudUpload className="w-4 h-4 text-red-600" />
-              ) : (
-                <CloudUpload className="w-4 h-4 text-emerald-600" />
-              )}
+            <UndoRedoButtons />
 
-              {/* Countdown badge in the corner for dirty/error phases. */}
-              {autoBackup && saveCountdown !== null && (backupPhase === "dirty" || backupPhase === "error") && (
-                <span className="absolute -top-0.5 -right-0.5 min-w-[1rem] h-4 px-0.5 rounded-full bg-red-600 text-white text-[9px] font-semibold leading-4 text-center tabular-nums">
-                  {saveCountdown}
-                </span>
-              )}
-            </button>
+            <BackupButton
+              backupPhase={backupPhase}
+              saveCountdown={saveCountdown}
+              backupError={backupError}
+              onBackupNow={onBackupNow}
+              onOpenShrinkGuard={onOpenShrinkGuard}
+              replicationSummary={replicationSummary}
+            />
             <button
               onClick={onSettings}
               className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
@@ -533,5 +425,107 @@ export function Header({
 
       </div>
     </header>
+  );
+}
+
+/**
+ * Undo/redo button pair. Reads the stacks from CalendarContext directly so the
+ * desktop and mobile header layouts can share one implementation (they had
+ * drifted as copy-paste duplicates). `showShortcuts` appends the keyboard-hint
+ * suffix — desktop only, since mobile has no physical keyboard.
+ */
+function UndoRedoButtons({ showShortcuts = false }: { showShortcuts?: boolean }) {
+  const { undo, redo, undoDepth, redoDepth, undoPreview, redoPreview } = useCalendar();
+  const undoHint = showShortcuts ? " (Ctrl+Z)" : "";
+  const redoHint = showShortcuts ? " (Ctrl+Shift+Z)" : "";
+  return (
+    <>
+      <button
+        onClick={() => void undo()}
+        disabled={undoDepth === 0}
+        className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+        title={undoDepth > 0 ? `Undo: ${undoPreview}${undoHint}` : "Nothing to undo"}
+      >
+        <Undo2 className="w-4 h-4 text-gray-500" />
+      </button>
+      <button
+        onClick={() => void redo()}
+        disabled={redoDepth === 0}
+        className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+        title={redoDepth > 0 ? `Redo: ${redoPreview}${redoHint}` : "Nothing to redo"}
+      >
+        <Redo2 className="w-4 h-4 text-gray-500" />
+      </button>
+    </>
+  );
+}
+
+interface BackupButtonProps {
+  backupPhase: HeaderProps["backupPhase"];
+  saveCountdown: number | null;
+  backupError: string | null;
+  onBackupNow: () => Promise<void>;
+  onOpenShrinkGuard: () => void;
+  replicationSummary: string;
+}
+
+/**
+ * Auto-backup cloud toggle: phase-dependent icon + tooltip + corner countdown
+ * badge. Reads autoBackup from SettingsContext; shared by both header layouts
+ * (previously duplicated verbatim, a drift risk the project rules warn about).
+ */
+function BackupButton({
+  backupPhase,
+  saveCountdown,
+  backupError,
+  onBackupNow,
+  onOpenShrinkGuard,
+  replicationSummary,
+}: BackupButtonProps) {
+  const { autoBackup, setAutoBackup } = useSettings();
+  return (
+    <button
+      onClick={() => {
+        if (backupPhase === "blocked") { onOpenShrinkGuard(); return; }
+        const next = !autoBackup;
+        setAutoBackup(next);
+        if (next) void onBackupNow();
+      }}
+      className={`relative p-1.5 rounded-lg transition-colors ${
+        !autoBackup ? "hover:bg-gray-100"
+        : backupPhase === "blocked" ? "bg-amber-50 hover:bg-amber-100 ring-2 ring-amber-400 animate-pulse"
+        : backupPhase === "idle" ? "bg-emerald-50 hover:bg-emerald-100"
+        : "bg-red-50 hover:bg-red-100"
+      }`}
+      title={
+        (!autoBackup ? "Auto-backup off"
+          : backupPhase === "blocked" ? "Save blocked: the new snapshot would drop a lot of data. Click to review."
+          : backupPhase === "saving" ? "Saving backup…"
+          : backupPhase === "error"
+            ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
+          : backupPhase === "dirty" && saveCountdown !== null ? `Unsaved — autosave in ${saveCountdown}s`
+          : "Auto-backup on")
+        + (replicationSummary ? `\n${replicationSummary}` : "")
+      }
+    >
+      {!autoBackup ? (
+        <CloudOff className="w-4 h-4 text-gray-400" />
+      ) : backupPhase === "blocked" ? (
+        <ShieldAlert className="w-4 h-4 text-amber-600" />
+      ) : backupPhase === "saving" ? (
+        <Loader className="w-4 h-4 animate-spin text-red-600" />
+      ) : backupPhase === "error" ? (
+        <CloudAlert className="w-4 h-4 text-red-600" />
+      ) : backupPhase === "dirty" ? (
+        <CloudUpload className="w-4 h-4 text-red-600" />
+      ) : (
+        <CloudUpload className="w-4 h-4 text-emerald-600" />
+      )}
+      {autoBackup && saveCountdown !== null && (backupPhase === "dirty" || backupPhase === "error") && (
+        <span className="absolute -top-0.5 -right-0.5 min-w-[1rem] h-4 px-0.5 rounded-full bg-red-600 text-white text-[9px] font-semibold leading-4 text-center tabular-nums">
+          {saveCountdown}
+        </span>
+      )}
+    </button>
   );
 }

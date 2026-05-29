@@ -876,8 +876,13 @@ export function CalendarApp() {
 
       {needsCalendarSetup && !eventsLoading && autoRestoreComplete && calendars.length === 0 && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-1">Welcome to Planner</h2>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="first-run-setup-title"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6"
+          >
+            <h2 id="first-run-setup-title" className="text-lg font-semibold text-gray-900 mb-1">Welcome to Planner</h2>
             <p className="text-sm text-gray-500 mb-4">
               Choose a name for your first calendar.
             </p>

@@ -1,7 +1,7 @@
 /**
  * Unit tests for sharing.ts — AES key management, invite encode/decode.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import {
   generateSharedKey,
   exportKeyToBase64,
@@ -10,6 +10,11 @@ import {
   decryptAES,
   encodeInvitePayload,
   decodeInvitePayload,
+  lookupNip05,
+  isAcceptedShare,
+  isRejectedShare,
+  acceptShare,
+  rejectShare,
 } from "./sharing";
 
 // ── AES key generation and round-trip ──────────────────────────────────
@@ -203,5 +208,89 @@ describe("encodeInvitePayload / decodeInvitePayload", () => {
     const decoded = decodeInvitePayload(encoded);
     expect(decoded).not.toBeNull();
     expect(decoded!.t).toBe("Café & 日本語 Events 🗓️");
+  });
+});
+
+// ── NIP-05 lookup input validation (SSRF guards) ──────────────────────────
+//
+// We don't exercise the network — just the early-return guards on malformed
+// identifiers, so the fetch is never reached. Anything returning null before
+// fetch is safe by construction.
+
+describe("lookupNip05 input validation", () => {
+  it("rejects an identifier with no @", async () => {
+    expect(await lookupNip05("example.com")).toBeNull();
+  });
+  it("rejects empty name or domain", async () => {
+    expect(await lookupNip05("@example.com")).toBeNull();
+    expect(await lookupNip05("alice@")).toBeNull();
+  });
+  it("rejects embedded userinfo that would mask the real host", async () => {
+    // domain="evil.com@localhost" would pass an isBlockedHostname(evil.com)
+    // check while the fetch actually resolved to localhost. Must be rejected
+    // before the request is built.
+    expect(await lookupNip05("alice@evil.com@localhost")).toBeNull();
+  });
+  it("rejects path / query / fragment / whitespace in the domain", async () => {
+    expect(await lookupNip05("alice@example.com/x")).toBeNull();
+    expect(await lookupNip05("alice@example.com?x=1")).toBeNull();
+    expect(await lookupNip05("alice@example.com#frag")).toBeNull();
+    expect(await lookupNip05("alice@example .com")).toBeNull();
+  });
+  it("rejects URL meta-chars in the name", async () => {
+    expect(await lookupNip05("a/b@example.com")).toBeNull();
+    expect(await lookupNip05("a#b@example.com")).toBeNull();
+  });
+  it("rejects loopback / private hosts", async () => {
+    expect(await lookupNip05("alice@localhost")).toBeNull();
+    expect(await lookupNip05("alice@127.0.0.1")).toBeNull();
+    expect(await lookupNip05("alice@192.168.1.1")).toBeNull();
+  });
+});
+
+// ── Invitation consent (durable accept/reject) ────────────────────────────
+//
+// Gates auto-import of shared-calendar key envelopes so a third party can't
+// inject a calendar into a victim's view. Backed by localStorage (jsdom).
+
+describe("invitation consent", () => {
+  const me = "f".repeat(64);
+  const owner = "a".repeat(64);
+  const cal = "cal-xyz";
+
+  // This test file runs in the node environment (no DOM); provide a minimal
+  // localStorage so the durable-consent helpers have somewhere to persist.
+  beforeAll(() => {
+    if (typeof globalThis.localStorage === "undefined") {
+      const store = new Map<string, string>();
+      (globalThis as unknown as { localStorage: Storage }).localStorage = {
+        getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+        setItem: (k: string, v: string) => void store.set(k, String(v)),
+        removeItem: (k: string) => void store.delete(k),
+        clear: () => store.clear(),
+        key: (i: number) => [...store.keys()][i] ?? null,
+        get length() { return store.size; },
+      } as Storage;
+    }
+  });
+
+  it("defaults to neither accepted nor rejected", () => {
+    expect(isAcceptedShare(me, owner, cal)).toBe(false);
+    expect(isRejectedShare(me, owner, cal)).toBe(false);
+  });
+
+  it("records acceptance durably and owner-specifically", () => {
+    acceptShare(me, owner, cal);
+    expect(isAcceptedShare(me, owner, cal)).toBe(true);
+    // A different owner with the same calDTag is a distinct decision.
+    expect(isAcceptedShare(me, "b".repeat(64), cal)).toBe(false);
+    // Another user's store is independent.
+    expect(isAcceptedShare("c".repeat(64), owner, cal)).toBe(false);
+  });
+
+  it("records rejection durably", () => {
+    rejectShare(me, owner, "cal-rejected");
+    expect(isRejectedShare(me, owner, "cal-rejected")).toBe(true);
+    expect(isAcceptedShare(me, owner, "cal-rejected")).toBe(false);
   });
 });

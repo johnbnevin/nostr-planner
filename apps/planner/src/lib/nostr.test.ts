@@ -64,6 +64,30 @@ describe("toRRule", () => {
     const parsed = fromRRule(rrule);
     expect(parsed).toEqual(original);
   });
+
+  it("round-trips bi-weekly via INTERVAL=2", () => {
+    const original = { freq: "bi-weekly" as const, count: 8 };
+    expect(toRRule(original)).toBe("FREQ=WEEKLY;INTERVAL=2;COUNT=8");
+    expect(fromRRule(toRRule(original))).toEqual(original);
+  });
+});
+
+describe("fromRRule INTERVAL / UNTIL", () => {
+  it("preserves a generic interval the freq enum can't express", () => {
+    // every-3-days must not silently collapse to plain daily.
+    expect(fromRRule("FREQ=DAILY;INTERVAL=3;COUNT=5")).toEqual({
+      freq: "daily",
+      count: 5,
+      interval: 3,
+    });
+  });
+
+  it("honors UNTIL instead of fabricating a frequency-based count", () => {
+    const rule = fromRRule("FREQ=DAILY;UNTIL=20260601");
+    expect(rule?.freq).toBe("daily");
+    // UNTIL date resolves to end-of-day UTC.
+    expect(rule?.until).toBe(Math.floor(Date.UTC(2026, 5, 1, 23, 59, 59) / 1000));
+  });
 });
 
 // ── parseCalendarEvent ─────────────────────────────────────────────────

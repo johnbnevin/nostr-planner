@@ -14,7 +14,9 @@ import {
   Loader2,
   Tag,
   Settings2,
+  MailPlus,
 } from "lucide-react";
+import { nip19 } from "nostr-tools";
 import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useSharing } from "../contexts/SharingContext";
@@ -24,6 +26,7 @@ import { isNip44Available } from "../lib/crypto";
 import { downloadIcalFile, parseIcalFile } from "../lib/ical";
 import type { ParsedIcalEvent } from "../lib/ical";
 import { HashtagManagerModal } from "./HashtagManagerModal";
+import { useModalA11y } from "../hooks/useModalA11y";
 
 /** @see {@link Sidebar} */
 interface SidebarProps {
@@ -73,12 +76,23 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
     clearActiveTags,
   } = useCalendar();
   const { isSharedCalendar } = useSharing();
+  // Dialog a11y for the mobile-overlay variant. Harmless in desktop mode:
+  // onClose is undefined (no Escape wiring) and panelRef stays null (no-op).
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
 
   // Mobile overlay mode: full-screen modal
   if (onClose) {
     return (
-      <div className="fixed inset-0 bg-black/40 z-50 flex items-start justify-center p-4 pt-12">
-        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm max-h-[85vh] overflow-y-auto">
+      <div className="fixed inset-0 bg-black/40 z-50 flex items-start justify-center p-4 pt-12" onClick={onClose}>
+        <div
+          ref={panelRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Calendars"
+          onClick={(e) => e.stopPropagation()}
+          className="bg-white rounded-2xl shadow-2xl w-full max-w-sm max-h-[85vh] overflow-y-auto"
+        >
           <div className="flex items-center justify-between p-4 border-b border-gray-200 sticky top-0 bg-white rounded-t-2xl z-10">
             <h2 className="text-lg font-semibold">Calendars</h2>
             <button
@@ -171,6 +185,70 @@ interface SidebarContentProps {
   clearActiveTags: ReturnType<typeof useCalendar>["clearActiveTags"];
 }
 
+/**
+ * Incoming shared-calendar invitations awaiting an explicit accept/reject.
+ *
+ * A key envelope encrypted to the user only proves someone *sent* it — not
+ * that the user agreed to join. Nothing is imported until the user accepts,
+ * which is the consent gate that prevents a third party from injecting an
+ * unsolicited calendar into the user's view. Self-contained (reads
+ * SharingContext directly) so it renders identically in the desktop sidebar
+ * and the mobile overlay.
+ */
+function PendingInvitations() {
+  const { pendingInvitations, acceptInvitation, rejectInvitation } = useSharing();
+  const [busy, setBusy] = useState<string | null>(null);
+  if (pendingInvitations.length === 0) return null;
+
+  const shortNpub = (hex: string): string => {
+    try {
+      const npub = nip19.npubEncode(hex);
+      return `${npub.slice(0, 12)}…${npub.slice(-6)}`;
+    } catch {
+      return `${hex.slice(0, 8)}…`;
+    }
+  };
+
+  return (
+    <div className="mb-6">
+      <div className="flex items-center gap-1 text-sm font-semibold text-gray-700 mb-2">
+        <MailPlus className="w-4 h-4 text-blue-600" />
+        Calendar invitations
+      </div>
+      <div className="space-y-2">
+        {pendingInvitations.map((inv) => (
+          <div key={inv.calDTag} className="rounded-lg border border-blue-200 bg-blue-50 p-2.5 text-xs">
+            <p className="text-gray-700">Someone shared a calendar with you.</p>
+            <p className="text-gray-500 mt-0.5 font-mono break-all" title={inv.ownerPubkey}>
+              from {shortNpub(inv.ownerPubkey)}
+            </p>
+            <div className="flex gap-2 mt-2">
+              <button
+                disabled={busy === inv.calDTag}
+                onClick={async () => {
+                  setBusy(inv.calDTag);
+                  try { await acceptInvitation(inv.calDTag); }
+                  finally { setBusy(null); }
+                }}
+                className="flex-1 px-2 py-1 rounded-md bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50"
+              >
+                {busy === inv.calDTag ? "Accepting…" : "Accept"}
+              </button>
+              <button
+                disabled={busy === inv.calDTag}
+                onClick={() => rejectInvitation(inv.calDTag)}
+                className="flex-1 px-2 py-1 rounded-md border border-gray-300 text-gray-600 font-medium hover:bg-gray-100 disabled:opacity-50"
+              >
+                Reject
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SidebarContent({
   onImportParsed,
   onShareCalendar,
@@ -200,6 +278,10 @@ function SidebarContent({
   const [newCalName, setNewCalName] = useState("");
   const [newCalColor, setNewCalColor] = useState(CALENDAR_COLORS[0]);
   const [colorPickerDTag, setColorPickerDTag] = useState<string | null>(null);
+  // dTag of the calendar pending delete-confirmation. Drives an in-app
+  // confirm dialog instead of the native confirm(), which renders/behaves
+  // inconsistently (and can be blocked) in Tauri webviews and installed PWAs.
+  const [confirmDeleteDTag, setConfirmDeleteDTag] = useState<string | null>(null);
   const paletteCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const schedulePaletteClose = () => {
     if (paletteCloseTimer.current) clearTimeout(paletteCloseTimer.current);
@@ -327,6 +409,9 @@ function SidebarContent({
 
   return (
     <>
+      {/* Incoming shared-calendar invitations awaiting explicit consent. */}
+      <PendingInvitations />
+
       {/* Calendars section */}
       <div className="mb-6">
         <button
@@ -442,14 +527,7 @@ function SidebarContent({
                   )}
                   {calendars.length > 1 && (
                     <button
-                      onClick={() => {
-                        if (
-                          confirm(
-                            `Delete calendar "${cal.title}"? Events won't be deleted.`
-                          )
-                        )
-                          deleteCalendar(cal.dTag);
-                      }}
+                      onClick={() => setConfirmDeleteDTag(cal.dTag)}
                       className="p-0.5 hover:text-red-500 text-gray-400"
                       title="Delete calendar"
                     >
@@ -467,6 +545,8 @@ function SidebarContent({
                     {CALENDAR_COLORS.map((c) => (
                       <button
                         key={c}
+                        aria-label={`Set calendar color ${c}`}
+                        title={`Set color ${c}`}
                         onClick={() => {
                           recolorCalendar(cal.dTag, c);
                           cancelPaletteClose();
@@ -504,6 +584,8 @@ function SidebarContent({
                   {CALENDAR_COLORS.map((c) => (
                     <button
                       key={c}
+                      aria-label={`Choose color ${c}`}
+                      title={`Color ${c}`}
                       onClick={() => setNewCalColor(c)}
                       className={`w-5 h-5 rounded-full transition-all hover:scale-110 ${
                         newCalColor === c ? "ring-2 ring-offset-1 ring-gray-400" : ""
@@ -666,6 +748,48 @@ function SidebarContent({
           </p>
         </div>
       </div>
+
+      {/* In-app delete confirmation (replaces native confirm() for reliable
+          cross-platform behavior in Tauri webviews + installed PWAs). */}
+      {confirmDeleteDTag && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-[60] p-4"
+          onClick={() => setConfirmDeleteDTag(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Delete calendar"
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-2xl max-w-xs w-full p-5"
+          >
+            <h3 className="text-base font-semibold text-gray-900">Delete calendar?</h3>
+            <p className="text-sm text-gray-600 mt-1">
+              Delete “{calendars.find((c) => c.dTag === confirmDeleteDTag)?.title ?? "this calendar"}”?
+              Your events won’t be deleted.
+            </p>
+            <div className="flex gap-2 mt-4">
+              <button
+                autoFocus
+                onClick={() => setConfirmDeleteDTag(null)}
+                className="flex-1 px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-100"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const dTag = confirmDeleteDTag;
+                  setConfirmDeleteDTag(null);
+                  deleteCalendar(dTag);
+                }}
+                className="flex-1 px-3 py-1.5 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

@@ -4,7 +4,14 @@
  * We check for the presence of the `invoke` function on `__TAURI_INTERNALS__`
  * rather than just the key's existence — this guards against browser extensions
  * injecting an empty `window.__TAURI_INTERNALS__ = {}` object to spoof the
- * Tauri environment and trick the web build into showing nsec input fields.
+ * Tauri environment and trick the web build into enabling native-only
+ * affordances (e.g. persisting a key to the OS keychain via plugin-store).
+ *
+ * Note: nsec/seed-phrase entry itself is NOT gated on this — the web build
+ * intentionally offers it behind a "less secure" warning rather than hiding
+ * it ("warn, don't hide"). What `isTauri()` gates is the OS-integration layer
+ * (encrypted keychain persistence, native notifications), never the login
+ * methods. See apps/planner/CLAUDE.md → Login Flow.
  */
 export function isTauri(): boolean {
   return (

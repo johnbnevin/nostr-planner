@@ -353,6 +353,15 @@ export async function decryptEvent(
   dTag: string,
   signer: NostrSigner
 ): Promise<{ tags: string[][]; content: string; kind: number }> {
+  // Self-encryption invariant: private events are NIP-44-encrypted to the
+  // owner's own key, so the conversation key must be derived from (myPriv,
+  // myPub). Refuse if asked to decrypt with any other pubkey — otherwise a
+  // foreign event (encrypted to the user by someone else) could be decrypted
+  // and rendered as if it were the user's own private event.
+  const ownPubkey = await signer.getPublicKey();
+  if (pubkey !== ownPubkey) {
+    throw new Error("decryptEvent: refusing to self-decrypt with a non-owner pubkey");
+  }
   const json = await signer.nip44.decrypt(pubkey, encryptedContent);
   let payload: EncryptedPayload;
   try {

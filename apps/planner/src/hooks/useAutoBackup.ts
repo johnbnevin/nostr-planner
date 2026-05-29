@@ -387,14 +387,29 @@ export function useAutoBackup(): {
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
   }, []);
 
-  // Flush on unload (best-effort).
+  // Flush on unload / tab-hide (best-effort).
+  //
+  // beforeunload is unreliable on mobile and in PWAs — Safari/iOS often
+  // does NOT fire it when the user swipes the app away or the OS kills a
+  // backgrounded tab. pagehide is the modern replacement and fires in all
+  // cases where the page is being torn down, and visibilitychange→hidden
+  // covers the "user switched tabs / locked the phone" case where the OS
+  // may evict us shortly without ever firing pagehide. Hitting any of the
+  // three triggers a flush so a pending edit survives the device sleeping.
   useEffect(() => {
-    const handleUnload = () => {
+    const tryFlush = () => {
       if (phase !== "dirty" || !stateRef.current.pubkey || !stateRef.current.autoBackup) return;
       void doBackup();
     };
-    window.addEventListener("beforeunload", handleUnload);
-    return () => window.removeEventListener("beforeunload", handleUnload);
+    const onVis = () => { if (document.visibilityState === "hidden") tryFlush(); };
+    window.addEventListener("beforeunload", tryFlush);
+    window.addEventListener("pagehide", tryFlush);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("beforeunload", tryFlush);
+      window.removeEventListener("pagehide", tryFlush);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [phase, doBackup]);
 
   // Countdown ticker.

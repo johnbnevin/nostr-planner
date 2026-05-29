@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useModalA11y } from "../hooks/useModalA11y";
 import {
   X,
   Edit2,
@@ -31,6 +32,8 @@ export function EventDetailModal({
   onDuplicate,
 }: EventDetailModalProps) {
   const { deleteEvent, deleteSeries, calendars, getSeriesEvents } = useCalendar();
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [confirmingSeries, setConfirmingSeries] = useState(false);
@@ -100,8 +103,15 @@ export function EventDetailModal({
   })();
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full">
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Event details"
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-2xl max-w-md w-full"
+      >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">
             {event.title}

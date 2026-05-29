@@ -98,8 +98,12 @@ export function buildDigestData(opts: {
     // - Multi-day/all-day event overlaps the next 7 days
     const startsToday = eventStart.getTime() === today.getTime();
     const startsTomorrow = eventStart.getTime() === tomorrow.getTime();
+    // Multi-day if it spans more than one calendar day. Compare day-floored
+    // values (eventStart/eventEnd are startOfDay) rather than a raw 24h ms
+    // delta, which mis-classified exactly-24h events and was off by an hour
+    // on DST-length days.
     const overlapsWeek =
-      (e.allDay || (e.end && e.end.getTime() - e.start.getTime() > 86400000)) &&
+      (e.allDay || eventEnd.getTime() > eventStart.getTime()) &&
       eventStart < weekEnd &&
       eventEnd >= today;
 
@@ -181,16 +185,18 @@ export async function publishDigestData(opts: {
   await opts.publishEvent(signed);
 }
 
-// ── Push subscription (Web Push + native FCM/APNs) ───────────────────
+// ── Push subscription (Web Push) ─────────────────────────────────────
+//
+// Web/PWA reminders use the W3C Web Push standard (VAPID) — no Google/FCM
+// dependency. Native (Tauri desktop/mobile, incl. GrapheneOS) does NOT use
+// server push at all: it schedules OS-level *local* notifications via
+// useTauriScheduledNotifications, which the OS fires on time with no server
+// and no push service. So there is intentionally no FCM/APNs path here.
 
 export interface PushSubscriptionPayload {
   v: 1;
-  /** Defaults to "webpush" for backward compatibility. */
-  platform?: "webpush" | "fcm";
   endpoint: string;
   keys: { p256dh: string; auth: string };
-  /** Native FCM device token. Absent for webpush. */
-  token?: string;
   allDayMinsBefore: number;
   timedMinsBefore: number;
   timezone: string;
@@ -276,79 +282,7 @@ async function hashEndpoint(endpoint: string): Promise<string> {
     .join("");
 }
 
-// ── Native push (Tauri Android FCM) ──────────────────────────────────
-
-/**
- * Attempt to obtain an FCM device token on Tauri Android.
- *
- * Tauri 2.x's plugin-notification does NOT currently expose FCM tokens
- * directly — the OS-scheduled-notification path it surfaces is for
- * foreground reminders only, not server push. Real server push requires
- * a Tauri Android FCM plugin (or a Capacitor-style native plugin) that
- * the operator wires up. Until such a plugin is wired into this app,
- * this function returns null and the planner falls back to OS-scheduled
- * notifications via useTauriScheduledNotifications.
- *
- * The shape is in place so swapping in a real FCM-token source later is
- * a single-file change: implement getNativePushToken() and start
- * returning the token. The daemon already accepts these payloads
- * (handlePushSub in digest.ts).
- *
- * Apple/iOS / APNs are deliberately not supported — see project ethos.
- */
-export async function getNativePushToken(): Promise<{ platform: "fcm"; token: string } | null> {
-  // Placeholder. To enable native Android push:
-  //   1. Add a Tauri Android FCM plugin to Cargo.toml + src-tauri/src/lib.rs.
-  //   2. Add the JS counterpart to package.json and import it here.
-  //   3. Read the token and return it.
-  return null;
-}
-
-/** Same shape as publishPushSubscription but for FCM subscriptions. */
-export async function publishNativePushSubscription(opts: {
-  platform: "fcm";
-  token: string;
-  allDayMinsBefore: number;
-  timedMinsBefore: number;
-  timezone: string;
-  nip44: NostrSigner["nip44"];
-  signEvent: (e: { kind: number; created_at: number; tags: string[][]; content: string }) => Promise<{
-    id: string; pubkey: string; created_at: number; kind: number; tags: string[][]; content: string; sig: string;
-  }>;
-  publishEvent: (e: {
-    id: string; pubkey: string; created_at: number; kind: number; tags: string[][]; content: string; sig: string;
-  }) => Promise<void>;
-}): Promise<void> {
-  // The "endpoint" field doubles as a stable identity key for the
-  // daemon's pushSubs map. Use platform + hash(token) so a re-registration
-  // with the same token replaces the previous entry deterministically.
-  const tokenHash = await hashEndpoint(opts.token);
-  const endpoint = `${opts.platform}:${tokenHash}`;
-
-  const payload: PushSubscriptionPayload = {
-    v: 1,
-    platform: opts.platform,
-    endpoint,
-    keys: { p256dh: "", auth: "" }, // unused for native; daemon ignores
-    token: opts.token,
-    allDayMinsBefore: opts.allDayMinsBefore,
-    timedMinsBefore: opts.timedMinsBefore,
-    timezone: opts.timezone,
-  };
-
-  const encrypted = await opts.nip44.encrypt(
-    DIGEST_BOT_PUBKEY,
-    JSON.stringify(payload)
-  );
-
-  const signed = await opts.signEvent({
-    kind: KIND_APP_DATA,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [
-      ["d", `planner-push-sub-${tokenHash}`],
-      ["p", DIGEST_BOT_PUBKEY],
-    ],
-    content: encrypted,
-  });
-  await opts.publishEvent(signed);
-}
+// Native (Tauri desktop/mobile, incl. GrapheneOS) does not register for
+// server push: it uses OS-level local scheduled notifications instead (see
+// useTauriScheduledNotifications). There is deliberately no FCM/APNs path —
+// no Google Play Services dependency.

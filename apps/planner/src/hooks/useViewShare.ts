@@ -85,6 +85,11 @@ export function useApplyInitialViewHash(): void {
   const { calendars, activeCalendarIds, toggleCalendar, setViewMode, setActiveTags, setCurrentDate } = useCalendar();
   const { setShowDaily, setShowLists } = useSettings();
   const applied = useRef(false);
+  // Mirror the active set so the one-shot effect diffs against the LATEST
+  // membership (not the value captured when the effect closure was created),
+  // avoiding a spurious double-toggle if it changed in the same tick.
+  const activeRef = useRef(activeCalendarIds);
+  activeRef.current = activeCalendarIds;
 
   useEffect(() => {
     if (applied.current) return;
@@ -106,7 +111,7 @@ export function useApplyInitialViewHash(): void {
       const validSet = new Set(calendars.map((c) => c.dTag));
       const target = new Set(state.cals.filter((d) => validSet.has(d)));
       for (const cal of calendars) {
-        const has = activeCalendarIds.has(cal.dTag);
+        const has = activeRef.current.has(cal.dTag);
         const wants = target.has(cal.dTag);
         if (has !== wants) toggleCalendar(cal.dTag);
       }

@@ -133,6 +133,16 @@ Key distribution:
 3. Owner stores their own copy of the key encrypted to self (`planner-cal-key-{calDTag}`)
 4. Member list encrypted to self (`planner-cal-members-{calDTag}`)
 
+**Consent gate (anti-injection):** A key envelope encrypted to a user only
+proves someone *sent* it — not that the user agreed to join. Without a gate,
+any third party could publish an envelope and inject a calendar into a
+victim's view. So an envelope from an owner the user hasn't already consented
+to is surfaced as a **pending invitation** (see `SharingContext.pendingInvitations`
+and the Sidebar's invitation panel) requiring an explicit Accept/Reject.
+Consent is recorded durably in `localStorage` (`isAcceptedShare` /
+`isRejectedShare` in `sharing.ts`) and is granted automatically when the user
+opens an invite link (`acceptInviteLink`). Rejected invites never reappear.
+
 Key rotation on member removal:
 1. Revoke old key envelope (kind 5 deletion)
 2. Generate new AES key

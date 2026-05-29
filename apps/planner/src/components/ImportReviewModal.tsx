@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useRef, useState, useMemo } from "react";
+import { useModalA11y } from "../hooks/useModalA11y";
 import { X, Upload, AlertTriangle, Check, Merge, Replace, Shield } from "lucide-react";
 import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
@@ -9,6 +10,7 @@ import {
   buildDateEventTags,
   buildTimeEventTags,
   generateDTag,
+  advanceDate,
   type CalendarEvent,
 } from "../lib/nostr";
 import { encryptEvent } from "../lib/crypto";
@@ -17,6 +19,27 @@ import type { ParsedIcalEvent } from "../lib/ical";
 
 type ImportMode = "merge" | "replace";
 type ImportPhase = "review" | "importing" | "done";
+
+/** Expand a parsed event into individual occurrence (start,end) pairs.
+ *  Non-recurring events yield exactly one. Honors INTERVAL and UNTIL, and
+ *  advances `end` alongside `start` so durations stay wall-clock-correct
+ *  across DST. Capped to keep a pathological rule from flooding the relay. */
+function expandOccurrences(evt: ParsedIcalEvent): { start: Date; end?: Date }[] {
+  if (!evt.recurrence) return [{ start: evt.start, end: evt.end }];
+  const { freq, count, interval = 1, until } = evt.recurrence;
+  const MAX = 365;
+  const safe = Math.min(count, MAX);
+  const untilMs = until ? until * 1000 : null;
+  const out: { start: Date; end?: Date }[] = [];
+  for (let i = 0; i < safe; i++) {
+    const step = i * interval;
+    const start = advanceDate(evt.start, freq, step);
+    if (untilMs !== null && start.getTime() > untilMs) break;
+    const end = evt.end ? advanceDate(evt.end, freq, step) : undefined;
+    out.push({ start, end });
+  }
+  return out.length > 0 ? out : [{ start: evt.start, end: evt.end }];
+}
 
 interface ImportReviewModalProps {
   parsed: ParsedIcalEvent[];
@@ -39,6 +62,8 @@ function matchesExisting(parsed: ParsedIcalEvent, existing: CalendarEvent): bool
 
 export function ImportReviewModal({ parsed, fileName, onClose, onBackup }: ImportReviewModalProps) {
   const { pubkey, signEvent, publishEvent, signer } = useNostr();
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
   const { events, deleteEvent, forceFullRefresh } = useCalendar();
   const { shouldEncrypt } = useSettings();
 
@@ -91,58 +116,77 @@ export function ImportReviewModal({ parsed, fileName, onClose, onBackup }: Impor
         const evt = toImport[i];
         setProgress(`Publishing event ${i + 1}/${toImport.length}: ${evt.title}`);
 
-        const dTag = generateDTag();
-        let kind: number;
-        let tags: string[][];
+        // Materialize recurring events into individual instances (the app
+        // stores recurring series as real per-occurrence events, not a single
+        // rrule-bearing event). Non-recurring events yield a single instance.
+        const occurrences = expandOccurrences(evt);
+        // A shared series id links the instances so series edit/delete works.
+        const seriesId = occurrences.length > 1 ? generateDTag() : undefined;
 
-        if (evt.allDay) {
-          kind = KIND_DATE_EVENT;
-          tags = buildDateEventTags({
-            dTag,
-            title: evt.title,
-            startDate: format(evt.start, "yyyy-MM-dd"),
-            endDate: evt.end ? format(evt.end, "yyyy-MM-dd") : undefined,
-            location: evt.location,
-            link: evt.link,
-            hashtags: evt.hashtags.length > 0 ? evt.hashtags : undefined,
-          });
-        } else {
-          kind = KIND_TIME_EVENT;
-          tags = buildTimeEventTags({
-            dTag,
-            title: evt.title,
-            startUnix: Math.floor(evt.start.getTime() / 1000),
-            endUnix: evt.end ? Math.floor(evt.end.getTime() / 1000) : undefined,
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            location: evt.location,
-            link: evt.link,
-            hashtags: evt.hashtags.length > 0 ? evt.hashtags : undefined,
-          });
+        for (let j = 0; j < occurrences.length; j++) {
+          const occ = occurrences[j];
+          const dTag = generateDTag();
+          let kind: number;
+          let tags: string[][];
+
+          if (evt.allDay) {
+            kind = KIND_DATE_EVENT;
+            tags = buildDateEventTags({
+              dTag,
+              title: evt.title,
+              startDate: format(occ.start, "yyyy-MM-dd"),
+              endDate: occ.end ? format(occ.end, "yyyy-MM-dd") : undefined,
+              location: evt.location,
+              link: evt.link,
+              hashtags: evt.hashtags.length > 0 ? evt.hashtags : undefined,
+              seriesId,
+            });
+          } else {
+            kind = KIND_TIME_EVENT;
+            tags = buildTimeEventTags({
+              dTag,
+              title: evt.title,
+              startUnix: Math.floor(occ.start.getTime() / 1000),
+              endUnix: occ.end ? Math.floor(occ.end.getTime() / 1000) : undefined,
+              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              location: evt.location,
+              link: evt.link,
+              hashtags: evt.hashtags.length > 0 ? evt.hashtags : undefined,
+              seriesId,
+            });
+          }
+
+          // Store the recurrence rule in the first instance's content so the
+          // series is recognized (matches how the in-app editor saves it).
+          const content =
+            seriesId && j === 0
+              ? JSON.stringify({ description: evt.description || undefined, recurrence: evt.recurrence })
+              : evt.description || "";
+
+          const unsigned = {
+            kind,
+            created_at: Math.floor(Date.now() / 1000),
+            tags,
+            content,
+          };
+
+          if (shouldEncrypt([]) && pubkey) {
+            const evtDTag = unsigned.tags.find((t: string[]) => t[0] === "d")?.[1] || "";
+            const encrypted = await encryptEvent(
+              pubkey, unsigned.kind, evtDTag, unsigned.tags, unsigned.content, signer!
+            );
+            const signed = await signEvent({
+              ...unsigned,
+              tags: encrypted.tags,
+              content: encrypted.content,
+            });
+            await publishEvent(signed);
+          } else {
+            const signed = await signEvent(unsigned);
+            await publishEvent(signed);
+          }
+          imported++;
         }
-
-        const unsigned = {
-          kind,
-          created_at: Math.floor(Date.now() / 1000),
-          tags,
-          content: evt.description || "",
-        };
-
-        if (shouldEncrypt([]) && pubkey) {
-          const evtDTag = unsigned.tags.find((t: string[]) => t[0] === "d")?.[1] || "";
-          const encrypted = await encryptEvent(
-            pubkey, unsigned.kind, evtDTag, unsigned.tags, unsigned.content, signer!
-          );
-          const signed = await signEvent({
-            ...unsigned,
-            tags: encrypted.tags,
-            content: encrypted.content,
-          });
-          await publishEvent(signed);
-        } else {
-          const signed = await signEvent(unsigned);
-          await publishEvent(signed);
-        }
-        imported++;
       }
 
       await forceFullRefresh();
@@ -160,7 +204,13 @@ export function ImportReviewModal({ parsed, fileName, onClose, onBackup }: Impor
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] flex flex-col">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Import review"
+        className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] flex flex-col"
+      >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold">Import Review</h2>

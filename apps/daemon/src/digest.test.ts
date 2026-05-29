@@ -3,7 +3,7 @@
  * daily reset behavior for push notifications.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { UserRegistry } from "./digest.js";
+import { UserRegistry, pushDedupKey } from "./digest.js";
 
 // Mock signature verification — we test logic, not cryptography here
 vi.mock("nostr-tools/pure", () => ({
@@ -153,6 +153,14 @@ describe("UserRegistry — handlePushSub schema validation", () => {
     expect(registry.getPendingPushNotifications(24)).toHaveLength(0);
   });
 
+  it("rejects push sub with an invalid IANA timezone (DoS guard)", () => {
+    // A bogus zone would throw inside Intl.DateTimeFormat in the push loop;
+    // it must be rejected at ingest instead.
+    const bad = { ...VALID_PUSH_SUB, timezone: "Mars/Phobos" };
+    registry.processEvent(makeEvent("planner-push-sub-device1", bad));
+    expect(registry.getPendingPushNotifications(24)).toHaveLength(0);
+  });
+
   it("rejects an empty payload", () => {
     registry.processEvent(makeEvent("planner-push-sub-device1", {}));
     expect(registry.getPendingPushNotifications(24)).toHaveLength(0);
@@ -191,7 +199,7 @@ describe("UserRegistry — per-timezone daily reset", () => {
     expect(pending).toHaveLength(1);
 
     const { sub, event } = pending[0];
-    const key = `${event.start}\x00${event.title}\x00${event.location ?? ""}`;
+    const key = pushDedupKey(event);
     registry.markPushSent(sub, key);
 
     const pending2 = registry.getPendingPushNotifications(24);
@@ -203,7 +211,7 @@ describe("UserRegistry — per-timezone daily reset", () => {
     expect(pending).toHaveLength(1);
 
     const { sub, event } = pending[0];
-    const key = `${event.start}\x00${event.title}\x00${event.location ?? ""}`;
+    const key = pushDedupKey(event);
     registry.markPushSent(sub, key);
 
     // Simulate a new local day by resetting the date key to a past value

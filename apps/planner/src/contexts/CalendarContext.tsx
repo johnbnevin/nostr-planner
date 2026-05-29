@@ -630,7 +630,6 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
         decryptResult.decryptSuccesses > 0 ? 0 : decryptResult.decryptErrors,
       );
       setEvents(decryptResult.events);
-      setEventsLoading(false);
 
       // Persist to IndexedDB for offline access on next load
       void cacheCalendarData(pubkey, decryptResult.events, decryptResult.calendars.length > 0 ? decryptResult.calendars : calendarsRef.current);
@@ -641,8 +640,13 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       // exist in encrypted form, preventing schedule leaks on public relays.
       // localStorage is only marked done AFTER the loop completes so that
       // an interrupted cleanup (tab close, network failure) will be retried.
+      // Only run on a FULL refresh (no `since` filter). On an incremental
+      // refresh `rawEvents` is just the recent window, so `hasEncryptedVersion`
+      // would be computed against partial data and could delete a plaintext
+      // event whose encrypted twin simply wasn't in this window — a real
+      // schedule-leak/data-loss risk given the one-shot localStorage flag.
       const cleanupKey = `planner-cleaned-unencrypted-${pubkey}`;
-      if (!localStorage.getItem(cleanupKey)) {
+      if (!sinceFilter.since && !localStorage.getItem(cleanupKey)) {
         const staleEvents = rawEvents.filter((e) => {
           if (e.pubkey !== pubkey) return false;
           if (isEncryptedEvent(e.tags) || isSharedEncryptedEvent(e.tags)) return false;
@@ -690,17 +694,29 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
           }
 
           if (!mountedRef.current) return;
-          lsSet(cleanupKey, "1");
-          if (cleaned > 0) log.debug("migration cleanup: deleted", cleaned, "stale plaintext events");
+          // Only mark the migration done when every intended deletion actually
+          // published (or there was nothing to delete). A partial failure
+          // leaves the flag unset so the next full refresh retries, rather than
+          // permanently leaving plaintext events leaking on public relays.
+          const allDeleted = signed.length === toDelete.length && cleaned === signed.length;
+          if (allDeleted) {
+            lsSet(cleanupKey, "1");
+            if (cleaned > 0) log.debug("migration cleanup: deleted", cleaned, "stale plaintext events");
+          } else {
+            log.warn(`migration cleanup incomplete (${cleaned}/${toDelete.length}) — will retry on next full refresh`);
+          }
         })();
       }
       log.timeEnd("refresh");
     } catch (err) {
       log.error("refresh failed", err);
       setSyncError(`Relay sync failed: ${err instanceof Error ? err.message : String(err)}`);
-      setEventsLoading(false);
       log.timeEnd("refresh");
     } finally {
+      // Always clear the spinner, on every exit path. Doing it here (rather
+      // than at the end of the try) guarantees a throw between setEventsLoading(true)
+      // and the success path can't leave the UI stuck loading forever.
+      setEventsLoading(false);
       refreshingRef.current = false;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- refs/setters from useSharing are stable
@@ -709,29 +725,32 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
   // Keep the ref in sync so the login effect always calls the latest doRefresh
   useEffect(() => { doRefreshRef.current = doRefresh; }, [doRefresh]);
 
-  // Pending resolve/reject from the most recent debounced caller, so clearing the
-  // timer can resolve it immediately instead of leaving a hanging Promise.
-  const pendingResolveRef = useRef<{ resolve: () => void; reject: (e: unknown) => void } | null>(null);
+  // All callers coalesced into the current debounce window. When the window
+  // fires we run ONE refresh and settle every waiter with its real outcome —
+  // so a superseded caller that awaited refreshEvents() reflects the actual
+  // refresh result instead of a misleading immediate "success".
+  const pendingWaitersRef = useRef<Array<{ resolve: () => void; reject: (e: unknown) => void }>>([]);
 
   const refreshEvents = useCallback(async () => {
-    // If a debounce timer is pending, resolve the previous caller immediately
-    // (the new caller supersedes it) to avoid hanging Promises.
-    if (refreshTimerRef.current) {
-      clearTimeout(refreshTimerRef.current);
-      pendingResolveRef.current?.resolve();
-      pendingResolveRef.current = null;
-    }
     return new Promise<void>((resolve, reject) => {
-      pendingResolveRef.current = { resolve, reject };
+      pendingWaitersRef.current.push({ resolve, reject });
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
       refreshTimerRef.current = setTimeout(async () => {
-        pendingResolveRef.current = null;
-        if (refreshPromiseRef.current) {
-          try { await refreshPromiseRef.current; resolve(); } catch (err) { reject(err); }
-          return;
+        refreshTimerRef.current = null;
+        const waiters = pendingWaitersRef.current;
+        pendingWaitersRef.current = [];
+        try {
+          if (refreshPromiseRef.current) {
+            await refreshPromiseRef.current;
+          } else {
+            const p = doRefresh();
+            refreshPromiseRef.current = p;
+            try { await p; } finally { refreshPromiseRef.current = null; }
+          }
+          for (const w of waiters) w.resolve();
+        } catch (err) {
+          for (const w of waiters) w.reject(err);
         }
-        const p = doRefresh();
-        refreshPromiseRef.current = p;
-        try { await p; resolve(); } catch (err) { reject(err); } finally { refreshPromiseRef.current = null; }
       }, 500);
     });
   }, [doRefresh]);
@@ -1174,18 +1193,24 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     setEvents(live);
     setEventTombstones(tombs);
     // Mirror remote tombstones into deletedDTags so a subsequent relay
-    // refresh doesn't pull the deleted event back in.
+    // refresh doesn't pull the deleted event back in. Persist to
+    // sessionStorage too (like persistDeletion) — otherwise a page reload in
+    // the same session loses these and a relay refresh could resurrect the
+    // remotely-deleted event.
     if (tombDTags.size > 0) {
       setDeletedDTags((prev) => {
         const next = new Set(prev);
         for (const d of tombDTags) next.add(d);
+        if (pubkey) {
+          try { sessionStorage.setItem(`nostr-planner-deleted-${pubkey}`, JSON.stringify([...next])); } catch { /* ignore */ }
+        }
         return next;
       });
     }
     setCalendars(cals);
     setActiveCalendarIds(new Set(cals.map((c) => c.dTag)));
     setEventsLoading(false);
-  }, []);
+  }, [pubkey]);
 
   // ── Calendar toggle ────────────────────────────────────────────────
 
@@ -1264,47 +1289,55 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       const sharedKey = await generateSharedKey();
       const keyBase64 = await exportKeyToBase64(sharedKey);
 
-      // Store key in memory
+      // Store key in memory + optimistic UI update.
       setSharedKeys((prev) => new Map(prev).set(dTag, sharedKey));
-
-      // Optimistic UI update
       setCalendars((prev) => [...prev, { dTag, title, eventRefs: [], color: calColor }]);
       setActiveCalendarIds((prev) => new Set([...prev, dTag]));
 
-      // Publish own key backup (NIP-44 to self)
-      await publishOwnKeyBackup({
-        ownerPubkey: pubkey!,
-        calDTag: dTag,
-        keyBase64,
-        nip44: signer!.nip44,
-        signEvent,
-        publishEvent,
-      });
+      try {
+        // Publish own key backup (NIP-44 to self)
+        await publishOwnKeyBackup({
+          ownerPubkey: pubkey!,
+          calDTag: dTag,
+          keyBase64,
+          nip44: signer!.nip44,
+          signEvent,
+          publishEvent,
+        });
 
-      // Publish the calendar collection event (AES-GCM encrypted)
-      const tags = [["d", dTag], ["title", title], ["color", calColor]];
-      await signAndPublish(
-        pubkey!,
-        KIND_CALENDAR,
-        tags,
-        "",
-        false, // don't NIP-44 encrypt — we use AES-GCM via sharedKey below
-        signEvent,
-        publishEvent,
-        signer,
-        sharedKey,
-        dTag
-      );
+        // Publish the calendar collection event (AES-GCM encrypted)
+        const tags = [["d", dTag], ["title", title], ["color", calColor]];
+        await signAndPublish(
+          pubkey!,
+          KIND_CALENDAR,
+          tags,
+          "",
+          false, // don't NIP-44 encrypt — we use AES-GCM via sharedKey below
+          signEvent,
+          publishEvent,
+          signer,
+          sharedKey,
+          dTag
+        );
 
-      // Initialize empty member list
-      await publishMemberList({
-        ownerPubkey: pubkey!,
-        calDTag: dTag,
-        members: [],
-        nip44: signer!.nip44,
-        signEvent,
-        publishEvent,
-      });
+        // Initialize empty member list
+        await publishMemberList({
+          ownerPubkey: pubkey!,
+          calDTag: dTag,
+          members: [],
+          nip44: signer!.nip44,
+          signEvent,
+          publishEvent,
+        });
+      } catch (err) {
+        // Roll back the optimistic key + calendar so a half-created shared
+        // calendar (key in memory but no member list / collection on relays)
+        // doesn't linger and confuse subsequent member operations.
+        setSharedKeys((prev) => { const next = new Map(prev); next.delete(dTag); return next; });
+        setCalendars((prev) => prev.filter((c) => c.dTag !== dTag));
+        setActiveCalendarIds((prev) => { const next = new Set(prev); next.delete(dTag); return next; });
+        throw err;
+      }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setSharedKeys is a stable setter from useSharing
     [pubkey, signEvent, publishEvent, calendars.length, canPublish, signer]
@@ -1326,51 +1359,59 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       const sharedKey = await generateSharedKey();
       const keyBase64 = await exportKeyToBase64(sharedKey);
 
-      // 2. Store key in memory
+      // 2. Store key in memory (optimistic).
       setSharedKeys((prev) => new Map(prev).set(calDTag, sharedKey));
 
-      // 3. Publish own key backup (NIP-44 to self)
-      await publishOwnKeyBackup({
-        ownerPubkey: pubkey,
-        calDTag,
-        keyBase64,
-        nip44: signer!.nip44,
-        signEvent,
-        publishEvent,
-      });
+      try {
+        // 3. Publish own key backup (NIP-44 to self)
+        await publishOwnKeyBackup({
+          ownerPubkey: pubkey,
+          calDTag,
+          keyBase64,
+          nip44: signer!.nip44,
+          signEvent,
+          publishEvent,
+        });
 
-      // 4. Re-encrypt the calendar collection with the shared key
-      const calTags: string[][] = [["d", calDTag], ["title", cal.title]];
-      if (cal.color) calTags.push(["color", cal.color]);
-      for (const ref of cal.eventRefs) calTags.push(["a", ref]);
-      await signAndPublish(
-        pubkey, KIND_CALENDAR, calTags, "",
-        false, signEvent, publishEvent,
-        signer, sharedKey, calDTag
-      );
+        // 4. Re-encrypt the calendar collection with the shared key
+        const calTags: string[][] = [["d", calDTag], ["title", cal.title]];
+        if (cal.color) calTags.push(["color", cal.color]);
+        for (const ref of cal.eventRefs) calTags.push(["a", ref]);
+        await signAndPublish(
+          pubkey, KIND_CALENDAR, calTags, "",
+          false, signEvent, publishEvent,
+          signer, sharedKey, calDTag
+        );
 
-      // 5. Re-encrypt all events on this calendar with the shared key.
-      // Sign sequentially (NIP-07 requires one popup at a time), then
-      // publish all in parallel and throw if any fail.
-      const calEvents = eventsRef.current.filter((e) => e.calendarRefs.includes(calDTag));
-      const signedCalEvents: SignedNostrEvent[] = [];
-      for (const e of calEvents) {
-        const tags = buildEventTags(e);
-        signedCalEvents.push(await prepareSignedEvent(pubkey, e.kind, tags, e.content, false, signEvent, signer, sharedKey, calDTag));
+        // 5. Re-encrypt all events on this calendar with the shared key.
+        // Sign sequentially (NIP-07 requires one popup at a time), then
+        // publish all in parallel and throw if any fail.
+        const calEvents = eventsRef.current.filter((e) => e.calendarRefs.includes(calDTag));
+        const signedCalEvents: SignedNostrEvent[] = [];
+        for (const e of calEvents) {
+          const tags = buildEventTags(e);
+          signedCalEvents.push(await prepareSignedEvent(pubkey, e.kind, tags, e.content, false, signEvent, signer, sharedKey, calDTag));
+        }
+        const publishResults = await Promise.allSettled(signedCalEvents.map(s => publishEvent(s)));
+        const publishFailed = publishResults.filter(r => r.status === "rejected").length;
+        if (publishFailed > 0) throw new Error(`Failed to publish ${publishFailed}/${signedCalEvents.length} events. Please try again.`);
+
+        // 6. Initialize empty member list
+        await publishMemberList({
+          ownerPubkey: pubkey,
+          calDTag,
+          members: [],
+          nip44: signer!.nip44,
+          signEvent,
+          publishEvent,
+        });
+      } catch (err) {
+        // Roll back the in-memory key so a failed conversion doesn't leave the
+        // calendar in a half-shared state (key present but no member list /
+        // partially re-encrypted on relays). The user can retry from clean.
+        setSharedKeys((prev) => { const next = new Map(prev); next.delete(calDTag); return next; });
+        throw err;
       }
-      const publishResults = await Promise.allSettled(signedCalEvents.map(s => publishEvent(s)));
-      const publishFailed = publishResults.filter(r => r.status === "rejected").length;
-      if (publishFailed > 0) throw new Error(`Failed to publish ${publishFailed}/${signedCalEvents.length} events. Please try again.`);
-
-      // 6. Initialize empty member list
-      await publishMemberList({
-        ownerPubkey: pubkey,
-        calDTag,
-        members: [],
-        nip44: signer!.nip44,
-        signEvent,
-        publishEvent,
-      });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- setSharedKeys/sharedKeysRef are stable from useSharing
     [pubkey, signEvent, publishEvent, canPublish, signer]
@@ -1401,7 +1442,9 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
         const newKey = await generateSharedKey();
         const newKeyBase64 = await exportKeyToBase64(newKey);
 
-        // 3. Update own key backup with new key
+        // 3. Update own key backup with new key. This is authoritative on
+        // reload — loadSharedKeysFromNostr imports the owner's backup, so even
+        // if the session ends mid-rotation the next login picks up the new key.
         await publishOwnKeyBackup({
           ownerPubkey: pubkey,
           calDTag,
@@ -1411,12 +1454,41 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
           publishEvent,
         });
 
-        // 4. Re-distribute new key to remaining members
         const currentMembers = (calendarMembers.get(calDTag) || []).filter(
           (m) => m !== memberPubkey
         );
-        setCalendarMembers((prev) => new Map(prev).set(calDTag, currentMembers));
 
+        // 4. Re-encrypt ALL events + the collection with the new key and
+        // publish them FIRST, before touching in-memory state or distributing
+        // envelopes. Sign sequentially (NIP-07 UX), publish in parallel, and
+        // bail if any fail — so we never advance the in-memory key past a
+        // half-written relay state.
+        const calEvents = eventsRef.current.filter((e) => e.calendarRefs.includes(calDTag));
+        const signedReEncrypted: SignedNostrEvent[] = [];
+        for (const e of calEvents) {
+          const tags = buildEventTags(e);
+          signedReEncrypted.push(await prepareSignedEvent(pubkey, e.kind, tags, e.content, false, signEvent, signer, newKey, calDTag));
+        }
+        const cal = calendarsRef.current.find((c) => c.dTag === calDTag);
+        if (cal) {
+          const calTags: string[][] = [["d", calDTag], ["title", cal.title]];
+          if (cal.color) calTags.push(["color", cal.color]);
+          signedReEncrypted.push(await prepareSignedEvent(pubkey, KIND_CALENDAR, calTags, "", false, signEvent, signer, newKey, calDTag));
+        }
+        const publishResults = await Promise.allSettled(signedReEncrypted.map(s => publishEvent(s)));
+        const publishFailed = publishResults.filter(r => r.status === "rejected").length;
+        if (publishFailed > 0) throw new Error(`Failed to publish ${publishFailed}/${signedReEncrypted.length} re-encrypted events. Please try again.`);
+
+        // 5. Relays now hold new-key ciphertext — promote the new key in memory
+        // so it matches. Set the ref directly too so doRefresh (once unblocked)
+        // reads it without waiting for the SharingContext sync effect.
+        setSharedKeys((prev) => {
+          const next = new Map(prev).set(calDTag, newKey);
+          sharedKeysRef.current = next;
+          return next;
+        });
+
+        // 6. Distribute the new key to remaining members.
         for (const m of currentMembers) {
           await publishKeyEnvelope({
             calDTag,
@@ -1428,29 +1500,9 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
           });
         }
 
-        // 5. Re-encrypt all events on this calendar with the new key.
-        // Sign sequentially (NIP-07 UX), then publish in parallel.
-        const calEvents = eventsRef.current.filter((e) => e.calendarRefs.includes(calDTag));
-        const signedReEncrypted: SignedNostrEvent[] = [];
-        for (const e of calEvents) {
-          const tags = buildEventTags(e);
-          signedReEncrypted.push(await prepareSignedEvent(pubkey, e.kind, tags, e.content, false, signEvent, signer, newKey, calDTag));
-        }
-
-        // Re-encrypt the calendar collection itself
-        const cal = calendarsRef.current.find((c) => c.dTag === calDTag);
-        if (cal) {
-          const calTags: string[][] = [["d", calDTag], ["title", cal.title]];
-          if (cal.color) calTags.push(["color", cal.color]);
-          signedReEncrypted.push(await prepareSignedEvent(pubkey, KIND_CALENDAR, calTags, "", false, signEvent, signer, newKey, calDTag));
-        }
-
-        // Publish all re-encrypted events in parallel
-        const publishResults = await Promise.allSettled(signedReEncrypted.map(s => publishEvent(s)));
-        const publishFailed = publishResults.filter(r => r.status === "rejected").length;
-        if (publishFailed > 0) throw new Error(`Failed to publish ${publishFailed}/${signedReEncrypted.length} re-encrypted events. Please try again.`);
-
-        // Update member list
+        // 7. Publish the updated member list, THEN reflect it in state — so a
+        // mid-flight failure can't leave the UI showing a member as removed
+        // while the relay (and key access) still includes them.
         await publishMemberList({
           ownerPubkey: pubkey,
           calDTag,
@@ -1459,9 +1511,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
           signEvent,
           publishEvent,
         });
-
-        // Store new key in memory
-        setSharedKeys((prev) => new Map(prev).set(calDTag, newKey));
+        setCalendarMembers((prev) => new Map(prev).set(calDTag, currentMembers));
       } finally {
         // Always unblock doRefresh, even if an error occurred
         keyRotatingRef.current = false;
@@ -1774,10 +1824,17 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     let pool: SimplePool | null = null;
     let sub: { close: () => void } | null = null;
     let closed = false;
+    let reopenTimer: ReturnType<typeof setTimeout> | null = null;
 
     const open = () => {
       if (closed) return;
-      try { sub?.close(); pool?.close(urls); } catch { /* ignore */ }
+      // Establish the new pool/sub FIRST, then close the old refs. Capturing
+      // them locally means a throwing close() can't strand the old sockets
+      // (the new refs are already assigned; the locals are GC'd). Without this,
+      // a thrown close() left the previous pool referenced by nothing yet
+      // never closed — a slow socket leak over a long-lived session.
+      const oldSub = sub;
+      const oldPool = pool;
       pool = new SimplePool();
       sub = pool.subscribe(
         urls,
@@ -1795,11 +1852,21 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
           },
         }
       );
+      try { oldSub?.close(); oldPool?.close(urls); } catch { /* ignore */ }
       log.debug("live event subscription opened,", distinctAuthors.length, "authors");
     };
 
+    // Debounce reopen on focus/visibility: mobile PWAs fire focus + visible in
+    // quick succession (and repeatedly during alt-tabbing), which would
+    // otherwise tear down and rebuild the socket on every flicker.
+    const scheduleOpen = () => {
+      if (closed) return;
+      if (reopenTimer) clearTimeout(reopenTimer);
+      reopenTimer = setTimeout(() => { reopenTimer = null; open(); }, 1000);
+    };
+
     const onVisible = () => {
-      if (document.visibilityState === "visible") open();
+      if (document.visibilityState === "visible") scheduleOpen();
     };
 
     open();
@@ -1808,6 +1875,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
 
     return () => {
       closed = true;
+      if (reopenTimer) clearTimeout(reopenTimer);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
       try { sub?.close(); pool?.close(urls); } catch { /* ignore */ }

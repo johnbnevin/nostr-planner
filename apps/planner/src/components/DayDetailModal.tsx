@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
+import { useModalA11y } from "../hooks/useModalA11y";
 import { X, Plus, Clock, MapPin, Tag, FileText, Link as LinkIcon, Repeat } from "lucide-react";
 import { format, isSameDay, startOfDay, endOfDay } from "date-fns";
 import { useCalendar } from "../contexts/CalendarContext";
@@ -19,6 +20,8 @@ interface DayDetailModalProps {
  */
 export function DayDetailModal({ date, onClose, onEventClick, onNewEvent }: DayDetailModalProps) {
   const { filteredEvents, calendars } = useCalendar();
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
 
   const events = useMemo(() => {
     const dayStart = startOfDay(date);
@@ -39,8 +42,15 @@ export function DayDetailModal({ date, onClose, onEventClick, onNewEvent }: DayD
   const dayLabel = format(date, "EEEE, MMMM d, yyyy");
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] flex flex-col">
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Day detail"
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] flex flex-col"
+      >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">{dayLabel}</h2>

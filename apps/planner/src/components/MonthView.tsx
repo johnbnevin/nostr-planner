@@ -60,14 +60,33 @@ export function MonthView({ onEventClick, onDateClick, onDayDetail, onEventCopy,
   const dragLeaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Long-press handlers to give touch devices the same right-click UX.
+  // We record the *time* a long-press fired rather than a shared boolean: the
+  // synthetic click the browser dispatches after a long-press lands within a
+  // few hundred ms on the SAME element, so a short time window suppresses
+  // exactly that click — without one stacked cell's long-press eating an
+  // unrelated tap on an overlapping element (the shared-boolean bug).
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressFired = useRef(false);
+  const longPressResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Swallow the click iff it's the synthetic follow-up to a long-press.
+   *  Returns true (and consumes the flag) when a long-press just fired. */
+  const consumeLongPress = (): boolean => {
+    if (longPressFired.current) {
+      longPressFired.current = false;
+      return true;
+    }
+    return false;
+  };
   const startLongPress = (action: () => void) => {
     cancelLongPress();
-    longPressFired.current = false;
     longPressTimer.current = setTimeout(() => {
       longPressFired.current = true;
       action();
+      // Auto-clear after a short window so an UNRELATED later tap isn't
+      // suppressed by a stale flag (the synthetic click that should consume it
+      // arrives within a few hundred ms on the same element).
+      if (longPressResetTimer.current) clearTimeout(longPressResetTimer.current);
+      longPressResetTimer.current = setTimeout(() => { longPressFired.current = false; }, 400);
     }, 500);
   };
   const cancelLongPress = () => {
@@ -285,10 +304,7 @@ export function MonthView({ onEventClick, onDateClick, onDayDetail, onEventCopy,
                     !inMonth ? "bg-gray-50/50" : ""
                   } ${isDragOver ? "bg-primary-100 ring-2 ring-inset ring-primary-500 shadow-inner" : ""}`}
                   onClick={() => {
-                    if (longPressFired.current) {
-                      longPressFired.current = false;
-                      return;
-                    }
+                    if (consumeLongPress()) return;
                     onDateClick(day);
                   }}
                   onContextMenu={(e) => {
@@ -370,10 +386,7 @@ export function MonthView({ onEventClick, onDateClick, onDayDetail, onEventCopy,
                   onDrop={(e) => handleDrop(e, week.days[bar.startCol])}
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (longPressFired.current) {
-                      longPressFired.current = false;
-                      return;
-                    }
+                    if (consumeLongPress()) return;
                     onEventClick(bar.event);
                   }}
                   onContextMenu={(e) => {
@@ -442,10 +455,7 @@ export function MonthView({ onEventClick, onDateClick, onDayDetail, onEventCopy,
                         onDrop={(e) => handleDrop(e, day)}
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (longPressFired.current) {
-                            longPressFired.current = false;
-                            return;
-                          }
+                          if (consumeLongPress()) return;
                           onEventClick(event);
                         }}
                         onContextMenu={(e) => {

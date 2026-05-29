@@ -15,21 +15,13 @@ import { nip19 } from "nostr-tools";
 import { verifyEvent } from "nostr-tools/pure";
 import type { NPool } from "@nostrify/nostrify";
 import type { Config } from "./config.js";
-import {
-  escapeIcal,
-  sanitizeRRule,
-  foldLine,
-  formatIcalDate,
-} from "@nostr-planner/ical-utils";
+import { buildVEvent } from "@nostr-planner/ical-utils";
 
 const KIND_DATE_EVENT = 31922;
 const KIND_TIME_EVENT = 31923;
 
-/** Node.js byte-length function for foldLine (avoids TextEncoder in Node). */
+/** Node.js byte-length function for line folding (avoids TextEncoder in Node). */
 const nodeByteLen = (s: string) => Buffer.byteLength(s, "utf-8");
-
-/** Convenience: fold an iCal line using Node.js Buffer for byte counting. */
-const fold = (line: string) => foldLine(line, nodeByteLen);
 
 async function buildIcalFeed(pool: NPool, pubkey: string): Promise<string> {
   const controller = new AbortController();
@@ -72,38 +64,43 @@ async function buildIcalFeed(pool: NPool, pubkey: string): Promise<string> {
 
       const allDay = event.kind === KIND_DATE_EVENT;
 
-      lines.push("BEGIN:VEVENT");
-      lines.push(fold(`UID:${escapeIcal(dTag)}@nostr-planner`));
-      lines.push(fold(`DTSTAMP:${formatIcalDate(new Date(event.created_at * 1000), false)}`));
-
+      // Resolve start/end as Date instants for the shared VEVENT builder.
+      // All-day NIP-52 dates are "YYYY-MM-DD" → parse as UTC midnight (the
+      // builder reads UTC date parts). Timed events are unix seconds.
+      let start: Date;
+      let end: Date | undefined;
       if (allDay) {
-        lines.push(fold(`DTSTART;VALUE=DATE:${startRaw.replace(/-/g, "")}`));
-        if (endRaw) lines.push(fold(`DTEND;VALUE=DATE:${endRaw.replace(/-/g, "")}`));
+        start = new Date(`${startRaw}T00:00:00Z`);
+        if (isNaN(start.getTime())) continue;
+        if (endRaw) {
+          const e = new Date(`${endRaw}T00:00:00Z`);
+          if (!isNaN(e.getTime())) end = e;
+        }
       } else {
         const startSec = parseInt(startRaw, 10);
         if (isNaN(startSec)) continue;
-        lines.push(fold(`DTSTART:${formatIcalDate(new Date(startSec * 1000), false)}`));
+        start = new Date(startSec * 1000);
         if (endRaw) {
           const endSec = parseInt(endRaw, 10);
-          if (!isNaN(endSec)) lines.push(fold(`DTEND:${formatIcalDate(new Date(endSec * 1000), false)}`));
+          if (!isNaN(endSec)) end = new Date(endSec * 1000);
         }
       }
 
-      lines.push(fold(`SUMMARY:${escapeIcal(title)}`));
-      if (event.content) lines.push(fold(`DESCRIPTION:${escapeIcal(event.content)}`));
-      if (location) lines.push(fold(`LOCATION:${escapeIcal(location)}`));
-      if (link && /^https?:\/\//i.test(link)) {
-        lines.push(fold(`URL:${link.replace(/[\r\n]/g, "")}`));
-      }
-      if (hashtags.length > 0) {
-        lines.push(fold(`CATEGORIES:${hashtags.map(escapeIcal).join(",")}`));
-      }
-      if (rruleRaw) {
-        const rrule = sanitizeRRule(rruleRaw);
-        if (rrule) lines.push(fold(`RRULE:${rrule}`));
-      }
-
-      lines.push("END:VEVENT");
+      // Shared with the planner's iCal export so the two feeds stay identical.
+      lines.push(...buildVEvent({
+        uid: dTag,
+        dtstamp: new Date(event.created_at * 1000),
+        allDay,
+        start,
+        end,
+        summary: title,
+        description: event.content || undefined,
+        location: location || undefined,
+        url: link || undefined,
+        categories: hashtags.length > 0 ? hashtags : undefined,
+        rrule: rruleRaw || undefined,
+        useLocalDates: false,
+      }, nodeByteLen));
     }
 
     lines.push("END:VCALENDAR");
@@ -158,10 +155,23 @@ function isRateLimited(ip: string, npub: string): boolean {
 function getClientIp(req: IncomingMessage, trustProxy: boolean): string {
   if (trustProxy) {
     const forwarded = req.headers["x-forwarded-for"];
-    if (typeof forwarded === "string") return forwarded.split(",")[0].trim();
+    if (typeof forwarded === "string") {
+      // Use the RIGHTMOST entry — the IP your own trusted proxy observed and
+      // appended. The leftmost entry is client-supplied and trivially spoofed
+      // to rotate the rate-limit key, which is the opposite of what we want.
+      const parts = forwarded.split(",").map((s) => s.trim()).filter(Boolean);
+      if (parts.length > 0) return parts[parts.length - 1];
+    }
   }
   return req.socket.remoteAddress || "unknown";
 }
+
+/** Global cap on concurrent feed builds. Each build fans out a relay query
+ *  (limit 5000), so without a ceiling an attacker rotating IPs (which defeats
+ *  the per-IP rate limiter) could drive unbounded concurrent relay load
+ *  through the daemon. Excess requests get a fast 503 instead. */
+const MAX_CONCURRENT_FEEDS = 8;
+let inFlightFeeds = 0;
 
 export function startCaldavServer(config: Config, pool: NPool): Server | null {
   if (!config.caldavPort) return null;
@@ -203,6 +213,14 @@ export function startCaldavServer(config: Config, pool: NPool): Server | null {
       return;
     }
 
+    // Bound concurrent relay-backed feed builds globally (the per-IP limiter
+    // doesn't help against IP rotation).
+    if (inFlightFeeds >= MAX_CONCURRENT_FEEDS) {
+      res.writeHead(503, { "Content-Type": "text/plain", "Retry-After": "5" });
+      res.end("Server busy. Try again shortly.");
+      return;
+    }
+    inFlightFeeds++;
     try {
       const ical = await buildIcalFeed(pool, pubkey);
       res.writeHead(200, {
@@ -218,6 +236,8 @@ export function startCaldavServer(config: Config, pool: NPool): Server | null {
       console.error("[caldav] feed generation failed:", err);
       res.writeHead(500, { "Content-Type": "text/plain" });
       res.end("Internal server error");
+    } finally {
+      inFlightFeeds--;
     }
   });
 

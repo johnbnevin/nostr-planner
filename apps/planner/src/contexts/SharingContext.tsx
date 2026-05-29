@@ -47,7 +47,20 @@ import {
   loadSharedCalOwners,
   encodeInvitePayload,
   decodeInvitePayload,
+  isAcceptedShare,
+  isRejectedShare,
+  acceptShare,
+  rejectShare,
 } from "../lib/sharing";
+
+/** A shared-calendar invitation awaiting the user's explicit accept/reject.
+ *  Invitations from owners the user hasn't consented to are NOT auto-imported
+ *  (that would let any third party inject a calendar); they surface here. */
+export interface PendingInvitation {
+  calDTag: string;
+  ownerPubkey: string;
+  keyBase64: string;
+}
 
 /** Time-to-live for cached shared keys before a re-fetch is triggered. */
 const SHARED_KEYS_TTL_MS = 5 * 60_000; // 5 minutes
@@ -60,6 +73,9 @@ export interface SharingContextValue {
   sharedCalOwners: Map<string, string>;
   /** calDTag -> member pubkeys (only for calendars we own + have shared). */
   calendarMembers: Map<string, string[]>;
+  /** Incoming shared-calendar invitations from owners the user hasn't yet
+   *  accepted. Surfaced for an explicit accept/reject decision. */
+  pendingInvitations: PendingInvitation[];
 
   // ── State setters (consumed by CalendarContext for removeMember/convertToShared) ──
   setSharedKeys: React.Dispatch<React.SetStateAction<Map<string, CryptoKey>>>;
@@ -92,6 +108,10 @@ export interface SharingContextValue {
   getInviteLink: (calDTag: string, calendars: CalendarCollection[]) => Promise<string>;
   /** Accept an invite link and store the shared calendar owner mapping. */
   acceptInviteLink: (encoded: string) => Promise<{ calDTag: string; title: string }>;
+  /** Accept a pending invitation: import its key and record durable consent. */
+  acceptInvitation: (calDTag: string) => Promise<void>;
+  /** Reject a pending invitation: record durable refusal so it never reappears. */
+  rejectInvitation: (calDTag: string) => void;
 
   // ── Leave / cleanup ────────────────────────────────────────────────
   /** Leave a shared calendar we are a member of and clean up local state. */
@@ -121,6 +141,8 @@ export function SharingProvider({ children }: { children: ReactNode }) {
   );
   // calDTag -> member pubkeys (only for calendars we own + have shared)
   const [calendarMembers, setCalendarMembers] = useState<Map<string, string[]>>(new Map());
+  // Incoming invitations from owners the user hasn't consented to yet.
+  const [pendingInvitations, setPendingInvitations] = useState<PendingInvitation[]>([]);
 
   // Cache shared keys — skip re-fetch if loaded within TTL
   const sharedKeysLoadedAtRef = useRef<number>(0);
@@ -147,6 +169,7 @@ export function SharingProvider({ children }: { children: ReactNode }) {
       setSharedKeys(new Map());
       setSharedCalOwners(new Map());
       setCalendarMembers(new Map());
+      setPendingInvitations([]);
       /* eslint-enable react-hooks/set-state-in-effect */
       sharedKeysRef.current = new Map();
       sharedKeysLoadedAtRef.current = 0;
@@ -203,27 +226,77 @@ export function SharingProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    // Invitations from other owners
+    // Invitations from other owners. CONSENT GATE: a key envelope encrypted
+    // to us only proves someone sent it — not that we agreed to join. Only
+    // auto-import invitations we've explicitly accepted before (durable
+    // consent, or an invite link we opened). Everything else is surfaced as a
+    // pending invitation for an explicit decision; rejected ones are dropped.
+    const pending: PendingInvitation[] = [];
     for (const [calDTag, { ownerPubkey, keyBase64 }] of inviteMap) {
-      try {
-        const key = await importKeyFromBase64(keyBase64);
-        newKeys.set(calDTag, key);
-        newOwners.set(calDTag, ownerPubkey);
-        saveSharedCalOwner(pubkey, calDTag, ownerPubkey);
-      } catch (err) {
-        log.warn("failed to import invite key for calendar", calDTag, err);
+      if (isRejectedShare(pubkey, ownerPubkey, calDTag)) continue;
+      if (isAcceptedShare(pubkey, ownerPubkey, calDTag)) {
+        try {
+          const key = await importKeyFromBase64(keyBase64);
+          newKeys.set(calDTag, key);
+          newOwners.set(calDTag, ownerPubkey);
+          saveSharedCalOwner(pubkey, calDTag, ownerPubkey);
+        } catch (err) {
+          log.warn("failed to import invite key for calendar", calDTag, err);
+        }
+      } else {
+        pending.push({ calDTag, ownerPubkey, keyBase64 });
       }
     }
 
     sharedKeysRef.current = newKeys;
     setSharedKeys(newKeys);
     setSharedCalOwners(newOwners);
+    setPendingInvitations(pending);
     sharedKeysLoadedAtRef.current = Date.now();
 
-    // Member lists for calendars we own
-    setCalendarMembers(memberListMap);
+    // Member lists for calendars we own. MERGE rather than replace: a
+    // transient empty fetch (flaky relay, NIP-42 not yet authed) must not wipe
+    // the in-memory member lists for owned calendars — that would silently
+    // un-share people and break key rotation on the next removeMember.
+    setCalendarMembers((prev) => {
+      if (memberListMap.size === 0) return prev;
+      const next = new Map(prev);
+      for (const [k, v] of memberListMap) next.set(k, v);
+      return next;
+    });
     return newKeys;
   }, [pubkey, relays, signer]);
+
+  // ── Accept / reject a pending invitation ───────────────────────────
+
+  const acceptInvitation = useCallback(
+    async (calDTag: string) => {
+      if (!pubkey) return;
+      const inv = pendingInvitations.find((p) => p.calDTag === calDTag);
+      if (!inv) return;
+      const key = await importKeyFromBase64(inv.keyBase64);
+      acceptShare(pubkey, inv.ownerPubkey, calDTag);
+      saveSharedCalOwner(pubkey, calDTag, inv.ownerPubkey);
+      setSharedKeys((prev) => {
+        const next = new Map(prev).set(calDTag, key);
+        sharedKeysRef.current = next;
+        return next;
+      });
+      setSharedCalOwners((prev) => new Map(prev).set(calDTag, inv.ownerPubkey));
+      setPendingInvitations((prev) => prev.filter((p) => p.calDTag !== calDTag));
+    },
+    [pubkey, pendingInvitations]
+  );
+
+  const rejectInvitation = useCallback(
+    (calDTag: string) => {
+      if (!pubkey) return;
+      const inv = pendingInvitations.find((p) => p.calDTag === calDTag);
+      if (inv) rejectShare(pubkey, inv.ownerPubkey, calDTag);
+      setPendingInvitations((prev) => prev.filter((p) => p.calDTag !== calDTag));
+    },
+    [pubkey, pendingInvitations]
+  );
 
   // ── Add member to shared calendar ─────────────────────────────────
 
@@ -276,7 +349,6 @@ export function SharingProvider({ children }: { children: ReactNode }) {
         ownerPubkey: pubkey!,
         calDTag,
         title,
-        keyBase64: "", // key NOT in URL — distributed via addMember()
       });
 
       return `${window.location.origin}${window.location.pathname}#invite=${encoded}`;
@@ -294,10 +366,16 @@ export function SharingProvider({ children }: { children: ReactNode }) {
 
       const { o: ownerPubkey, c: calDTag, t: title } = payload;
 
+      // Opening an invite link is an explicit act of consent — record it
+      // durably so the owner's key envelope auto-imports (instead of landing
+      // in the pending-invitations queue) on this and future sessions.
+      acceptShare(pubkey, ownerPubkey, calDTag);
       // Key is never in the URL — it is distributed via NIP-44 when the owner
       // adds the member. Store the owner mapping so we know to look for key envelopes.
       setSharedCalOwners((prev) => new Map(prev).set(calDTag, ownerPubkey));
       saveSharedCalOwner(pubkey, calDTag, ownerPubkey);
+      // If the envelope already arrived and is sitting in pending, clear it.
+      setPendingInvitations((prev) => prev.filter((p) => p.calDTag !== calDTag));
       return { calDTag, title };
     },
     [pubkey]
@@ -345,6 +423,7 @@ export function SharingProvider({ children }: { children: ReactNode }) {
     sharedKeys,
     sharedCalOwners,
     calendarMembers,
+    pendingInvitations,
     setSharedKeys,
     setSharedCalOwners,
     setCalendarMembers,
@@ -358,8 +437,10 @@ export function SharingProvider({ children }: { children: ReactNode }) {
     addMember,
     getInviteLink,
     acceptInviteLink,
+    acceptInvitation,
+    rejectInvitation,
     leaveSharedCalendar,
-  }), [sharedKeys, sharedCalOwners, calendarMembers, setSharedKeys, setSharedCalOwners, setCalendarMembers, loadSharedKeysFromNostr, isSharedCalendar, isOwnedSharedCalendar, getSharedKeyForCalendars, addMember, getInviteLink, acceptInviteLink, leaveSharedCalendar]);
+  }), [sharedKeys, sharedCalOwners, calendarMembers, pendingInvitations, setSharedKeys, setSharedCalOwners, setCalendarMembers, loadSharedKeysFromNostr, isSharedCalendar, isOwnedSharedCalendar, getSharedKeyForCalendars, addMember, getInviteLink, acceptInviteLink, acceptInvitation, rejectInvitation, leaveSharedCalendar]);
 
   return (
     <SharingContext.Provider value={value}>

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { useModalA11y } from "../hooks/useModalA11y";
 import { X, Link as LinkIcon, Tag, Repeat, Calendar, ShieldAlert, Bell, BellOff, ChevronDown, Settings2, MapPin } from "lucide-react";
 import { LocationManagerModal } from "./LocationManagerModal";
 import { useNostr } from "../contexts/NostrContext";
@@ -66,6 +67,8 @@ interface EventModalProps {
  */
 export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onClose, onOpenSettings }: EventModalProps) {
   const { pubkey, signEvent, publishEvent } = useNostr();
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalA11y(panelRef, onClose);
   const { refreshEvents, allTags, tagsByUsage, locationsByUsage, calendars, addEventOptimistic, deleteEvent, getSeriesEvents, pushUndoEntry } = useCalendar();
   const { getSharedKeyForCalendars } = useSharing();
   const { shouldEncrypt, canPublish, notification } = useSettings();
@@ -569,7 +572,13 @@ export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onC
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Event editor"
+        className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto"
+      >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold">
             {isExtend ? "Extend Series" : isEdit ? "Edit Event" : isDuplicate ? "Duplicate Event" : "New Event"}

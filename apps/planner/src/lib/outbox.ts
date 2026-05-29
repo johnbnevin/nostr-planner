@@ -339,7 +339,11 @@ export async function drainOutbox(pubkey: string): Promise<void> {
 
       try {
         log.info(`drain → kind=${entry.event.kind} id=${entry.event.id?.slice(0, 8)} attempt=${entry.attempts + 1}`);
-        await publishToRelays([], entry.event);
+        // Single attempt: the outbox owns retry cadence via its own
+        // exponential backoff. Letting publishToRelays nest its 3× linear
+        // retry here would block the whole drain pass ~12s on a dead primary
+        // and re-toast a failure the user was already told about at enqueue.
+        await publishToRelays([], entry.event, 10000, { maxRetries: 0, notifyOnFailure: false });
         await deleteEntry(entry.key);
         const memIdx = memoryQueue.findIndex((e) => e.key === entry.key);
         if (memIdx >= 0) memoryQueue.splice(memIdx, 1);

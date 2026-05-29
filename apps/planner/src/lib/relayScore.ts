@@ -103,7 +103,10 @@ export function recordFailure(url: string): void {
   const next: RelayScore = prev
     ? {
         success: prev.success * (1 - ALPHA), // failure pushes toward 0
-        latencyMs: prev.latencyMs,           // no info on failure latency
+        // Degrade the latency EWMA toward the 5s budget cap on failure too.
+        // Leaving it frozen lets a once-fast-but-now-failing relay keep a
+        // favorable latency component and out-rank healthier relays.
+        latencyMs: prev.latencyMs * (1 - ALPHA) + 5000 * ALPHA,
         count: prev.count + 1,
         updatedAt: Date.now(),
       }
