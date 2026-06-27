@@ -38,7 +38,7 @@ import type { NostrSigner, UnsignedEvent } from "../lib/signer";
 import { Nip07Signer } from "../lib/signer";
 import { LocalSigner } from "../lib/localSigner";
 import { reconnectBunkerWithBackoff, type ReconnectStatus } from "../lib/nip46Signer";
-import { isTauri, isStandalonePWA } from "../lib/platform";
+import { isTauri } from "../lib/platform";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
 import { clearCalendarCache } from "../lib/eventCache";
@@ -88,6 +88,12 @@ interface NostrContextValue {
   profile: NostrProfile | null;
   /** The active signer implementation, or `null` when no session is active. */
   signer: NostrSigner | null;
+  /** True while a saved identity is known (pubkey restored from localStorage)
+   *  but the signer isn't live yet — i.e. a bunker reconnect is in flight. The
+   *  app shell renders the cached calendar read-only during this window so a
+   *  tab eviction never blanks out to a reconnect/login screen. Mutations are
+   *  blocked because they'd need the (absent) signer. */
+  restoring: boolean;
   /** True while localStorage still holds a pubkey from a prior session. Used
    *  to distinguish "never logged in" from "returning user whose auto-login
    *  hasn't finished yet" so we can show a reconnect splash. */
@@ -498,6 +504,16 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       }
       log.debug("restoring bunker session via reconnect ladder");
       setAutoLoginState("reconnecting");
+      // Optimistically surface the saved identity NOW, before the signer is
+      // live, so AppContent renders the cached calendar (read-only) instead of
+      // a blocking reconnect splash. The signer stays null until the ladder
+      // succeeds — `restoring` (pubkey && !signer) gates out mutations, and all
+      // signer-dependent effects (Blossom restore, autosave, watchPointer)
+      // already wait on `signer?.nip44`, so nothing fires prematurely. On
+      // terminal failure we revert this below so the user still reaches the
+      // ReconnectScreen / LoginScreen recovery affordances.
+      setPubkey(saved);
+      pubkeyRef.current = saved;
       const ac = new AbortController();
       ladderActiveRef.current = true;
       reconnectBunkerWithBackoff({
@@ -518,41 +534,64 @@ export function NostrProvider({ children }: { children: ReactNode }) {
           if (err instanceof DOMException && err.name === "AbortError") return;
           const msg = err instanceof Error ? err.message : String(err);
           log.warn("bunker reconnect ladder exhausted", err);
-          // Pubkey mismatch is a security signal — never trust a bunker
-          // that returns a different identity. Wipe the bunker URL so
-          // the user is forced to re-pair on a fresh login. Same for
-          // any other terminal failure: a stale URL is worth nothing to
-          // leave lying around on a shared device.
-          if (/different pubkey/i.test(msg) || /invalid/i.test(msg)) {
+          // Only a VERIFIED identity change is grounds to wipe the saved
+          // bunker session — never trust a bunker that returns a different
+          // pubkey. A transient failure (timeout, relay down, a remote signer
+          // that was briefly unreachable while the tab was backgrounded) must
+          // NOT destroy the saved credentials: doing so turns a temporary
+          // reconnect blip into a permanent logout. The previous `/invalid/i`
+          // catch-all did exactly that — any error message containing
+          // "invalid" wiped the URL. The ReconnectScreen's "exhausted" state
+          // already gives the user explicit re-pair / sign-out controls, and a
+          // later visibility re-trigger can still succeed against the same URL.
+          if (/different pubkey/i.test(msg)) {
             localStorage.removeItem("nostr-planner-bunker-url");
             localStorage.removeItem("nostr-planner-login-type");
           }
+          // Revert the optimistic pubkey set when the ladder began: with no
+          // signer and the ladder exhausted, drop back so AppContent can show
+          // the ReconnectScreen ("Couldn't reconnect" → retry / sign out) or
+          // LoginScreen instead of a frozen read-only shell.
+          setPubkey(null);
+          pubkeyRef.current = null;
           setReconnectStatus(null);
           setAutoLoginState("failed");
         });
       return () => { cancelled = true; ac.abort(); ladderActiveRef.current = false; };
     }
 
-    // NIP-07 auto-login path. Only attempt when the user actually logged in
-    // via an extension last time (loginType === "extension"), or when no
-    // loginType is recorded but an extension is present (legacy sessions
-    // pre-dating the loginType flag — still safe because the saved pubkey
-    // has to match what the extension returns).
+    // NIP-07 auto-login path. Treat the session as extension-restorable when
+    // the user logged in via an extension last time (loginType === "extension"),
+    // or when no loginType is recorded on a web surface (legacy sessions
+    // pre-dating the flag, or an nsec/seed web login whose in-memory key is
+    // gone after a reload — an installed extension for the SAME identity can
+    // still revive it; a different one just yields a mismatch, handled
+    // non-destructively below).
     //
-    // Importantly: do NOT call window.nostr.getPublicKey() for a user who
-    // logged in via nsec/seed on web. They may have an extension installed
-    // for an entirely different identity; asking it returns a mismatch and
-    // we'd kick them to LoginScreen even though their current cached data
-    // is fine (and the session is unrecoverable on web anyway — see below).
-    const isExtensionRestore =
-      window.nostr && (loginType === "extension" || !loginType);
-    if (isExtensionRestore) {
-      // Extensions can take a moment to inject window.nostr and respond to
-      // the first getPublicKey() call (especially on cold tab open). One
-      // retry after a short wait covers the injection race without making
-      // a real failure (user dismissed prompt, different identity) any
-      // slower than it already is — the second attempt still fails fast.
+    // Crucially we decide on loginType, NOT on the synchronous presence of
+    // window.nostr. Extensions inject window.nostr asynchronously and are
+    // frequently absent for the first few hundred milliseconds after a load —
+    // e.g. when a backgrounded tab is discarded (Chrome Memory Saver) and
+    // reloaded the moment the user switches back to it. Gating on window.nostr
+    // here is exactly what logged users out on window switching: we'd conclude
+    // "no extension" during the injection gap and fall through to a destructive
+    // branch that deleted the saved pubkey. We now wait for injection and never
+    // delete the session on a transient miss.
+    const mightBeExtension =
+      loginType === "extension" || (!loginType && !isTauri());
+    if (mightBeExtension) {
       const tryExtensionRestore = async () => {
+        // Wait (bounded) for the extension to inject window.nostr instead of
+        // giving up on the first synchronous miss. Returns immediately when
+        // it's already present (the common warm-load case → no added latency).
+        const waitForNostr = async (): Promise<boolean> => {
+          for (let i = 0; i < 20; i++) {           // up to ~3s (20 × 150ms)
+            if (window.nostr) return true;
+            await new Promise((r) => setTimeout(r, 150));
+            if (cancelled) return false;
+          }
+          return !!window.nostr;
+        };
         const attempt = async (): Promise<{ ok: boolean; pk?: string; mismatch?: boolean }> => {
           if (!window.nostr) return { ok: false };
           try {
@@ -563,11 +602,21 @@ export function NostrProvider({ children }: { children: ReactNode }) {
             return { ok: false };
           }
         };
+        const haveNostr = await waitForNostr();
+        if (cancelled) return;
+        if (!haveNostr) {
+          // No extension on this surface right now (not installed/enabled, or
+          // a standalone PWA where extensions don't exist). NEVER delete the
+          // saved pubkey — returning to a browser that has the extension, or a
+          // later visibility re-trigger once it injects, restores the session.
+          log.debug("no NIP-07 extension available yet — keeping saved session for retry");
+          setAutoLoginState("failed");
+          return;
+        }
         let result = await attempt();
         if (cancelled) return;
-        // Only retry on a thrown error / not-yet-injected state. A real
-        // pubkey mismatch (user switched identities) shouldn't trigger
-        // another extension prompt — that's noise.
+        // Only retry on a thrown error / not-yet-ready state. A real pubkey
+        // mismatch (user switched identities) shouldn't trigger another prompt.
         if (!result.ok && !result.mismatch) {
           await new Promise((r) => setTimeout(r, 1500));
           if (cancelled) return;
@@ -580,37 +629,31 @@ export function NostrProvider({ children }: { children: ReactNode }) {
           if (cancelled) return;
           await finalizeLogin(result.pk, s);
         } else {
+          // Either a genuine identity mismatch or the user dismissed the
+          // prompt. Surface LoginScreen but KEEP the saved pubkey — only an
+          // explicit logout (or a verified bunker identity change) ever clears
+          // the session. This invariant is what stops window switching from
+          // logging anyone out.
           log.debug(result.mismatch
-            ? "NIP-07 pubkey mismatch — not auto-logging in"
-            : "NIP-07 auto-login check failed");
+            ? "NIP-07 pubkey mismatch — keeping saved session, surfacing login"
+            : "NIP-07 auto-login check failed — keeping saved session, surfacing login");
           setAutoLoginState("failed");
         }
       };
       void tryExtensionRestore();
-    } else if (loginType === "extension" && isStandalonePWA()) {
-      // Installed-PWA edge case: the user logged in via a browser extension
-      // in their normal browser, then launched from the homescreen where no
-      // extension exists. The saved pubkey can't be re-verified, so surface
-      // a login screen immediately rather than leaving the UI hung. Keep the
-      // saved pubkey around — returning to the regular browser will still
-      // auto-login there.
-      log.info("standalone PWA without NIP-07 — user must re-login with bunker/nsec");
-      setAutoLoginState("failed");
-    } else if (isTauri() && !loginType) {
-      // Tauri with a saved pubkey but no loginType — the LocalSigner unlock
-      // screen will appear via LoginScreen because it gates on hasStoredKey().
-      // Don't clean up; the user just needs to enter their password.
+    } else if (isTauri()) {
+      // Tauri with a saved pubkey but no extension loginType — the LocalSigner
+      // unlock screen appears via LoginScreen because it gates on
+      // hasStoredKey(). Don't clean up; the user just needs to enter their
+      // password.
       log.debug("Tauri with stored key — awaiting password unlock");
       setAutoLoginState("failed");
     } else {
-      // Orphan pubkey: a saved pubkey from a non-restorable web session
-      // (nsec or seed login — nsec is intentionally never persisted on
-      // web). There's no signer to revive. Clear the saved pubkey so the
-      // user lands cleanly on LoginScreen instead of seeing a confusing
-      // "attempting → failed" splash flash, and so hasSavedSession
-      // accurately reflects "no recoverable session".
-      log.debug("no auto-login method available — clearing orphan saved pubkey");
-      localStorage.removeItem("nostr-planner-pubkey");
+      // No auto-restore path on this surface. Surface LoginScreen, but do NOT
+      // delete the saved pubkey — keeping it is harmless (it just remembers the
+      // npub) and preserves the "only an explicit logout clears the session"
+      // invariant. hasSavedSession reflects that there's nothing to auto-revive.
+      log.debug("no auto-login method available — keeping saved pubkey, surfacing login");
       setHasSavedSession(false);
       setAutoLoginState("failed");
     }
@@ -633,6 +676,12 @@ export function NostrProvider({ children }: { children: ReactNode }) {
         scheduleOutboxDrain(pubkey);
         return;
       }
+      // A bunker reconnect ladder is already running — it pauses while hidden
+      // and resumes itself the moment the tab is visible again (see
+      // waitForOnlineAndVisible). Bumping the trigger here would abort it via
+      // the effect cleanup and restart from attempt 1, throwing away backoff
+      // progress, so leave a live ladder alone.
+      if (ladderActiveRef.current) return;
       // Otherwise, bump the auto-login trigger — the effect above will run
       // the reconnect ladder, which itself pauses on offline/hidden.
       setAutoLoginTrigger((n) => n + 1);
@@ -706,6 +755,7 @@ export function NostrProvider({ children }: { children: ReactNode }) {
         nip65Relays,
         profile,
         signer,
+        restoring: !!pubkey && !signer,
         hasSavedSession,
         autoLoginState,
         reconnectStatus,

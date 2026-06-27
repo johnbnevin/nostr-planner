@@ -1,6 +1,6 @@
 {
   "name": "@nostr-planner/ical-utils",
-  "version": "1.17.0",
+  "version": "1.18.0",
   "description": "Shared iCal/RFC 5545 utilities for planner and daemon",
   "license": "MIT",
   "type": "module",

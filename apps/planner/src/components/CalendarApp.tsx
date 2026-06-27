@@ -49,7 +49,7 @@ import type { ParsedIcalEvent } from "../lib/ical";
  *   no calendars exist yet.
  */
 export function CalendarApp() {
-  const { pubkey, profile, logout, signer, relays, signEvent } = useNostr();
+  const { pubkey, profile, logout, signer, restoring, relays, signEvent } = useNostr();
   const { viewMode, setViewMode, eventsLoading, calendars, events, forceFullRefresh, getSeriesEvents, needsCalendarSetup, completeCalendarSetup, decryptionErrors, syncError, applySnapshot: applyCalendarSnapshot, lastRemoteSha, setLastRemoteSha, eventTombstones, undoDepth, redoDepth, undo, redo } = useCalendar();
   const { acceptInviteLink } = useSharing();
   const { showDaily, showLists, setShowDaily, setShowLists, savedViewMode, setSavedViewMode, getSettings, restoreSettings, primaryRelay } = useSettings();
@@ -444,8 +444,10 @@ export function CalendarApp() {
   const handleNewEvent = (date?: Date) => {
     // Block event creation until calendars are actually loaded — without
     // a target calendar the save can't pick a NIP-52 kind or encryption
-    // mode, and the event would silently vanish.
-    if (eventsLoading || calendars.length === 0) return;
+    // mode, and the event would silently vanish. Also block while restoring
+    // (bunker reconnect in flight): there's no signer to encrypt/sign yet, so
+    // the calendar is read-only until the session is live again.
+    if (eventsLoading || calendars.length === 0 || restoring) return;
     setEditEvent(null);
     setPrefillDate(date || null);
     setExtendSeries(null);

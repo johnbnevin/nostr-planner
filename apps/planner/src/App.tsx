@@ -60,6 +60,13 @@ function AppContent() {
   const [forceLoginScreen, setForceLoginScreen] = useState(false);
 
   if (!pubkey) {
+    // A bunker reconnect sets `pubkey` optimistically the moment it starts, so
+    // the normal app shell (below) renders the cached calendar read-only during
+    // reconnect — the header SyncStatusPill shows "Reconnecting" rather than
+    // blanking to this splash. We only reach here when there is genuinely no
+    // usable identity: the ladder has been reverted after exhaustion, an
+    // extension restore is still in flight, or this is a cold start.
+    //
     // Show the reconnect splash whenever we have a saved pubkey and the
     // ladder is in flight. The ladder retries persistently with backoff
     // (see reconnectBunkerWithBackoff), so transient mobile/PWA tab kills
