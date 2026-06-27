@@ -1,6 +1,6 @@
 {
   "name": "@nostr-planner/daemon",
-  "version": "1.17.0",
+  "version": "1.18.0",
   "description": "Push notification daemon and CalDAV feed server for nostr-planner",
   "license": "MIT",
   "type": "module",

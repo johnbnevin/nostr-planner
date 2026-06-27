@@ -66,7 +66,7 @@ interface EventModalProps {
  * before relay confirmation, with a background sync afterward.
  */
 export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onClose, onOpenSettings }: EventModalProps) {
-  const { pubkey, signEvent, publishEvent } = useNostr();
+  const { pubkey, signEvent, publishEvent, restoring } = useNostr();
   const panelRef = useRef<HTMLDivElement>(null);
   useModalA11y(panelRef, onClose);
   const { refreshEvents, allTags, tagsByUsage, locationsByUsage, calendars, addEventOptimistic, deleteEvent, getSeriesEvents, pushUndoEntry } = useCalendar();
@@ -1071,10 +1071,13 @@ export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onC
           </button>
           <button
             onClick={handleSave}
-            disabled={!title.trim() || saving || !canPublish(selectedCalendars)}
+            disabled={!title.trim() || saving || !canPublish(selectedCalendars) || restoring}
+            title={restoring ? "Reconnecting to your signer — your changes can be saved once it's back" : undefined}
             className="px-4 py-2 text-sm bg-primary-600 hover:bg-primary-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {saving
+            {restoring
+              ? "Reconnecting…"
+              : saving
               ? "Saving..."
               : isExtend
                 ? `Add ${recurrenceCount} more`

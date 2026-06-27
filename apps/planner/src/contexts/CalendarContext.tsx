@@ -1785,6 +1785,20 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
       }
     }).catch(() => {});
 
+    // During a read-only restore window (pubkey known but the signer isn't live
+    // yet — a bunker reconnect in flight) do NOT run the relay refresh. With no
+    // signer it can't decrypt private/shared data, and a first-load pass racing
+    // the cache pre-populate above could overwrite the richer cached set with a
+    // public-only subset (and rewrite the IndexedDB cache smaller). We just show
+    // the cache and wait. This effect re-runs the instant the signer arrives
+    // (it's in the dep list), running the full decrypt/merge pipeline then —
+    // Blossom stays the source of truth for private events throughout, so
+    // nothing is lost; the local cache simply isn't touched until we can read.
+    if (!signer) {
+      log.debug("restore window — showing cache, deferring relay refresh until signer is live");
+      return;
+    }
+
     // Safety net: clear the loading indicator after 60s even if relay sync
     // hasn't finished. Prevents "Loading events…" from staying forever when
     // relays are slow or unreachable. Longer timeout because NIP-46 remote
@@ -1797,7 +1811,7 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
     }, 60_000);
 
     doRefreshRef.current().finally(() => clearTimeout(safetyTimer));
-  }, [pubkey]);
+  }, [pubkey, signer]);
 
   // Live subscription to calendar event kinds so shared + public calendar
   // edits from another device appear within seconds instead of waiting for
