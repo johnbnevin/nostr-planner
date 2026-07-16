@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 
 /**
  * Make a modal/dialog accessible with minimal structural change.
@@ -24,6 +24,16 @@ export function useModalA11y(
   panelRef: RefObject<HTMLElement | null>,
   onClose?: () => void,
 ): void {
+  // Keep the latest onClose in a ref so the keydown handler always calls the
+  // current one WITHOUT the effect having to depend on onClose. Depending on
+  // onClose was a real bug: callers pass an inline arrow (fresh identity every
+  // render), and a parent that re-renders frequently (e.g. the 1s autosave
+  // countdown) would re-run this effect every render — re-focusing the first
+  // focusable element mid-typing and dismissing the mobile keyboard over and
+  // over. The effect now runs once on mount (panelRef is a stable ref object).
+  const onCloseRef = useRef(onClose);
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
     const panel = panelRef.current;
@@ -36,9 +46,9 @@ export function useModalA11y(
     (initial ?? panel)?.focus?.();
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && onClose) {
+      if (e.key === "Escape" && onCloseRef.current) {
         e.stopPropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.key !== "Tab" || !panel) return;
@@ -66,5 +76,8 @@ export function useModalA11y(
         previouslyFocused.focus?.();
       }
     };
-  }, [panelRef, onClose]);
+    // panelRef is a stable ref object → this effect runs once on mount and
+    // cleans up on unmount. onClose is read via onCloseRef so it stays fresh
+    // without re-triggering the focus/trap setup.
+  }, [panelRef]);
 }

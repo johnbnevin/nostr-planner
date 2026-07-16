@@ -37,7 +37,7 @@ import type { NostrEvent } from "../lib/relay";
 import type { NostrSigner, UnsignedEvent } from "../lib/signer";
 import { Nip07Signer } from "../lib/signer";
 import { LocalSigner } from "../lib/localSigner";
-import { reconnectBunkerWithBackoff, type ReconnectStatus } from "../lib/nip46Signer";
+import { reconnectBunkerWithBackoff, loadNip46ClientKey, persistNip46Session, clearNip46Session, type ReconnectStatus } from "../lib/nip46Signer";
 import { isTauri } from "../lib/platform";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
@@ -376,6 +376,9 @@ export function NostrProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem("nostr-planner-nsec");
     localStorage.removeItem("nostr-planner-login-type");
     localStorage.removeItem("nostr-planner-bunker-url");
+    // Drop the persisted NIP-46 client key + bunker URL so a future login
+    // starts a clean pairing rather than reusing this identity's channel.
+    clearNip46Session();
     if (isTauri()) {
       log.debug("clearing Tauri secure store");
       LocalSigner.clearStore().catch(() => {});
@@ -519,14 +522,22 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       reconnectBunkerWithBackoff({
         bunkerUrl,
         expectedPubkey: saved,
+        // Reuse the client key saved at login so the remote signer (Amber,
+        // nsec.app…) recognizes the same client and honors a prior "always
+        // authorize" grant — instead of re-prompting for every permission on
+        // every reconnect, which felt like being logged out each launch.
+        clientSecretKey: loadNip46ClientKey() ?? undefined,
         signal: ac.signal,
         onStatus: (s) => { if (!cancelled) setReconnectStatus(s); },
       })
-        .then(async ({ signer: s, pubkey: pk }) => {
+        .then(async (result) => {
           ladderActiveRef.current = false;
-          if (cancelled) { await s.destroy?.(); return; }
+          if (cancelled) { await result.signer.destroy?.(); return; }
           setReconnectStatus(null);
-          await finalizeLogin(pk, s);
+          // Refresh the persisted session (the key is unchanged; the bunker
+          // pointer may have picked up new relays during the handshake).
+          persistNip46Session(result.clientSecretKey, result.bunkerPointer);
+          await finalizeLogin(result.pubkey, result.signer);
         })
         .catch((err) => {
           ladderActiveRef.current = false;

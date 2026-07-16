@@ -11,13 +11,91 @@
 
 import { SimplePool } from "nostr-tools/pool";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
-import { BunkerSigner, createNostrConnectURI, parseBunkerInput } from "nostr-tools/nip46";
+import { BunkerSigner, createNostrConnectURI, parseBunkerInput, toBunkerURL, type BunkerPointer } from "nostr-tools/nip46";
 import type { NostrEvent } from "@nostrify/nostrify";
 import type { NostrSigner, UnsignedEvent } from "./signer";
 import { logger } from "./logger";
 import { emitAuthUrl } from "./authUrl";
 
 const log = logger("nip46");
+
+/** Result of any NIP-46 connection (QR / deep-link / bunker URI). */
+export interface Nip46ConnectResult {
+  signer: NostrSigner;
+  pubkey: string;
+  /**
+   * The ephemeral client secret key used to talk to the remote signer. This
+   * is the bunker CHANNEL key, not the user's identity nsec. Persist it and
+   * reuse it on reconnect: the remote signer (Amber, nsec.app…) identifies
+   * the app by the client PUBKEY derived from this, and it remembers an
+   * "always authorize" grant against that pubkey. Regenerating the key every
+   * launch — which is what the app did before — makes every reconnect look
+   * like a brand-new app, so the signer re-prompts for every permission on
+   * every login. Reusing it is what makes a saved session actually stay
+   * authorized.
+   */
+  clientSecretKey: Uint8Array;
+  /** The remote signer's pointer (pubkey + relays [+ secret]). Serialize via
+   *  {@link toBunkerURL} so EVERY NIP-46 login — including the nostrconnect
+   *  QR / Amber deep-link flow, which has no user-supplied bunker URL — has a
+   *  reconnectable URL to store. */
+  bunkerPointer: BunkerPointer;
+}
+
+// ── NIP-46 session persistence ──────────────────────────────────────
+//
+// Two values let a NIP-46 session survive a reload without re-pairing:
+//   1. the client secret key (channel key — see above), and
+//   2. a bunker URL pointing at the remote signer.
+// Persisting both (the URL was already persisted for the bunker:// flow; now
+// the QR / deep-link flows persist it too via toBunkerURL) is what fixes the
+// "logged out + re-authorize every launch" behavior with Amber. Neither value
+// is the user's identity key.
+
+const NIP46_CLIENT_SK_KEY = "nostr-planner-nip46-client-sk";
+const BUNKER_URL_KEY = "nostr-planner-bunker-url";
+
+function skToHex(sk: Uint8Array): string {
+  return Array.from(sk).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function hexToSk(hex: string): Uint8Array | null {
+  if (!/^[0-9a-f]{64}$/i.test(hex)) return null;
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+/** Persist the reusable client key + a reconnectable bunker URL so the next
+ *  launch restores the session silently against the same remote signer. */
+export function persistNip46Session(clientSecretKey: Uint8Array, bunkerPointer: BunkerPointer): void {
+  try {
+    localStorage.setItem(NIP46_CLIENT_SK_KEY, skToHex(clientSecretKey));
+    const url = toBunkerURL(bunkerPointer);
+    if (url && /^bunker:\/\//i.test(url)) localStorage.setItem(BUNKER_URL_KEY, url);
+  } catch (err) {
+    log.warn("failed to persist NIP-46 session:", err);
+  }
+}
+
+/** Load the persisted client secret key (or null if none / malformed). */
+export function loadNip46ClientKey(): Uint8Array | null {
+  try {
+    const hex = localStorage.getItem(NIP46_CLIENT_SK_KEY);
+    return hex ? hexToSk(hex) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Clear the persisted NIP-46 session (client key + bunker URL). Called on logout. */
+export function clearNip46Session(): void {
+  try {
+    localStorage.removeItem(NIP46_CLIENT_SK_KEY);
+    localStorage.removeItem(BUNKER_URL_KEY);
+  } catch {
+    /* ignore */
+  }
+}
 
 // NIP-46 relay choice matters: the bunker must be able to both read our
 // requests from these and publish responses. Three relays give redundancy
@@ -58,7 +136,7 @@ export async function connectNostrSigner(
   signal: AbortSignal,
   onUri: (uri: string) => void,
   onAuth?: (authUrl: string) => void,
-): Promise<{ signer: NostrSigner; pubkey: string }> {
+): Promise<Nip46ConnectResult> {
   const sk = generateSecretKey();
   const clientPubkey = getPublicKey(sk);
   const secretBytes = crypto.getRandomValues(new Uint8Array(16));
@@ -127,16 +205,24 @@ export async function connectNostrSigner(
   return {
     signer: wrapBunkerSigner(bunker, userPubkey, pool, sk),
     pubkey: userPubkey,
+    clientSecretKey: sk,
+    bunkerPointer: bunker.bp,
   };
 }
 
 /**
  * Connect via a bunker:// URI directly using nostr-tools' BunkerSigner.
+ *
+ * @param clientSk - Optional pre-existing client secret key to reuse. Pass the
+ *   key persisted at first login so the remote signer recognizes the same
+ *   client (and keeps a prior "always authorize" grant) instead of prompting
+ *   for every permission again. Omit for a first-time connect.
  */
 export async function connectBunkerUri(
   bunkerUri: string,
   timeoutMs = 120_000,
-): Promise<{ signer: NostrSigner; pubkey: string }> {
+  clientSk?: Uint8Array,
+): Promise<Nip46ConnectResult> {
   // Scheme guard — parseBunkerInput accepts bare hex/npub formats; we
   // only want canonical bunker:// URIs to avoid being tricked into
   // dialing arbitrary content from a malformed localStorage value.
@@ -150,7 +236,9 @@ export async function connectBunkerUri(
     if (!/^wss?:\/\//i.test(r)) throw new Error(`Invalid bunker relay scheme: ${r}`);
   }
 
-  const sk = generateSecretKey();
+  // Reuse the persisted client key when we have one (reconnect), otherwise
+  // mint a fresh one (first-time connect).
+  const sk = clientSk ?? generateSecretKey();
   // enablePing: keeps WebSockets alive across the (potentially long) window
   //   between showing the QR/URI and the user actually approving in Amber —
   //   without it, strfry closes idle sockets and the whole sub collapses.
@@ -159,7 +247,7 @@ export async function connectBunkerUri(
   //   latency (DNS + TLS + WS handshake) can exceed that on mobile networks.
   const pool = new SimplePool({ enablePing: true, enableReconnect: true });
   pool.maxWaitForConnection = NIP46_CONNECT_TIMEOUT_MS;
-  log.info("connecting via bunker URI...");
+  log.info(clientSk ? "reconnecting via bunker URI (reusing client key)..." : "connecting via bunker URI...");
 
   // Wire onauth through the global broadcaster so a modal can show the
   // approval prompt with a real user-gesture click. Without this, mobile
@@ -195,6 +283,8 @@ export async function connectBunkerUri(
     return {
       signer: wrapBunkerSigner(bunker, userPubkey, pool, sk),
       pubkey: userPubkey,
+      clientSecretKey: sk,
+      bunkerPointer: bunker.bp,
     };
   } catch (err) {
     // Tear down the pool's WebSocket connections so the next ladder
@@ -293,6 +383,11 @@ export interface ReconnectOptions {
   bunkerUrl: string;
   /** Required: the user's pubkey at login — abort if a fresh connect returns a different one. */
   expectedPubkey: string;
+  /** Optional: the client secret key persisted at first login. Reused so the
+   *  remote signer recognizes the same client and doesn't re-prompt for
+   *  authorization on every reconnect. Omit to mint a fresh one (which forces
+   *  a re-authorization — the pre-fix behavior). */
+  clientSecretKey?: Uint8Array;
   /** Optional: caller can abort the ladder (logout, switch account). */
   signal?: AbortSignal;
   /** Status updates for UI. */
@@ -313,8 +408,8 @@ export interface ReconnectOptions {
  */
 export async function reconnectBunkerWithBackoff(
   opts: ReconnectOptions
-): Promise<{ signer: NostrSigner; pubkey: string }> {
-  const { bunkerUrl, expectedPubkey, signal, onStatus } = opts;
+): Promise<Nip46ConnectResult> {
+  const { bunkerUrl, expectedPubkey, clientSecretKey, signal, onStatus } = opts;
   const maxAttempts = RECONNECT_DELAYS_MS.length;
   let lastError: string = "";
 
@@ -324,7 +419,7 @@ export async function reconnectBunkerWithBackoff(
 
     onStatus?.({ phase: "attempting", attempt, maxAttempts });
     try {
-      const result = await connectBunkerUri(bunkerUrl, RECONNECT_ATTEMPT_TIMEOUT_MS);
+      const result = await connectBunkerUri(bunkerUrl, RECONNECT_ATTEMPT_TIMEOUT_MS, clientSecretKey);
       if (signal?.aborted) {
         await result.signer.destroy?.();
         throw new DOMException("aborted", "AbortError");

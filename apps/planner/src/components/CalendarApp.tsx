@@ -6,6 +6,7 @@ import { useSettings } from "../contexts/SettingsContext";
 import { useTasks } from "../contexts/TasksContext";
 import { loadSnapshot, watchPointer, buildSnapshot, gcBlobsOnLogin, type Snapshot } from "../lib/backup";
 import { mergeSnapshots } from "../lib/merge";
+import { loadCachedCalendarData } from "../lib/eventCache";
 import { Header } from "./Header";
 import type { MobileTab } from "./Header";
 import { Sidebar } from "./Sidebar";
@@ -96,7 +97,39 @@ export function CalendarApp() {
         const snap = await loadSnapshot(pubkey, relays, signer.nip44);
         if (!snap) return;
         restoredRef.current = true;
-        applyCalendarSnapshot(snap.events, snap.calendars);
+
+        // Merge any locally-cached events/calendars into the authoritative
+        // remote snapshot before applying. The IndexedDB cache can hold edits
+        // that never finished uploading to Blossom before the app was closed
+        // (the "last few changes didn't take" symptom); a blind replace would
+        // drop them. The cache only carries events + calendars, so tasks and
+        // settings still come straight from the remote snapshot. Per-entity
+        // last-write-wins keeps the newer copy of any event that exists on
+        // both sides, and remote tombstones still win over stale local copies.
+        let events = snap.events;
+        let calendars = snap.calendars;
+        try {
+          const cached = await loadCachedCalendarData(pubkey);
+          if (cached && (cached.events.length > 0 || cached.calendars.length > 0)) {
+            const localSnap: Snapshot = {
+              version: 1,
+              savedAt: snap.savedAt,
+              calendars: cached.calendars,
+              events: cached.events,
+              habits: snap.habits,
+              completions: snap.completions,
+              lists: snap.lists,
+              settings: snap.settings,
+            };
+            const merged = mergeSnapshots(localSnap, snap);
+            events = merged.events;
+            calendars = merged.calendars;
+          }
+        } catch (err) {
+          console.info("restore: local-cache merge skipped (non-fatal):", err);
+        }
+
+        applyCalendarSnapshot(events, calendars);
         applyTasksSnapshot(snap.habits, snap.completions, snap.lists);
         restoreSettings(snap.settings);
         setLastRemoteSha(snap._sha256);
