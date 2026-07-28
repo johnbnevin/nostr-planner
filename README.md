@@ -1,3 +1,14 @@
+> **Notice**
+>
+> Due to Microsoft/GitHub's recent willingness to remove bitchat software at the
+> behest of Indian government pressure, GitHub is no longer the source for my
+> latest repositories.
+>
+> See **[git.jbnco.co](https://git.jbnco.co)** for my projects, now hosted on
+> Nostr ngit.
+
+---
+
 # Nostr Planner
 
 [![CI](https://github.com/nostr-planner/nostr-planner/actions/workflows/ci.yml/badge.svg)](https://github.com/nostr-planner/nostr-planner/actions/workflows/ci.yml)
