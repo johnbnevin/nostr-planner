@@ -81,7 +81,7 @@ export function LocationManagerModal({ onClose }: LocationManagerModalProps) {
         aria-modal="true"
         aria-label="Manage locations"
         onClick={(e) => e.stopPropagation()}
-        className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[85vh] flex flex-col"
+        className="bg-white rounded-2xl shadow-2xl max-w-md w-full modal-panel flex flex-col"
       >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">Manage locations</h2>

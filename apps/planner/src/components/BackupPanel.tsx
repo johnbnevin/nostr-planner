@@ -7,8 +7,8 @@
  *  - Export the current in-memory state to a local file.
  */
 
-import { useRef, useState } from "react";
-import { X, Check, AlertCircle, HardDrive, Lock, Cloud, Trash2, Download, History } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { X, Check, AlertCircle, HardDrive, Lock, Cloud, Trash2, Download, Upload, History, Activity, Copy } from "lucide-react";
 import { useModalA11y } from "../hooks/useModalA11y";
 import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
@@ -23,15 +23,27 @@ import {
   wrapEnvelope,
   listUserBlobs,
   fetchSnapshotBySha,
+  parseExportedBackupFile,
   type BlobHandle,
 } from "../lib/backup";
 import { npubEncode } from "nostr-tools/nip19";
 import { saveFile } from "../lib/fileSave";
 import { useReplicationStatus } from "../hooks/useReplicationStatus";
+import { listPendingSummary, type OutboxEntrySummary } from "../lib/outbox";
+import { getPrimaryRelay } from "../lib/relay";
+import { getRecentLogs } from "../lib/logger";
+import { copyToClipboard } from "../lib/clipboard";
+import { getLastAutoBackupTime, type BackupPhase } from "../hooks/useAutoBackup";
 
-interface BackupPanelProps { onClose: () => void; }
+interface BackupPanelProps {
+  onClose: () => void;
+  /** Live autosave state, passed down so the diagnostics section can show
+   *  it on platforms with no hover tooltips (phones). */
+  backupPhase?: BackupPhase;
+  backupError?: string | null;
+}
 
-export function BackupPanel({ onClose }: BackupPanelProps) {
+export function BackupPanel({ onClose, backupPhase, backupError }: BackupPanelProps) {
   const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
   const panelRef = useRef<HTMLDivElement>(null);
   useModalA11y(panelRef, onClose);
@@ -56,6 +68,51 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
 
   const nip44Available = isNip44Available(signer);
   const replication = useReplicationStatus();
+
+  // ── Sync diagnostics ─────────────────────────────────────────────
+  // Phones have no hover tooltips and no DevTools console, so the cloud
+  // icon's state, the stuck-outbox reasons, and recent logs must all be
+  // visible (and copyable) inside the app. Refreshed every 5 s while
+  // the panel is open so a drain attempt's result shows up.
+  const [pending, setPending] = useState<OutboxEntrySummary[]>([]);
+  const [copied, setCopied] = useState<"idle" | "ok" | "failed">("idle");
+  useEffect(() => {
+    if (!pubkey) return;
+    let cancelled = false;
+    const refresh = () => {
+      void listPendingSummary(pubkey).then((rows) => { if (!cancelled) setPending(rows); });
+    };
+    refresh();
+    const id = setInterval(refresh, 5_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [pubkey]);
+
+  const buildDiagnosticsReport = (): string => {
+    const lines: string[] = [
+      `Planner sync diagnostics — ${new Date().toISOString()}`,
+      `phase: ${backupPhase ?? "(unknown)"}${backupError ? ` — last error: ${backupError}` : ""}`,
+      `last auto-backup: ${getLastAutoBackupTime() ?? "(never this device)"}`,
+      `primary relay: ${getPrimaryRelay()}`,
+      `online: ${typeof navigator !== "undefined" ? navigator.onLine : "unknown"}`,
+      `outbox: ${pending.length} pending`,
+    ];
+    for (const p of pending) {
+      const mine = pubkey && p.eventPubkey === pubkey;
+      lines.push(
+        `  - kind=${p.kind} id=${p.id.slice(0, 8)} signer=${p.eventPubkey.slice(0, 8)}${mine ? "" : " (NOT session pubkey)"}` +
+        ` attempts=${p.attempts} queued=${new Date(p.queuedAt).toISOString()} lastError=${p.lastError}`
+      );
+    }
+    lines.push("", "recent logs:");
+    lines.push(...getRecentLogs());
+    return lines.join("\n");
+  };
+
+  const copyDiagnostics = async () => {
+    const ok = await copyToClipboard(buildDiagnosticsReport());
+    setCopied(ok ? "ok" : "failed");
+    setTimeout(() => setCopied("idle"), 3_000);
+  };
 
   const saveNow = async () => {
     if (!pubkey || !signer?.nip44) { setError("NIP-44 signer required"); return; }
@@ -209,6 +266,37 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
     await restoreFromBlob(trimmed);
   };
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /** Restore from an exported backup file. Mirrors restoreFromBlob:
+   *  apply the snapshot, then immediately republish it as the new
+   *  current cloud snapshot so a reload can't clobber it with whatever
+   *  the (possibly stale) pointer still references. */
+  const restoreFromFile = async (file: File) => {
+    if (!pubkey || !signer?.nip44) { setError("NIP-44 signer required"); return; }
+    setWorking(true); setError(""); setDone(false);
+    setStatus(`Decrypting ${file.name}…`);
+    try {
+      const snap = await parseExportedBackupFile(await file.text(), pubkey, signer.nip44);
+      applyCalendarSnapshot(snap.events, snap.calendars);
+      applyTasksSnapshot(snap.habits, snap.completions, snap.lists);
+      restoreSettings(snap.settings);
+      setStatus("Restored locally — republishing as current…");
+      const ptr = await saveSnapshot(
+        pubkey, snap, signEvent, publishEvent, signer.nip44, relays
+      );
+      setLastRemoteSha(ptr.sha256);
+      setStatus(`Restored ${snap.events.length} events, ${snap.calendars.length} calendars, ${snap.habits.length} habits, ${snap.lists.length} lists from file. Published as new current snapshot ${ptr.sha256.slice(0, 8)}…`);
+      setDone(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWorking(false);
+      // Reset so picking the same file again re-fires onChange.
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   const exportToFile = async () => {
     if (!pubkey || !signer?.nip44) { setError("NIP-44 signer required"); return; }
     setWorking(true); setError(""); setDone(false);
@@ -253,7 +341,7 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
         role="dialog"
         aria-modal="true"
         aria-label="Backup & restore"
-        className="bg-white rounded-2xl shadow-2xl max-w-md w-full"
+        className="bg-white rounded-2xl shadow-2xl max-w-md w-full modal-panel overflow-y-auto"
       >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold">Backup &amp; Restore</h2>
@@ -299,6 +387,72 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
               )}
             </div>
           )}
+
+          {/* Sync diagnostics — the mobile-accessible equivalent of the
+              header cloud icon's hover tooltip + the DevTools console.
+              Always rendered so a healthy state is also confirmable. */}
+          <div className="rounded-xl border border-gray-200 p-3 text-xs space-y-1.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 font-medium text-gray-700">
+                <Activity className="w-3.5 h-3.5" />
+                Sync diagnostics
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => void copyDiagnostics()}
+                  className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                >
+                  <Copy className="w-3 h-3" />
+                  {copied === "ok" ? "Copied!" : copied === "failed" ? "Copy failed" : "Copy report"}
+                </button>
+                <button
+                  onClick={() => void saveFile(
+                    buildDiagnosticsReport(),
+                    `planner-diagnostics-${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.txt`,
+                    "text/plain",
+                  )}
+                  className="px-2 py-1 text-[11px] font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                >
+                  Share…
+                </button>
+              </div>
+            </div>
+            {backupPhase && (
+              <div className={
+                backupPhase === "idle" && pending.length === 0 ? "text-emerald-700"
+                : backupPhase === "error" ? "text-red-700"
+                : "text-amber-700"
+              }>
+                Autosave: {backupPhase === "idle"
+                  ? (pending.length === 0 ? "up to date" : "backup saved — relay sync behind")
+                  : backupPhase}
+                {backupError ? ` — ${backupError}` : ""}
+              </div>
+            )}
+            <div className="text-gray-500">
+              Primary relay: <span className="font-mono">{getPrimaryRelay().replace(/^wss?:\/\//, "")}</span>
+            </div>
+            {pending.length === 0 ? (
+              <div className="text-gray-500">No changes waiting on relays.</div>
+            ) : (
+              <div className="space-y-1">
+                <div className="text-amber-700 font-medium">
+                  {pending.length} change{pending.length === 1 ? "" : "s"} stuck waiting for a relay:
+                </div>
+                {pending.map((p) => (
+                  <div key={p.id} className="bg-amber-50/50 border border-amber-100 rounded-lg p-1.5">
+                    <div className="text-gray-600">
+                      kind {p.kind} · <span className="font-mono">{p.id.slice(0, 8)}</span> · {p.attempts} attempt{p.attempts === 1 ? "" : "s"}
+                      {pubkey && p.eventPubkey !== pubkey && (
+                        <span className="text-red-700 font-medium"> · signed by a different key</span>
+                      )}
+                    </div>
+                    <div className="text-amber-800 break-words">{p.lastError}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           <button
             onClick={saveNow}
@@ -430,6 +584,25 @@ export function BackupPanel({ onClose }: BackupPanelProps) {
           >
             <Download className="w-5 h-5 text-gray-600" />
             <span className="text-sm font-medium">Export to file</span>
+          </button>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void restoreFromFile(f);
+            }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={working || !nip44Available}
+            className="w-full flex items-center justify-center gap-2 p-3 border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors disabled:opacity-50"
+          >
+            <Upload className="w-5 h-5 text-gray-600" />
+            <span className="text-sm font-medium">Restore from file</span>
           </button>
 
           <button

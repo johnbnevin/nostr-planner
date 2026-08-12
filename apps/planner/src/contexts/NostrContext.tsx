@@ -37,7 +37,7 @@ import type { NostrEvent } from "../lib/relay";
 import type { NostrSigner, UnsignedEvent } from "../lib/signer";
 import { Nip07Signer } from "../lib/signer";
 import { LocalSigner } from "../lib/localSigner";
-import { reconnectBunkerWithBackoff, type ReconnectStatus } from "../lib/nip46Signer";
+import { reconnectBunkerWithBackoff, loadNip46ClientKey, persistNip46Session, clearNip46Session, type ReconnectStatus } from "../lib/nip46Signer";
 import { isTauri } from "../lib/platform";
 import { logger } from "../lib/logger";
 import { lsSet } from "../lib/storage";
@@ -120,6 +120,11 @@ interface NostrContextValue {
   signEvent: (event: UnsignedEvent) => Promise<NostrEvent>;
   /** Publish a signed event to the user's relay set. Throws on total failure. */
   publishEvent: (event: NostrEvent) => Promise<void>;
+  /** Tear down a dead NIP-46 signer and restart the reconnect ladder.
+   *  Call when an operation fails with a closed/unresponsive-signer error
+   *  ("this signer is not open anymore"). No-op for non-bunker sessions
+   *  and while a ladder is already running. */
+  reviveSigner: () => void;
 }
 
 const NostrContext = createContext<NostrContextValue | null>(null);
@@ -376,6 +381,9 @@ export function NostrProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem("nostr-planner-nsec");
     localStorage.removeItem("nostr-planner-login-type");
     localStorage.removeItem("nostr-planner-bunker-url");
+    // Drop the persisted NIP-46 client key + bunker URL so a future login
+    // starts a clean pairing rather than reusing this identity's channel.
+    clearNip46Session();
     if (isTauri()) {
       log.debug("clearing Tauri secure store");
       LocalSigner.clearStore().catch(() => {});
@@ -394,6 +402,37 @@ export function NostrProvider({ children }: { children: ReactNode }) {
         ch.close();
       } catch { /* ignore */ }
     }
+  }, [signer]);
+
+  /**
+   * The active NIP-46 signer went dead ("this signer is not open anymore",
+   * or Amber simply stopped answering). Tear it down and restart the
+   * reconnect ladder against the persisted bunker URL + client key — the
+   * same silent path a page reload takes, minus the reload. The persisted
+   * client key means Amber recognizes the session and does NOT re-prompt.
+   *
+   * Guarded so repeated failures can't stack ladders or tear down a
+   * session that has no reconnect path (extension / local-key logins).
+   */
+  const reviveSigner = useCallback(() => {
+    const loginType = localStorage.getItem("nostr-planner-login-type");
+    const bunkerUrl = localStorage.getItem("nostr-planner-bunker-url");
+    if (loginType !== "bunker" || !bunkerUrl) {
+      log.debug("reviveSigner: not a bunker session — ignoring");
+      return;
+    }
+    if (ladderActiveRef.current) {
+      log.debug("reviveSigner: reconnect ladder already running");
+      return;
+    }
+    log.warn("reviveSigner: bunker signer reported dead — tearing down and reconnecting");
+    signer?.destroy?.().catch(() => { /* already dead */ });
+    setRelayAuthSigner(null);
+    setSigner(null);
+    // The auto-login effect sees loginType=bunker + saved pubkey and runs
+    // the reconnect ladder; on success finalizeLogin installs the fresh
+    // signer and flushes the outbox.
+    setAutoLoginTrigger((n) => n + 1);
   }, [signer]);
 
   /**
@@ -519,14 +558,22 @@ export function NostrProvider({ children }: { children: ReactNode }) {
       reconnectBunkerWithBackoff({
         bunkerUrl,
         expectedPubkey: saved,
+        // Reuse the client key saved at login so the remote signer (Amber,
+        // nsec.app…) recognizes the same client and honors a prior "always
+        // authorize" grant — instead of re-prompting for every permission on
+        // every reconnect, which felt like being logged out each launch.
+        clientSecretKey: loadNip46ClientKey() ?? undefined,
         signal: ac.signal,
         onStatus: (s) => { if (!cancelled) setReconnectStatus(s); },
       })
-        .then(async ({ signer: s, pubkey: pk }) => {
+        .then(async (result) => {
           ladderActiveRef.current = false;
-          if (cancelled) { await s.destroy?.(); return; }
+          if (cancelled) { await result.signer.destroy?.(); return; }
           setReconnectStatus(null);
-          await finalizeLogin(pk, s);
+          // Refresh the persisted session (the key is unchanged; the bunker
+          // pointer may have picked up new relays during the handshake).
+          persistNip46Session(result.clientSecretKey, result.bunkerPointer);
+          await finalizeLogin(result.pubkey, result.signer);
         })
         .catch((err) => {
           ladderActiveRef.current = false;
@@ -767,6 +814,7 @@ export function NostrProvider({ children }: { children: ReactNode }) {
         logout,
         signEvent,
         publishEvent,
+        reviveSigner,
       }}
     >
       {children}

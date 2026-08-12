@@ -57,7 +57,7 @@ function AuthUrlDialog({ url, onClose }: { url: string; onClose: () => void }) {
         aria-modal="true"
         aria-label="Approve in your signer"
         onClick={(e) => e.stopPropagation()}
-        className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 space-y-4 relative"
+        className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 space-y-4 relative modal-panel overflow-y-auto"
       >
         <button
           onClick={onClose}

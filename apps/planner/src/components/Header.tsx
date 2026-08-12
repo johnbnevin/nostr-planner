@@ -1,4 +1,5 @@
 import type { NostrProfile } from "../contexts/NostrContext";
+import { useNostr } from "../contexts/NostrContext";
 import { useCalendar } from "../contexts/CalendarContext";
 import { useSettings } from "../contexts/SettingsContext";
 import { SyncStatusPill } from "./SyncStatusPill";
@@ -483,6 +484,14 @@ function BackupButton({
   replicationSummary,
 }: BackupButtonProps) {
   const { autoBackup, setAutoBackup } = useSettings();
+  // The snapshot pointer (and public/shared-calendar writes, deletions, etc.)
+  // publish through the outbox, which silently succeeds by QUEUEING when relays
+  // are unreachable. So "backup phase = idle" alone can read green while the
+  // pointer is still stuck offline and the change hasn't actually reached any
+  // relay. Fold outbox depth into the resting state so green means "truly
+  // synced", not just "the local blob was written".
+  const { outboxDepth } = useNostr();
+  const pendingRelay = autoBackup && backupPhase === "idle" && outboxDepth > 0;
   return (
     <button
       onClick={() => {
@@ -494,6 +503,7 @@ function BackupButton({
       className={`relative p-1.5 rounded-lg transition-colors ${
         !autoBackup ? "hover:bg-gray-100"
         : backupPhase === "blocked" ? "bg-amber-50 hover:bg-amber-100 ring-2 ring-amber-400 animate-pulse"
+        : pendingRelay ? "bg-amber-50 hover:bg-amber-100"
         : backupPhase === "idle" ? "bg-emerald-50 hover:bg-emerald-100"
         : "bg-red-50 hover:bg-red-100"
       }`}
@@ -504,6 +514,7 @@ function BackupButton({
           : backupPhase === "error"
             ? `Save failed: ${backupError ?? "unknown error"}${saveCountdown !== null ? ` — retry in ${saveCountdown}s` : ""}`
           : backupPhase === "dirty" && saveCountdown !== null ? `Unsaved — autosave in ${saveCountdown}s`
+          : pendingRelay ? `Backed up locally — ${outboxDepth} change${outboxDepth === 1 ? "" : "s"} still syncing to relays`
           : "Auto-backup on")
         + (replicationSummary ? `\n${replicationSummary}` : "")
       }
@@ -518,6 +529,8 @@ function BackupButton({
         <CloudAlert className="w-4 h-4 text-red-600" />
       ) : backupPhase === "dirty" ? (
         <CloudUpload className="w-4 h-4 text-red-600" />
+      ) : pendingRelay ? (
+        <CloudUpload className="w-4 h-4 text-amber-600" />
       ) : (
         <CloudUpload className="w-4 h-4 text-emerald-600" />
       )}

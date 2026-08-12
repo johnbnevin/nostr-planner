@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { useNostr } from "../contexts/NostrContext";
 import { LocalSigner } from "../lib/localSigner";
-import { connectNostrSigner, connectBunkerUri } from "../lib/nip46Signer";
+import { connectNostrSigner, connectBunkerUri, persistNip46Session } from "../lib/nip46Signer";
 import { onDeepLink } from "../lib/deepLink";
 import { DEFAULT_RELAYS } from "../lib/nostr";
 import { isTauri, isStandalonePWA } from "../lib/platform";
@@ -454,17 +454,18 @@ export function LoginScreen() {
     setConnectError(null);
     setConnectWaiting(true);
     try {
-      const { signer } = await connectNostrSigner(controller.signal, (uri) => {
+      const result = await connectNostrSigner(controller.signal, (uri) => {
         // Open the scheme — on Android, this pops Amber; on desktop it
         // becomes a no-op and the user needs the QR flow instead.
         window.location.href = uri;
       });
-      // Bunker URLs are not private keys; persist on all platforms so
-      // auto-reconnect on next launch works identically across web,
-      // Tauri desktop, and Tauri mobile.
+      // Persist the client key + a reconnectable bunker URL so the next launch
+      // restores this Amber session silently instead of re-pairing and
+      // re-authorizing. Same persistence on every platform.
       lsSet("nostr-planner-login-type", "bunker");
+      persistNip46Session(result.clientSecretKey, result.bunkerPointer);
       connectAbortRef.current = null;
-      await loginWithSigner(signer);
+      await loginWithSigner(result.signer);
     } catch (e: unknown) {
       if (controller.signal.aborted) return;
       const msg = (e as Error).message || "Connection failed";
@@ -485,18 +486,19 @@ export function LoginScreen() {
     setConnectUri("");
     setQrDataUrl("");
     try {
-      const { signer } = await connectNostrSigner(controller.signal, async (uri) => {
+      const result = await connectNostrSigner(controller.signal, async (uri) => {
         setConnectUri(uri);
         try {
           const dataUrl = await QRCode.toDataURL(uri, { width: 280, margin: 2, color: { dark: "#000000", light: "#ffffff" } });
           if (!controller.signal.aborted) setQrDataUrl(dataUrl);
         } catch { /* QR generation failed */ }
       });
-      // Persist bunker login type on all platforms so auto-reconnect
-      // works identically across web, Tauri desktop, and Tauri mobile.
+      // Persist the client key + a reconnectable bunker URL so auto-reconnect
+      // restores this session silently on next launch (no re-authorization).
       lsSet("nostr-planner-login-type", "bunker");
+      persistNip46Session(result.clientSecretKey, result.bunkerPointer);
       connectAbortRef.current = null;
-      await loginWithSigner(signer);
+      await loginWithSigner(result.signer);
     } catch (e: unknown) {
       if (controller.signal.aborted) return;
       const msg = (e as Error).message || "Connection failed";
@@ -518,12 +520,13 @@ export function LoginScreen() {
     setBunkerLoading(true);
     setBunkerError(null);
     try {
-      const { signer } = await connectBunkerUri(trimmed, 120_000);
-      // Bunker URLs aren't private keys — same persistence on every
-      // platform so auto-reconnect works identically.
+      const result = await connectBunkerUri(trimmed, 120_000);
+      // Persist the client key + canonical bunker URL so the next launch
+      // reconnects with the SAME client identity — the remote signer keeps
+      // its "always authorize" grant instead of re-prompting every time.
       lsSet("nostr-planner-login-type", "bunker");
-      lsSet("nostr-planner-bunker-url", trimmed);
-      await loginWithSigner(signer);
+      persistNip46Session(result.clientSecretKey, result.bunkerPointer);
+      await loginWithSigner(result.signer);
     } catch (e: unknown) {
       const errMsg = (e as Error).message || "Bunker login failed";
       if (errMsg.toLowerCase().includes("already connected")) {
@@ -750,7 +753,7 @@ export function LoginScreen() {
           {/* Signer info dialog */}
           {showSignerInfo && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setShowSignerInfo(false)}>
-              <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
+              <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full modal-panel overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                     <ShieldCheck className="w-5 h-5" />What is a signer?
@@ -805,7 +808,7 @@ export function LoginScreen() {
           {/* Why is it so long? dialog */}
           {showWhyLong && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setShowWhyLong(false)}>
-              <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
+              <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full modal-panel overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                     <KeyRound className="w-5 h-5" />Why is the password so long?
@@ -1266,7 +1269,7 @@ export function LoginScreen() {
           onClick={() => setShowSecurityInfo(false)}
         >
           <div
-            className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] overflow-y-auto p-6"
+            className="bg-white rounded-2xl shadow-2xl max-w-lg w-full modal-panel overflow-y-auto p-6"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-5">

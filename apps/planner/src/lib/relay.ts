@@ -631,6 +631,23 @@ export async function queryEvents(
  *   this false so a re-drain doesn't re-toast an already-reported failure.
  * @throws Error if all retry attempts to the primary are exhausted.
  */
+/** Pull a human-useful reason out of NPool's publish rejection. NPool
+ *  throws AggregateError whose inner errors carry the relay's OK-false
+ *  message (or the socket/timeout failure); surface the first non-generic
+ *  one so whitelist rejections and the like aren't flattened into
+ *  "could not reach". */
+function extractPublishReason(err: unknown): string {
+  // Duck-typed AggregateError check — the project's TS lib target predates
+  // the AggregateError global declaration.
+  const maybeAgg = err as { errors?: unknown[] };
+  const inner: unknown[] = Array.isArray(maybeAgg?.errors) ? maybeAgg.errors : [err];
+  for (const e of inner) {
+    const msg = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+    if (msg && msg !== "All promises were rejected") return msg;
+  }
+  return err instanceof Error && err.message !== "All promises were rejected" ? err.message : "";
+}
+
 export async function publishToRelays(
   relays: string[],
   event: NostrEvent,
@@ -672,9 +689,15 @@ export async function publishToRelays(
         // The raw error from NPool is usually AggregateError("All promises
         // were rejected") which is cryptic in a user-facing toast. Wrap
         // with a friendlier message that names the relay so the user
-        // knows what's unreachable. The original error is still logged
-        // above for debugging.
-        const friendly = new Error(`could not reach primary relay (${primaryRelay})`);
+        // knows what's unreachable — but keep the underlying reason when
+        // there is one: a relay that REJECTS the event (OK false — e.g.
+        // "blocked: not on whitelist") is a very different failure from
+        // one that's unreachable, and hiding the reason made the outbox's
+        // lastError useless for diagnosing exactly that.
+        const reason = extractPublishReason(err);
+        const friendly = new Error(
+          `could not reach primary relay (${primaryRelay})${reason ? ` — ${reason}` : ""}`
+        );
         if (notifyOnFailure) notifyPublishFailure(friendly, event);
         throw friendly;
       }

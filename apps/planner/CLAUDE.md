@@ -1,6 +1,10 @@
 # Planner — Project CLAUDE.md
 
-See `SKILL.md` in this folder for general Nostr React/TypeScript patterns, library choices, relay strategy, Blossom, and NSite. This file covers decisions specific to this planner application.
+**Read `../../SKILL.md` at the repo root before writing any Nostr protocol code** — it is the router for current NIP status, deprecations, relay strategy, messaging, storage, tooling, and the stated principles for judgment calls. Load a file from `../../references/` when the task needs it; `SKILL.md` has the index. It is fact-checked against the live NIPs index and dated, because most Nostr knowledge in training data is stale.
+
+Authority order: `mcp__nostr__*` / nostrbook.dev → the NIPs repo → `SKILL.md` → everything else. That governs **facts, not judgment** — the Cypherpunk Defaults and Judgment Calls are stated positions, so ask before changing anything that touches a principle, a genuine dev disagreement, or a discretionary call.
+
+This file covers decisions specific to this planner application.
 
 ---
 
@@ -39,7 +43,7 @@ If NIP-52 evolves, re-verify kinds with MCP before making architecture changes.
 
 ## Before Adding Any New Event Kind
 
-Follow the process in SKILL.md. In short: use `mcp__nostr__read_kind`, check https://undocumented.nostrkinds.info/, check NIPs index. Don't pick a number that's already taken.
+Follow the process in `../../SKILL.md`. In short: use `mcp__nostr__read_kind`, check https://undocumented.nostrkinds.info/, check NIPs index. Don't pick a number that's already taken.
 
 ---
 

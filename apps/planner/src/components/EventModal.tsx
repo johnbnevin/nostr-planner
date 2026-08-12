@@ -322,6 +322,7 @@ export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onC
               notify,
               tags,
               createdAt: Math.floor(Date.now() / 1000),
+              updatedAt: Date.now(),
             },
           });
         }
@@ -418,6 +419,7 @@ export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onC
             notify,
             tags,
             createdAt: Math.floor(Date.now() / 1000),
+            updatedAt: Date.now(),
           });
 
           pendingPublishes.push({
@@ -510,6 +512,7 @@ export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onC
           notify,
           tags,
           createdAt: Math.floor(Date.now() / 1000),
+          updatedAt: Date.now(),
         };
         addEventOptimistic(optimisticEvent);
 
@@ -577,7 +580,7 @@ export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onC
         role="dialog"
         aria-modal="true"
         aria-label="Event editor"
-        className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto"
+        className="bg-white rounded-2xl shadow-2xl max-w-lg w-full modal-panel overflow-y-auto"
       >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold">
@@ -893,10 +896,17 @@ export function EventModal({ event, prefillDate, prefillEvent, extendSeries, onC
                 <label className="text-xs text-gray-500">for</label>
                 <input
                   type="number"
-                  value={recurrenceCount}
-                  onChange={(e) =>
-                    setRecurrenceCount(parseInt(e.target.value) || 0)
-                  }
+                  min={1}
+                  inputMode="numeric"
+                  // Bind an empty string (not "0") when the field is cleared so
+                  // the user can delete the value and type a fresh number
+                  // without a stuck leading zero. The save handler already
+                  // blocks a count < 1.
+                  value={recurrenceCount === 0 ? "" : recurrenceCount}
+                  onChange={(e) => {
+                    const digits = e.target.value.replace(/[^0-9]/g, "");
+                    setRecurrenceCount(digits === "" ? 0 : parseInt(digits, 10));
+                  }}
                   className="w-16 px-2 py-1.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
                 />
                 <span className="text-xs text-gray-500">times</span>

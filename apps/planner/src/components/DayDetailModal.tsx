@@ -49,7 +49,7 @@ export function DayDetailModal({ date, onClose, onEventClick, onNewEvent }: DayD
         aria-modal="true"
         aria-label="Day detail"
         onClick={(e) => e.stopPropagation()}
-        className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] flex flex-col"
+        className="bg-white rounded-2xl shadow-2xl max-w-lg w-full modal-panel flex flex-col"
       >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <div>

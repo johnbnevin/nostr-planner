@@ -91,7 +91,7 @@ export function Sidebar({ onImportParsed, onShareCalendar, onClose }: SidebarPro
           aria-modal="true"
           aria-label="Calendars"
           onClick={(e) => e.stopPropagation()}
-          className="bg-white rounded-2xl shadow-2xl w-full max-w-sm max-h-[85vh] overflow-y-auto"
+          className="bg-white rounded-2xl shadow-2xl w-full max-w-sm modal-panel overflow-y-auto"
         >
           <div className="flex items-center justify-between p-4 border-b border-gray-200 sticky top-0 bg-white rounded-t-2xl z-10">
             <h2 className="text-lg font-semibold">Calendars</h2>
@@ -761,7 +761,7 @@ function SidebarContent({
             aria-modal="true"
             aria-label="Delete calendar"
             onClick={(e) => e.stopPropagation()}
-            className="bg-white rounded-2xl shadow-2xl max-w-xs w-full p-5"
+            className="bg-white rounded-2xl shadow-2xl max-w-xs w-full p-5 modal-panel overflow-y-auto"
           >
             <h3 className="text-base font-semibold text-gray-900">Delete calendar?</h3>
             <p className="text-sm text-gray-600 mt-1">

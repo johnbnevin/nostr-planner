@@ -453,6 +453,47 @@ export function CalendarProvider({ children }: { children: ReactNode }) {
   useEffect(() => { calendarsRef.current = calendars; }, [calendars]);
   useEffect(() => { deletedDTagsRef.current = deletedDTags; }, [deletedDTags]);
 
+  // ── Durable local persistence (data-loss safety net) ─────────────────
+  // Mirror events + calendars to IndexedDB a beat after any change, WITHOUT
+  // waiting on a relay refresh (which only caches on a successful sync) or the
+  // 10 s Blossom autosave (whose pagehide flush can't finish an async upload).
+  // This is what makes an edit made moments before the app is closed survive a
+  // reload: on next login the restore MERGES this cache with the Blossom
+  // snapshot (see CalendarApp), so nothing made "right before leaving" is lost.
+  const cacheWriteTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!pubkey || eventsLoading) return;
+    // Never overwrite a good cache with an empty set during the brief
+    // empty-state window right after login and before restore populates.
+    if (events.length === 0 && calendars.length === 0) return;
+    if (cacheWriteTimer.current) clearTimeout(cacheWriteTimer.current);
+    const pk = pubkey;
+    cacheWriteTimer.current = setTimeout(() => {
+      void cacheCalendarData(pk, eventsRef.current, calendarsRef.current);
+    }, 1500);
+    return () => { if (cacheWriteTimer.current) clearTimeout(cacheWriteTimer.current); };
+  }, [events, calendars, pubkey, eventsLoading]);
+
+  // Best-effort immediate flush when the tab is hidden or torn down, so a
+  // change made in the last second before closing still reaches IndexedDB
+  // (a local write is far likelier to land during pagehide than a network
+  // upload). Complements the debounced write above.
+  useEffect(() => {
+    if (!pubkey) return;
+    const pk = pubkey;
+    const flush = () => {
+      if (eventsRef.current.length === 0 && calendarsRef.current.length === 0) return;
+      void cacheCalendarData(pk, eventsRef.current, calendarsRef.current);
+    };
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+  }, [pubkey]);
+
   // Re-load deletedDTags from localStorage whenever the logged-in user changes.
   // The useState initialiser only runs once on mount; without this effect, if
   // user A logs out and user B logs in within the same session, user A's

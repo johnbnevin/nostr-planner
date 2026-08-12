@@ -48,6 +48,7 @@ import {
 const log = logger("backup");
 
 import { SUGGESTED_BLOSSOM_SERVERS } from "./nostr";
+import { npubEncode } from "nostr-tools/nip19";
 
 // ── User-configurable Blossom server state ─────────────────────────
 //
@@ -170,6 +171,15 @@ const markSeenRemote = (sha: string) => {
   seenRemoteShas.add(sha);
   setTimeout(() => seenRemoteShas.delete(sha), 60_000);
 };
+
+// The most recent remote snapshot this tab is in sync with, keyed by its
+// sha256. When a save's pre-check finds the pointer unchanged from this
+// sha, the shrink-guard can compare against the cached copy instead of
+// re-downloading ~half a MB and burning a NIP-44 decrypt signer call on
+// EVERY save. Seeded by loadSnapshot (login restore / raced merges), by
+// watchPointer (cross-device updates), and by each successful save (the
+// uploaded `working` snapshot IS the new remote state by definition).
+let remoteSnapshotCache: { sha256: string; snapshot: Snapshot } | null = null;
 
 const withTimeout = async <T>(p: Promise<T>, ms: number, label: string): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -322,23 +332,31 @@ export async function saveSnapshot(
   let remoteForShrinkCheck: (Snapshot & { _sha256: string }) | null = null;
   if (relays) {
     try {
-      const current = await findPointer(pubkey, relays);
+      const current = await findPointer(pubkey, relays, 4_000);
       if (current) {
         const raced = current.sha256 !== lastKnownSha;
         const oursLabel = lastKnownSha ? lastKnownSha.slice(0, 8) : "unknown";
         if (raced) {
           log.info(`pointer raced (ours=${oursLabel}, remote=${current.sha256.slice(0, 8)}); merging`);
         }
-        // loadSnapshot itself calls markSeenRemote(sha256), so the live
-        // watchPointer subscription won't re-deliver this sha as a
-        // cross-device update moments from now. We load the remote on
-        // every save (not just on conflict) so the shrink-guard below
-        // has counts to compare against; in the same-sha case we just
-        // don't merge.
-        const remote = await loadSnapshot(pubkey, relays, nip44);
-        if (remote) {
-          remoteForShrinkCheck = remote;
-          if (raced) working = mergeSnapshots(working, remote);
+        if (!raced && remoteSnapshotCache?.sha256 === current.sha256) {
+          // Fast path: the pointer is exactly the sha this tab last
+          // loaded or published, so the cached copy IS the remote
+          // state. The shrink-guard gets its comparison counts without
+          // a blob download or a NIP-44 decrypt round-trip.
+          remoteForShrinkCheck = { ...remoteSnapshotCache.snapshot, _sha256: current.sha256 };
+        } else {
+          // loadSnapshot itself calls markSeenRemote(sha256), so the live
+          // watchPointer subscription won't re-deliver this sha as a
+          // cross-device update moments from now. We load the remote
+          // whenever the cache can't vouch for it so the shrink-guard
+          // below has counts to compare against; in the same-sha case we
+          // just don't merge.
+          const remote = await loadSnapshot(pubkey, relays, nip44);
+          if (remote) {
+            remoteForShrinkCheck = remote;
+            if (raced) working = mergeSnapshots(working, remote);
+          }
         }
       }
     } catch (err) {
@@ -460,6 +478,9 @@ export async function saveSnapshot(
   }), 30_000, "sign snapshot pointer event");
   await withTimeout(publishEvent(refEvent), 15_000, "publish snapshot pointer event");
   log.info(`pointer published in ${Date.now() - startedAt}ms`);
+  // What we just uploaded is now the remote state — the next unraced
+  // save's shrink check can run against it without any fetch.
+  remoteSnapshotCache = { sha256, snapshot: working };
 
   // 5a. Best-effort cleanup of the N-2 blob. Blossom blobs are
   //     content-addressed, so every save writes a new sha — without
@@ -480,21 +501,25 @@ export async function saveSnapshot(
   //    additive durability — we never block the caller on mirrors.
   const mirrorTargets = effectiveBlossomServers().filter((s) => s !== primary);
   if (mirrorTargets.length > 0) {
-    scheduleIdle(() => {
-      void (async () => {
-        const mirrors: MirrorOutcome[] = [];
-        const failed: string[] = [];
-        for (const server of mirrorTargets) {
-          const result = await uploadBlobTo(server, sha256, blob, authHeader);
-          mirrors.push(result.ok
-            ? { url: server, status: "ok" }
-            : { url: server, status: "failed", error: result.error });
-          if (!result.ok) failed.push(server);
-        }
-        recordReplication({ kind: "blossom", primary: primary!, mirrors, at: Date.now() });
-        if (failed.length > 0) enqueueBlossomMirrorRetry(sha256, blob, authHeader, failed);
-      })();
-    });
+    // Start mirroring immediately (still without blocking the caller).
+    // These used to wait for requestIdleCallback, but an idle callback
+    // never fires in a tab the user closes right after saving — which
+    // left the newest snapshot with a single copy on `primary` until the
+    // next session. Kicking the uploads off now closes most of that
+    // single-copy window.
+    void (async () => {
+      const mirrors: MirrorOutcome[] = [];
+      const failed: string[] = [];
+      for (const server of mirrorTargets) {
+        const result = await uploadBlobTo(server, sha256, blob, authHeader);
+        mirrors.push(result.ok
+          ? { url: server, status: "ok" }
+          : { url: server, status: "failed", error: result.error });
+        if (!result.ok) failed.push(server);
+      }
+      recordReplication({ kind: "blossom", primary: primary!, mirrors, at: Date.now() });
+      if (failed.length > 0) enqueueBlossomMirrorRetry(sha256, blob, authHeader, failed);
+    })();
   } else {
     // Single-server topology (user customized primary, no other suggested
     // servers available). Still record so the UI shows where things landed.
@@ -566,6 +591,32 @@ registerBlossomMirrorDrainer(async (sha256, body, authHeader, urls) => {
  * current pointer points at; cleanup of the prior blob is opportunistic.
  */
 async function deletePreviousBlob(sha: string, signEvent: SignEventFn): Promise<void> {
+  // Delete from every server we might have written to — the user's
+  // currently configured primary + mirrors (effectiveBlossomServers())
+  // plus every suggested server (since the user could have switched
+  // primary between saves, orphaning blobs on the old one). Without
+  // this the user's custom primary accumulates blobs forever —
+  // saveSnapshot happily uploads there but deletePreviousBlob never
+  // targeted it. 404s and refusals are silent.
+  const servers = [...new Set([...effectiveBlossomServers(), ...SUGGESTED_BLOSSOM_SERVERS])];
+
+  // Ownership guard, enforced HERE so every delete path gets it: the sha
+  // we're asked to delete may have come from bookkeeping (priorShas in
+  // localStorage, the login-GC keep window) that can be poisoned by blobs
+  // OTHER apps uploaded under this same pubkey — this blob pool is shared
+  // by every Nostr app the user runs. Only delete after positively
+  // confirming the blob is a planner snapshot envelope on some server.
+  // If no server can confirm it (blob gone, network down), skip: deleting
+  // what we can't verify risks destroying another app's data.
+  let confirmed = false;
+  for (const server of servers) {
+    if (await confirmPlannerBlob(server, sha)) { confirmed = true; break; }
+  }
+  if (!confirmed) {
+    log.info(`blossom delete skipped ${sha.slice(0, 8)} — not confirmed as a planner snapshot`);
+    return;
+  }
+
   let auth: SignedEvent;
   try {
     auth = await BlossomClient.getDeleteAuth(
@@ -577,14 +628,6 @@ async function deletePreviousBlob(sha: string, signEvent: SignEventFn): Promise<
     log.debug("could not sign delete auth (ignored):", err);
     return;
   }
-  // Delete from every server we might have written to — the user's
-  // currently configured primary + mirrors (effectiveBlossomServers())
-  // plus every suggested server (since the user could have switched
-  // primary between saves, orphaning blobs on the old one). Without
-  // this the user's custom primary accumulates blobs forever —
-  // saveSnapshot happily uploads there but deletePreviousBlob never
-  // targeted it. 404s and refusals are silent.
-  const servers = [...new Set([...effectiveBlossomServers(), ...SUGGESTED_BLOSSOM_SERVERS])];
   log.info(`blossom delete ${sha.slice(0, 8)} → ${servers.length} server(s)`);
   await Promise.allSettled(
     servers.map((server) =>
@@ -667,6 +710,7 @@ export async function loadSnapshot(
   // subscription doesn't re-deliver it as a "Synced from another device"
   // event seconds later.
   markSeenRemote(pointer.sha256);
+  remoteSnapshotCache = { sha256: pointer.sha256, snapshot: snap };
   return { ...snap, _sha256: pointer.sha256 };
 }
 
@@ -801,6 +845,50 @@ export async function fetchSnapshotBySha(
 }
 
 /**
+ * Parse and decrypt a backup file produced by BackupPanel's "Export to
+ * file" (`{ planner: true, version: 2, npub, envelope }`). Throws with a
+ * user-readable message on every failure mode — wrong file, wrong
+ * account, wrong key — so the Restore-from-file UI can show it verbatim.
+ * Dates are revived; the caller applies + republishes the snapshot.
+ */
+export async function parseExportedBackupFile(
+  text: string,
+  pubkey: string,
+  nip44: Nip44
+): Promise<Snapshot> {
+  let file: { planner?: boolean; version?: number; npub?: string; envelope?: Envelope };
+  try { file = JSON.parse(text); }
+  catch { throw new Error("That file isn't valid JSON — expected a Planner backup export."); }
+  if (file?.planner !== true || !file.envelope) {
+    throw new Error("That file doesn't look like a Planner backup export.");
+  }
+  if (file.version !== 2) {
+    throw new Error(`Unsupported backup file version ${String(file.version)} — this app writes version 2.`);
+  }
+  const expectedNpub = npubEncode(pubkey);
+  if (file.npub && file.npub !== expectedNpub) {
+    throw new Error(
+      `This backup belongs to a different account (${file.npub.slice(0, 12)}…). ` +
+      "Log in with that key to restore it."
+    );
+  }
+  let plaintext: string;
+  try { plaintext = await withTimeout(unwrapEnvelope(file.envelope, pubkey, nip44), 60_000, "decrypt backup file"); }
+  catch { throw new Error("Couldn't decrypt the file — it wasn't encrypted to this key."); }
+  let snap: Snapshot;
+  try { snap = JSON.parse(plaintext) as Snapshot; }
+  catch { throw new Error("Decrypted file isn't a valid snapshot."); }
+  if (snap?.version !== 1 || !Array.isArray(snap.events) || !Array.isArray(snap.calendars)) {
+    throw new Error("Decrypted file isn't a Planner snapshot.");
+  }
+  for (const e of snap.events) {
+    e.start = new Date(e.start as unknown as string);
+    if (e.end) e.end = new Date(e.end as unknown as string);
+  }
+  return snap;
+}
+
+/**
  * Login-time GC. Enumerate every blob the user has on every known
  * Blossom server, keep the 3 most recent by upload timestamp (current
  * pointer + two prior generations — our rolling retention window),
@@ -827,46 +915,98 @@ export async function gcBlobsOnLogin(
   }
   if (blobs.length === 0) return [];
 
-  // Newest-first order from listUserBlobs. Force the current sha into
-  // the keep set regardless of its upload timestamp — some servers
-  // return odd timestamps, and we *always* want the live pointer's
-  // blob alive.
-  const keepShas = new Set<string>([currentSha]);
-  for (const b of blobs) {
-    if (keepShas.size >= 3) break;
-    keepShas.add(b.sha256);
+  // The pubkey's blob pool is SHARED with every other Nostr app the user
+  // runs (media uploads, other apps' backups — they all land on the same
+  // servers via the user's BUD-03 list). Retention math must see planner
+  // snapshots ONLY: the previous version built the keep window from the
+  // 3 newest blobs of ANY kind, so a burst of uploads from another app
+  // pushed planner's own generations out of the window and login GC
+  // deleted them — with a stale pointer, even the newest snapshot.
+  const current = blobs.find((b) => b.sha256 === currentSha);
+  if (!current) {
+    // The blob our pointer references isn't visible in the listing —
+    // either the listing is incomplete or the pointer is stale. Both
+    // mean our view is too unreliable to authorize deletions.
+    log.warn("gc: current snapshot blob not in listing — skipping GC this session");
+    return [];
   }
 
-  const toDelete = blobs.map((b) => b.sha256).filter((sha) => !keepShas.has(sha));
+  // Identify planner snapshot envelopes among the listed blobs (order
+  // preserved, so newest first). probePlannerEnvelope reads only the
+  // first bytes of each blob, so this stays cheap in a media-heavy pool.
+  const probes = await Promise.all(blobs.map((b) =>
+    b.sha256 === currentSha ? Promise.resolve(true) : probePlannerEnvelope(b.server, b.sha256)
+  ));
+  const plannerShas = blobs.filter((_, i) => probes[i]).map((b) => b.sha256);
+
+  const keepShas = new Set<string>([currentSha]);
+  for (const sha of plannerShas) {
+    if (keepShas.size >= 3) break;
+    keepShas.add(sha);
+  }
+
+  // Delete candidates: planner envelopes outside the keep window that
+  // are no newer than the blob our pointer references. The newer-than
+  // guard protects against a stale pointer (a primary relay that hasn't
+  // seen another device's latest save): whatever that newer blob is, it
+  // is somebody's current data. Blobs with unknown upload timestamps are
+  // skipped for the same reason. deletePreviousBlob independently
+  // re-confirms ownership with a full parse before actually deleting.
+  const toDelete = blobs.filter((b) =>
+    plannerShas.includes(b.sha256) &&
+    !keepShas.has(b.sha256) &&
+    b.uploaded > 0 &&
+    b.uploaded <= current.uploaded
+  );
   if (toDelete.length === 0) {
-    log.info(`gc: nothing to prune (${blobs.length} blobs, all within keep window)`);
+    log.info(`gc: nothing to prune (${blobs.length} blobs, ${plannerShas.length} planner snapshot(s), all within keep window)`);
   } else {
-    log.info(`gc: ${toDelete.length} candidate(s) outside keep window; keeping ${keepShas.size}`);
+    log.info(`gc: pruning ${toDelete.length} planner snapshot(s) outside keep window; keeping ${keepShas.size}`);
     // Sequential so we don't flood a single signer with parallel delete-auth calls.
-    for (const sha of toDelete) {
-      // Confirm each candidate is actually one of OUR snapshots before
-      // deleting. listUserBlobs enumerates every blob the pubkey owns —
-      // including blobs written by other Nostr apps under the same identity.
-      // Deleting one of those just because it's older than our keep window
-      // would be a destructive cross-app side effect.
-      const handle = blobs.find((b) => b.sha256 === sha);
-      const server = handle?.server;
-      if (!server || !(await confirmPlannerBlob(server, sha))) {
-        log.debug(`gc: skipping ${sha.slice(0, 8)} — not a confirmed planner snapshot`);
-        continue;
-      }
-      try { await deletePreviousBlob(sha, signEvent); }
-      catch (err) { log.info(`gc: delete of ${sha.slice(0, 8)} failed (best-effort):`, err); }
+    for (const b of toDelete) {
+      try { await deletePreviousBlob(b.sha256, signEvent); }
+      catch (err) { log.info(`gc: delete of ${b.sha256.slice(0, 8)} failed (best-effort):`, err); }
     }
   }
 
   // Return the non-current kept shas in newest-first order, which is
   // the shape useAutoBackup expects (oldest first means we reverse).
-  const priorKept = blobs
-    .map((b) => b.sha256)
+  // Planner snapshots only — these seed priorShas in localStorage, whose
+  // entries later become saveSnapshot's shaToDelete targets.
+  return plannerShas
     .filter((sha) => keepShas.has(sha) && sha !== currentSha)
     .slice(0, 2);
-  return priorKept;
+}
+
+/**
+ * Cheap identification probe: is this blob a planner snapshot envelope?
+ * Fetches only the first bytes via a Range request (servers that ignore
+ * Range just return the full body, which works too) and checks for the
+ * envelope's JSON prefix — {@link wrapEnvelope} always emits
+ * `{"v":1,"key":"…`. This decides which blobs PARTICIPATE in retention
+ * math; anything actually deleted still passes the stricter
+ * {@link confirmPlannerBlob} full-parse check first.
+ */
+async function probePlannerEnvelope(server: string, sha256: string): Promise<boolean> {
+  try {
+    const res = await fetchWithTimeout(
+      `${server}/${sha256}`,
+      { headers: { range: "bytes=0-63" } },
+      10_000
+    );
+    if (!res.ok) return false;
+    // Read only the first chunk, then cancel — so a server that ignores
+    // the Range header can't make us download a multi-megabyte video
+    // just to learn it isn't a snapshot.
+    const reader = res.body?.getReader();
+    if (!reader) return (await res.text()).startsWith('{"v":1,"key":"');
+    const { value } = await reader.read();
+    void reader.cancel().catch(() => { /* ignore */ });
+    const text = new TextDecoder().decode(value ?? new Uint8Array());
+    return text.startsWith('{"v":1,"key":"');
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -910,14 +1050,18 @@ async function confirmPlannerBlob(server: string, sha256: string): Promise<boole
 
 async function findPointer(
   pubkey: string,
-  relays: string[]
+  relays: string[],
+  /** Query timeout. Login/restore paths keep the generous default; the
+   *  pre-save check passes a tighter bound so a slow relay can't stall
+   *  every save by this long before the upload even starts. */
+  timeoutMs = 10_000
 ): Promise<{ sha256: string; servers: string[] } | null> {
   let events: RawEvent[] = [];
   try {
     events = await queryEvents(
       relays.length > 0 ? relays : [getPrimaryRelay()],
       { kinds: [KIND_APP_DATA], authors: [pubkey], "#d": [DTAG_BACKUP], limit: 1 },
-      10_000
+      timeoutMs
     ) as unknown as RawEvent[];
   } catch (err) {
     log.warn("pointer query failed:", err);
@@ -1061,6 +1205,7 @@ export function watchPointer(
         if (e.end) e.end = new Date(e.end as unknown as string);
       }
       lastSha = sha;
+      remoteSnapshotCache = { sha256: sha, snapshot: snap };
       log.info(`watchPointer: merged ${sha.slice(0, 8)} (${snap.events.length} events)`);
       onNewer({ ...snap, _sha256: sha } as Snapshot & { _sha256: string });
     } catch (err) {

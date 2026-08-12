@@ -24,6 +24,23 @@ body {
   --sal: env(safe-area-inset-left, 0px);
 }
 
+/* Shared height cap for every dialog panel. Keeps the whole panel —
+   including its close button — inside the VISIBLE viewport: the 4rem
+   slack covers the overlay's padding (p-4 centered, or pt-12 top-aligned)
+   plus safe-area insets. Plain vh over-counts on mobile because it
+   includes the area behind the browser's URL bar; dvh tracks the real
+   visible height, so prefer it where supported. Panels either scroll as
+   a whole (overflow-y-auto alongside this class) or contain their own
+   flex-1 overflow-y-auto body. */
+.modal-panel {
+  max-height: calc(100vh - 4rem - var(--sat) - var(--sab));
+}
+@supports (height: 1dvh) {
+  .modal-panel {
+    max-height: calc(100dvh - 4rem - var(--sat) - var(--sab));
+  }
+}
+
 .safe-area-pad {
   padding-top: var(--sat);
   padding-bottom: var(--sab);
