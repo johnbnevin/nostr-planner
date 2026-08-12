@@ -68,7 +68,7 @@ export function ShareViewModal({ onClose }: ShareViewModalProps) {
         aria-modal="true"
         aria-label="Share view"
         onClick={(e) => e.stopPropagation()}
-        className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[85vh] overflow-y-auto"
+        className="bg-white rounded-2xl shadow-2xl max-w-md w-full modal-panel overflow-y-auto"
       >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">

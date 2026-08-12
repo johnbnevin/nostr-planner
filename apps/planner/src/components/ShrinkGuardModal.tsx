@@ -59,7 +59,7 @@ export function ShrinkGuardModal({ details, onClose, onProceedAnyway, onDiscardL
         aria-modal="true"
         aria-label="Backup safety warning"
         onClick={(e) => e.stopPropagation()}
-        className="bg-white rounded-2xl shadow-2xl max-w-md w-full"
+        className="bg-white rounded-2xl shadow-2xl max-w-md w-full modal-panel overflow-y-auto"
       >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold flex items-center gap-2">

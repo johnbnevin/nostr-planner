@@ -43,6 +43,36 @@ try {
 const MAX_TIMERS = 100;
 const timers = new Map<string, number>();
 
+// ── In-memory log capture ───────────────────────────────────────────
+//
+// Every info/warn/error line (debug too, when debug mode is on) is also
+// appended to a bounded ring buffer so mobile users — who have no
+// DevTools console — can export recent logs from the in-app Sync
+// diagnostics panel. Strings only, capped, oldest evicted first.
+
+const MAX_CAPTURED = 400;
+const captured: string[] = [];
+
+function fmtArg(a: unknown): string {
+  if (typeof a === "string") return a;
+  if (a instanceof Error) return `${a.name}: ${a.message}`;
+  try { return JSON.stringify(a); } catch { return String(a); }
+}
+
+function capture(level: string, prefix: string, args: unknown[]): void {
+  const t = new Date();
+  const hh = String(t.getHours()).padStart(2, "0");
+  const mm = String(t.getMinutes()).padStart(2, "0");
+  const ss = String(t.getSeconds()).padStart(2, "0");
+  captured.push(`${hh}:${mm}:${ss} ${level} ${prefix} ${args.map(fmtArg).join(" ")}`);
+  if (captured.length > MAX_CAPTURED) captured.splice(0, captured.length - MAX_CAPTURED);
+}
+
+/** Recent log lines (oldest first) for the in-app diagnostics export. */
+export function getRecentLogs(): string[] {
+  return [...captured];
+}
+
 export interface Logger {
   info(...args: unknown[]): void;
   warn(...args: unknown[]): void;
@@ -64,11 +94,11 @@ export function logger(module: string): Logger {
   const prefix = `[${module}]`;
 
   return {
-    info: (...args) => console.log(prefix, ...args),
-    warn: (...args) => console.warn(prefix, ...args),
-    error: (...args) => console.error(prefix, ...args),
+    info: (...args) => { capture("I", prefix, args); console.log(prefix, ...args); },
+    warn: (...args) => { capture("W", prefix, args); console.warn(prefix, ...args); },
+    error: (...args) => { capture("E", prefix, args); console.error(prefix, ...args); },
     debug: (...args) => {
-      if (isDebug()) console.log(prefix, "[debug]", ...args);
+      if (isDebug()) { capture("D", prefix, args); console.log(prefix, "[debug]", ...args); }
     },
     time: (label) => {
       if (timers.size >= MAX_TIMERS) {

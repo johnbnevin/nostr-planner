@@ -223,7 +223,7 @@ export function SharingModal({ calDTag, onClose }: SharingModalProps) {
         role="dialog"
         aria-modal="true"
         aria-label="Share calendar"
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] flex flex-col"
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-md modal-panel flex flex-col"
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">

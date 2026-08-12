@@ -753,7 +753,7 @@ export function LoginScreen() {
           {/* Signer info dialog */}
           {showSignerInfo && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setShowSignerInfo(false)}>
-              <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
+              <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full modal-panel overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                     <ShieldCheck className="w-5 h-5" />What is a signer?
@@ -808,7 +808,7 @@ export function LoginScreen() {
           {/* Why is it so long? dialog */}
           {showWhyLong && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setShowWhyLong(false)}>
-              <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
+              <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full modal-panel overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                     <KeyRound className="w-5 h-5" />Why is the password so long?
@@ -1269,7 +1269,7 @@ export function LoginScreen() {
           onClick={() => setShowSecurityInfo(false)}
         >
           <div
-            className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[85vh] overflow-y-auto p-6"
+            className="bg-white rounded-2xl shadow-2xl max-w-lg w-full modal-panel overflow-y-auto p-6"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-5">

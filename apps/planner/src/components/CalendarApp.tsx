@@ -885,7 +885,13 @@ export function CalendarApp() {
       )}
 
       {showShareView && <ShareViewModal onClose={() => setShowShareView(false)} />}
-      {showBackup && <BackupPanel onClose={() => setShowBackup(false)} />}
+      {showBackup && (
+        <BackupPanel
+          onClose={() => setShowBackup(false)}
+          backupPhase={backupPhase}
+          backupError={backupError}
+        />
+      )}
       {showShrinkGuard && blockedDetails && (
         <ShrinkGuardModal
           details={blockedDetails}
@@ -915,7 +921,7 @@ export function CalendarApp() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="first-run-setup-title"
-            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 modal-panel overflow-y-auto"
           >
             <h2 id="first-run-setup-title" className="text-lg font-semibold text-gray-900 mb-1">Welcome to Planner</h2>
             <p className="text-sm text-gray-500 mb-4">

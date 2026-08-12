@@ -120,6 +120,11 @@ interface NostrContextValue {
   signEvent: (event: UnsignedEvent) => Promise<NostrEvent>;
   /** Publish a signed event to the user's relay set. Throws on total failure. */
   publishEvent: (event: NostrEvent) => Promise<void>;
+  /** Tear down a dead NIP-46 signer and restart the reconnect ladder.
+   *  Call when an operation fails with a closed/unresponsive-signer error
+   *  ("this signer is not open anymore"). No-op for non-bunker sessions
+   *  and while a ladder is already running. */
+  reviveSigner: () => void;
 }
 
 const NostrContext = createContext<NostrContextValue | null>(null);
@@ -397,6 +402,37 @@ export function NostrProvider({ children }: { children: ReactNode }) {
         ch.close();
       } catch { /* ignore */ }
     }
+  }, [signer]);
+
+  /**
+   * The active NIP-46 signer went dead ("this signer is not open anymore",
+   * or Amber simply stopped answering). Tear it down and restart the
+   * reconnect ladder against the persisted bunker URL + client key — the
+   * same silent path a page reload takes, minus the reload. The persisted
+   * client key means Amber recognizes the session and does NOT re-prompt.
+   *
+   * Guarded so repeated failures can't stack ladders or tear down a
+   * session that has no reconnect path (extension / local-key logins).
+   */
+  const reviveSigner = useCallback(() => {
+    const loginType = localStorage.getItem("nostr-planner-login-type");
+    const bunkerUrl = localStorage.getItem("nostr-planner-bunker-url");
+    if (loginType !== "bunker" || !bunkerUrl) {
+      log.debug("reviveSigner: not a bunker session — ignoring");
+      return;
+    }
+    if (ladderActiveRef.current) {
+      log.debug("reviveSigner: reconnect ladder already running");
+      return;
+    }
+    log.warn("reviveSigner: bunker signer reported dead — tearing down and reconnecting");
+    signer?.destroy?.().catch(() => { /* already dead */ });
+    setRelayAuthSigner(null);
+    setSigner(null);
+    // The auto-login effect sees loginType=bunker + saved pubkey and runs
+    // the reconnect ladder; on success finalizeLogin installs the fresh
+    // signer and flushes the outbox.
+    setAutoLoginTrigger((n) => n + 1);
   }, [signer]);
 
   /**
@@ -778,6 +814,7 @@ export function NostrProvider({ children }: { children: ReactNode }) {
         logout,
         signEvent,
         publishEvent,
+        reviveSigner,
       }}
     >
       {children}

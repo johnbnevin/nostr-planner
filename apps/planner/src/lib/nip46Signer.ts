@@ -344,6 +344,11 @@ function wrapBunkerSigner(bunker: BunkerSigner, pubkey: string, pool?: SimplePoo
         bunker.nip44Decrypt(senderPubkey, ciphertext),
     },
     destroy: async () => {
+      // Deliberately loud: "this signer is not open anymore" failures mean
+      // SOMETHING closed a signer the app was still using. Logging every
+      // close (with a stack) makes the culprit visible in the in-app
+      // diagnostics log export instead of being invisible on mobile.
+      log.info("bunker signer destroyed", new Error("destroy() call site").stack ?? "(no stack)");
       try { await bunker.close(); } catch { /* ignore */ }
       // Best-effort zero of the ephemeral client secret key.
       try { clientSk?.fill(0); } catch { /* ignore */ }

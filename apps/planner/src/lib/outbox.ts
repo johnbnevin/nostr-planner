@@ -258,6 +258,38 @@ export async function countPending(pubkey?: string | null): Promise<number> {
   }
 }
 
+/** Safe-to-display summary of one pending entry, for the in-app Sync
+ *  diagnostics panel (mobile has no DevTools; this is how users see WHY
+ *  their sync count isn't draining). `eventPubkey` is included because a
+ *  whitelist-guarded relay rejects by signing key — a pending event signed
+ *  by a pubkey other than the session's is the tell. */
+export interface OutboxEntrySummary {
+  kind: number;
+  id: string;
+  eventPubkey: string;
+  queuedAt: number;
+  lastAttemptAt: number;
+  attempts: number;
+  lastError: string;
+}
+
+/** List pending entries (oldest first) as display-safe summaries. */
+export async function listPendingSummary(pubkey: string): Promise<OutboxEntrySummary[]> {
+  const entries = [
+    ...(await listEntries(pubkey)),
+    ...memoryQueue.filter((e) => e.pubkey === pubkey),
+  ];
+  return entries.map((e) => ({
+    kind: e.event.kind,
+    id: e.event.id ?? "",
+    eventPubkey: e.event.pubkey ?? "",
+    queuedAt: e.queuedAt,
+    lastAttemptAt: e.lastAttemptAt,
+    attempts: e.attempts,
+    lastError: e.lastError,
+  }));
+}
+
 /** Discard a queued event (e.g. user clicked "Discard" on the failure toast). */
 export async function discardOutboxEntry(pubkey: string, eventId: string): Promise<void> {
   await deleteEntry(entryKey(pubkey, eventId));

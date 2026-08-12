@@ -78,7 +78,7 @@ export function SettingsPanel({ onClose, onBackup, onShareView }: SettingsPanelP
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
-        className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto"
+        className="bg-white rounded-2xl shadow-2xl max-w-md w-full modal-panel overflow-y-auto"
       >
         <div className="flex items-center justify-between p-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold">Settings</h2>

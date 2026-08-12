@@ -27,12 +27,14 @@ import { lsSet } from "../lib/storage";
 
 const log = logger("auto-backup");
 
-// 10 s: long enough to coalesce a burst of edits (typing a title,
+// 3 s: long enough to coalesce a burst of edits (typing a title,
 // picking tags, toggling habit checkboxes) into one upload, short
-// enough that cross-device propagation still feels prompt. Tuned up
-// from 3 s once Blossom deletePreviousBlob landed — every save also
-// burns a DELETE round-trip, so fewer saves is cheaper.
-const DEBOUNCE_MS = 10_000;
+// enough that a save lands almost as soon as the user pauses. This was
+// 10 s while every save re-downloaded and NIP-44-decrypted the remote
+// snapshot for the shrink-guard; the same-sha cache in lib/backup.ts
+// removed that cost, and the retention DELETE runs fire-and-forget at
+// idle, so a shorter window no longer multiplies per-save overhead.
+const DEBOUNCE_MS = 3_000;
 const RETRY_AFTER_FAILURE_MS = 30_000;
 const LAST_BACKUP_KEY = "nostr-planner-last-autobackup";
 
@@ -78,7 +80,7 @@ export function useAutoBackup(): {
   /** User-chosen: throw away local edits, reload the remote snapshot as current. */
   discardLocalChanges: () => Promise<void>;
 } {
-  const { pubkey, relays, signEvent, publishEvent, signer } = useNostr();
+  const { pubkey, relays, signEvent, publishEvent, signer, reviveSigner } = useNostr();
   const {
     events, calendars, eventsLoading, lastRemoteSha, setLastRemoteSha, eventTombstones,
     applySnapshot: applyCalendarSnapshot,
@@ -122,13 +124,13 @@ export function useAutoBackup(): {
 
   // Stable refs so the stable-identity doBackup always sees latest state.
   const stateRef = useRef({
-    pubkey, relays, signEvent, publishEvent, signer,
+    pubkey, relays, signEvent, publishEvent, signer, reviveSigner,
     getSettings, autoBackup, lastRemoteSha, setLastRemoteSha,
     events, calendars, habits, completions, lists,
     eventTombstones, habitTombstones, listTombstones,
   });
   stateRef.current = {
-    pubkey, relays, signEvent, publishEvent, signer,
+    pubkey, relays, signEvent, publishEvent, signer, reviveSigner,
     getSettings, autoBackup, lastRemoteSha, setLastRemoteSha,
     events, calendars, habits, completions, lists,
     eventTombstones, habitTombstones, listTombstones,
@@ -204,7 +206,15 @@ export function useAutoBackup(): {
 
   const doBackup = useCallback(async () => {
     const s = stateRef.current;
-    if (!s.pubkey || !s.signer?.nip44) return;
+    if (!s.pubkey) return;
+    if (!s.signer?.nip44) {
+      // No usable signer right now — commonly the reconnect ladder is
+      // mid-flight after a signer revival. Dropping the save here left
+      // the phase stuck "dirty" until the next edit; instead keep the
+      // save queued so it fires once the fresh signer lands.
+      if (s.autoBackup) scheduleSave(RETRY_AFTER_FAILURE_MS);
+      return;
+    }
     if (backingUpRef.current) {
       // Another save is already uploading. Remember that something new
       // needs to go out and bail; we'll fire one more save when the
@@ -277,6 +287,14 @@ export function useAutoBackup(): {
       } else {
         const msg = err instanceof Error ? err.message : String(err);
         log.error("save failed:", msg);
+        // Dead NIP-46 signer ("this signer is not open anymore, create a
+        // new one" from nostr-tools) — retrying against it is futile.
+        // Kick the reconnect ladder; the 30 s retry below then runs
+        // against the fresh signer once the ladder lands.
+        if (/not open anymore/i.test(msg)) {
+          log.warn("dead bunker signer detected — requesting revival");
+          s.reviveSigner();
+        }
         setLastError(msg);
         setPhase("error");
         scheduleSave(RETRY_AFTER_FAILURE_MS);

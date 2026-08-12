@@ -115,7 +115,10 @@ export const DEFAULT_RELAYS = [...SUGGESTED_RELAYS];
  *  in Settings for redundancy. */
 export const SUGGESTED_BLOSSOM_SERVERS = [
   "https://nostr.download",
-  "https://blossom.f7z.io",
+  // blossom.f7z.io was here but went dark (every upload aborted on
+  // timeout, 2026-08) — replaced with ditto's Blossom server, which the
+  // user already writes to via nsyte and which serves proper 404s+CORS.
+  "https://blossom.ditto.pub",
 ];
 
 /** Supported recurrence frequencies. `bi-weekly` is stored as iCal
