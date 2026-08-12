@@ -1,0 +1,17 @@
+{
+  "$schema": "https://nsyte.run/schemas/config.schema.json",
+  "bunkerPubkey": "7f1d5bc946b0b9f026a76873e032d970fa9e2c74a9244fe6436364d2ef73391c",
+  "relays": [
+    "wss://relay.jbnco.co",
+    "wss://relay.ditto.pub",
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+    "wss://relay.damus.io"
+  ],
+  "servers": [
+    "https://blossom.jbnco.co"
+  ],
+  "id": "nplanner",
+  "title": "Nostr Planner",
+  "description": "A personal planner and calendar built on Nostr — no accounts, no servers, just your keys"
+}
